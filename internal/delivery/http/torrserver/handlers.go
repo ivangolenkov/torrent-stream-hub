@@ -25,6 +25,7 @@ func NewTorrServerHandler(uc *usecase.TorrentUseCase) *TorrServerHandler {
 func (h *TorrServerHandler) RegisterRoutes(r chi.Router) {
 	r.Get("/echo", h.Echo)
 	r.Post("/torrents", h.Torrents)
+	r.Post("/torrent/upload", h.UploadTorrent)
 	r.Post("/settings", h.Settings)
 	r.Post("/viewed", h.Viewed)
 	r.Get("/playlist", h.Playlist)
@@ -78,6 +79,30 @@ func (h *TorrServerHandler) Settings(w http.ResponseWriter, r *http.Request) {
 	// Stub for back-compatibility
 	w.Header().Set("Content-Type", "application/json")
 	w.Write([]byte(`{}`))
+}
+
+func (h *TorrServerHandler) UploadTorrent(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseMultipartForm(32 << 20); err != nil {
+		http.Error(w, "Invalid multipart form", http.StatusBadRequest)
+		return
+	}
+
+	file, _, err := r.FormFile("file")
+	if err != nil {
+		http.Error(w, "Torrent file is required", http.StatusBadRequest)
+		return
+	}
+	defer file.Close()
+
+	t, err := h.uc.AddTorrentFile(file)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusAccepted)
+	json.NewEncoder(w).Encode(t)
 }
 
 func (h *TorrServerHandler) Viewed(w http.ResponseWriter, r *http.Request) {

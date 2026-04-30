@@ -11,6 +11,7 @@ export default defineConfig({
   server: {
     proxy: {
       '/api': 'http://localhost:8080',
+      '/torrent': 'http://localhost:8080',
       '/stream': 'http://localhost:8080',
       '/play': 'http://localhost:8080'
     }

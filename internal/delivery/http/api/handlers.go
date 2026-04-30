@@ -64,7 +64,7 @@ func (h *APIHandler) AddTorrent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.WriteHeader(http.StatusOK)
+	w.WriteHeader(http.StatusAccepted)
 }
 
 type ActionReq struct {

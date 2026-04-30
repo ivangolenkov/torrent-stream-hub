@@ -2,6 +2,9 @@ package engine
 
 import (
 	"fmt"
+	"io"
+	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -9,6 +12,7 @@ import (
 	"torrent-stream-hub/internal/models"
 
 	"github.com/anacrolix/torrent"
+	"github.com/anacrolix/torrent/metainfo"
 	"github.com/anacrolix/torrent/storage"
 	"golang.org/x/time/rate"
 )
@@ -91,16 +95,34 @@ func (e *Engine) AddMagnet(magnet string) (*models.Torrent, error) {
 	if err != nil {
 		return nil, err
 	}
-	<-t.GotInfo() // wait for metadata
+
+	return e.addTorrent(t)
+}
+
+func (e *Engine) AddTorrentFile(r io.Reader) (*models.Torrent, error) {
+	metaInfo, err := metainfo.Load(r)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read torrent file: %w", err)
+	}
+
+	t, err := e.client.AddTorrent(metaInfo)
+	if err != nil {
+		return nil, err
+	}
+
+	return e.addTorrent(t)
+}
+
+func (e *Engine) addTorrent(t *torrent.Torrent) (*models.Torrent, error) {
+	hash := t.InfoHash().HexString()
 
 	e.mu.Lock()
-	defer e.mu.Unlock()
-
-	e.managedTorrents[t.InfoHash().HexString()] = &ManagedTorrent{
+	e.managedTorrents[hash] = &ManagedTorrent{
 		t:     t,
 		state: models.StateQueued, // initially queued, resourceMonitor will start it
 		err:   models.ErrNone,
 	}
+	e.mu.Unlock()
 
 	return e.mapTorrent(t, models.StateQueued, models.ErrNone), nil
 }
@@ -114,11 +136,6 @@ func (e *Engine) Pause(hash string) error {
 		return fmt.Errorf("torrent not found: %s", hash)
 	}
 
-	mt.t.Drop() // Stops downloading, but keeps it in client. Wait, no, Drop removes it.
-	// To pause, we should cancel pieces or set priority to None.
-	// anacrolix/torrent provides CancelPieces or dropping. Wait, setting all files priority to 0 pauses.
-	mt.t.DownloadAll() // this resumes.
-	// Let's implement real pause by dropping pieces
 	for _, f := range mt.t.Files() {
 		f.SetPriority(torrent.PiecePriorityNone)
 	}
@@ -177,7 +194,7 @@ func (e *Engine) mapTorrent(t *torrent.Torrent, state models.TorrentState, errRe
 		progress = float64(downloaded) / float64(size) * 100
 	}
 
-	return &models.Torrent{
+	model := &models.Torrent{
 		Hash:       t.InfoHash().HexString(),
 		Name:       t.Name(),
 		Size:       size,
@@ -185,6 +202,30 @@ func (e *Engine) mapTorrent(t *torrent.Torrent, state models.TorrentState, errRe
 		Progress:   progress,
 		State:      state,
 		Error:      errReason,
+	}
+
+	if info != nil {
+		for i, file := range t.Files() {
+			model.Files = append(model.Files, &models.File{
+				Index:      i,
+				Path:       file.DisplayPath(),
+				Size:       file.Length(),
+				Downloaded: file.BytesCompleted(),
+				Priority:   models.FilePriority(file.Priority()),
+				IsMedia:    isMediaFile(file.DisplayPath()),
+			})
+		}
+	}
+
+	return model
+}
+
+func isMediaFile(filePath string) bool {
+	switch strings.ToLower(filepath.Ext(filePath)) {
+	case ".mp4", ".mkv", ".avi", ".mov", ".m4v", ".webm", ".ts":
+		return true
+	default:
+		return false
 	}
 }
 
@@ -224,7 +265,7 @@ func (e *Engine) resourceMonitor() {
 			if mt.state == models.StateDownloading {
 				activeCount++
 				// Check if finished
-				if mt.t.BytesCompleted() == mt.t.Info().TotalLength() {
+				if info := mt.t.Info(); info != nil && mt.t.BytesCompleted() == info.TotalLength() {
 					mt.state = models.StateSeeding
 					activeCount--
 				}

@@ -105,7 +105,7 @@ func (r *TorrentRepo) GetAllTorrents() ([]*models.Torrent, error) {
 	}
 	defer rows.Close()
 
-	var torrents []*models.Torrent
+	torrents := make([]*models.Torrent, 0)
 	for rows.Next() {
 		t := &models.Torrent{}
 		var stateStr, errorStr string

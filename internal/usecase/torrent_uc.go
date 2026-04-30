@@ -2,6 +2,7 @@ package usecase
 
 import (
 	"context"
+	"io"
 	"torrent-stream-hub/internal/engine"
 	"torrent-stream-hub/internal/models"
 	"torrent-stream-hub/internal/repository"
@@ -31,6 +32,19 @@ func (uc *TorrentUseCase) AddMagnet(magnet string) (*models.Torrent, error) {
 	if err := uc.repo.SaveTorrent(t); err != nil {
 		// Log error, but don't fail the add operation
 		// A proper logger should be used here
+	}
+
+	return t, nil
+}
+
+func (uc *TorrentUseCase) AddTorrentFile(r io.Reader) (*models.Torrent, error) {
+	t, err := uc.engine.AddTorrentFile(r)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := uc.repo.SaveTorrent(t); err != nil {
+		// Keep the torrent in the engine even if DB persistence fails.
 	}
 
 	return t, nil

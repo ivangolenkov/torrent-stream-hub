@@ -1,8 +1,10 @@
 package torrserver
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -46,5 +48,31 @@ func TestSettingsHandler(t *testing.T) {
 	expected := `{}`
 	if rr.Body.String() != expected {
 		t.Errorf("Expected body %s, got %s", expected, rr.Body.String())
+	}
+}
+
+func TestTorrentsInvalidJSONReturnsJSONError(t *testing.T) {
+	h := NewTorrServerHandler(nil)
+
+	req := httptest.NewRequest(http.MethodPost, "/torrents", strings.NewReader("{"))
+	rr := httptest.NewRecorder()
+
+	h.Torrents(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("expected status %d, got %d", http.StatusBadRequest, rr.Code)
+	}
+	if contentType := rr.Header().Get("Content-Type"); !strings.HasPrefix(contentType, "application/json") {
+		t.Fatalf("expected JSON content type, got %q", contentType)
+	}
+
+	var body struct {
+		Error string `json:"error"`
+	}
+	if err := json.NewDecoder(rr.Body).Decode(&body); err != nil {
+		t.Fatalf("failed to decode response body: %v", err)
+	}
+	if body.Error != "Invalid JSON" {
+		t.Fatalf("expected Invalid JSON error, got %q", body.Error)
 	}
 }

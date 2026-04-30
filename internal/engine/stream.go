@@ -119,7 +119,7 @@ func (sm *StreamManager) setSequentialMode(hash string, fileIndex int, enable bo
 	sm.engine.mu.RUnlock()
 
 	if !ok {
-		return fmt.Errorf("torrent not found: %s", hash)
+		return TorrentNotFoundError{Hash: hash}
 	}
 
 	files := mt.t.Files()

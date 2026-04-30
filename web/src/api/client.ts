@@ -5,7 +5,7 @@ const API_BASE = '/api/v1';
 export const apiClient = {
   async getTorrents(): Promise<Torrent[]> {
     const response = await fetch(`${API_BASE}/torrents`);
-    if (!response.ok) throw new Error('Failed to fetch torrents');
+    if (!response.ok) throw new Error(await readError(response, 'Failed to fetch torrents'));
     const data = await response.json();
     return Array.isArray(data) ? data : [];
   },
@@ -17,7 +17,7 @@ export const apiClient = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ link: normalizedLink, save_path: savePath, sequential })
     });
-    if (!response.ok) throw new Error(await response.text() || 'Failed to add torrent');
+    if (!response.ok) throw new Error(await readError(response, 'Failed to add torrent'));
   },
 
   async uploadTorrent(file: globalThis.File): Promise<void> {
@@ -28,7 +28,7 @@ export const apiClient = {
       method: 'POST',
       body: formData
     });
-    if (!response.ok) throw new Error(await response.text() || 'Failed to upload torrent file');
+    if (!response.ok) throw new Error(await readError(response, 'Failed to upload torrent file'));
   },
 
   async action(hash: string, action: 'pause' | 'resume' | 'delete' | 'recheck', deleteFiles: boolean = false): Promise<void> {
@@ -37,16 +37,30 @@ export const apiClient = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ action, delete_files: deleteFiles })
     });
-    if (!response.ok) throw new Error(`Failed to perform action: ${action}`);
+    if (!response.ok) throw new Error(await readError(response, `Failed to perform action: ${action}`));
   },
 
   async getFiles(hash: string): Promise<File[]> {
     const response = await fetch(`${API_BASE}/torrent/${hash}/files`);
-    if (!response.ok) throw new Error('Failed to fetch files');
+    if (!response.ok) throw new Error(await readError(response, 'Failed to fetch files'));
     const data = await response.json();
     return Array.isArray(data) ? data : [];
   }
 };
+
+async function readError(response: Response, fallback: string) {
+  const text = await response.text().catch(() => '');
+  if (!text) return fallback;
+
+  try {
+    const data = JSON.parse(text);
+    if (data?.error) return data.error;
+  } catch {
+    return text;
+  }
+
+  return fallback;
+}
 
 function normalizeTorrentLink(link: string) {
   const trimmed = link.trim();

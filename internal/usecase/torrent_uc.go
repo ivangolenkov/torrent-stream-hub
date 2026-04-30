@@ -2,6 +2,8 @@ package usecase
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"torrent-stream-hub/internal/engine"
 	"torrent-stream-hub/internal/models"
@@ -9,6 +11,20 @@ import (
 
 	"github.com/anacrolix/torrent"
 )
+
+var ErrTorrentNotFound = errors.New("torrent not found")
+
+type TorrentNotFoundError struct {
+	Hash string
+}
+
+func (e TorrentNotFoundError) Error() string {
+	return fmt.Sprintf("torrent not found: %s", e.Hash)
+}
+
+func (e TorrentNotFoundError) Is(target error) bool {
+	return target == ErrTorrentNotFound
+}
 
 type TorrentUseCase struct {
 	engine *engine.Engine
@@ -51,7 +67,39 @@ func (uc *TorrentUseCase) AddTorrentFile(r io.Reader) (*models.Torrent, error) {
 }
 
 func (uc *TorrentUseCase) GetAllTorrents() ([]*models.Torrent, error) {
-	return uc.repo.GetAllTorrents()
+	dbTorrents, err := uc.repo.GetAllTorrents()
+	if err != nil {
+		return nil, err
+	}
+
+	engineTorrents := uc.engine.GetAllTorrents()
+	if len(engineTorrents) == 0 {
+		return dbTorrents, nil
+	}
+
+	engineByHash := make(map[string]*models.Torrent, len(engineTorrents))
+	for _, t := range engineTorrents {
+		engineByHash[t.Hash] = t
+	}
+
+	merged := make([]*models.Torrent, 0, len(dbTorrents)+len(engineTorrents))
+	seen := make(map[string]bool, len(dbTorrents)+len(engineTorrents))
+	for _, dbT := range dbTorrents {
+		if engineT, ok := engineByHash[dbT.Hash]; ok {
+			merged = append(merged, engineT)
+		} else {
+			merged = append(merged, dbT)
+		}
+		seen[dbT.Hash] = true
+	}
+
+	for _, engineT := range engineTorrents {
+		if !seen[engineT.Hash] {
+			merged = append(merged, engineT)
+		}
+	}
+
+	return merged, nil
 }
 
 func (uc *TorrentUseCase) GetTorrent(hash string) (*models.Torrent, error) {
@@ -59,32 +107,54 @@ func (uc *TorrentUseCase) GetTorrent(hash string) (*models.Torrent, error) {
 }
 
 func (uc *TorrentUseCase) Pause(hash string) error {
-	if err := uc.engine.Pause(hash); err != nil {
+	t, err := uc.repo.GetTorrent(hash)
+	if err != nil {
+		return err
+	}
+	if t == nil {
+		return TorrentNotFoundError{Hash: hash}
+	}
+
+	if err := uc.engine.Pause(hash); err != nil && !errors.Is(err, engine.ErrTorrentNotFound) {
 		return err
 	}
 
-	t, err := uc.repo.GetTorrent(hash)
-	if err == nil && t != nil {
-		t.State = models.StatePaused
-		_ = uc.repo.SaveTorrent(t)
-	}
-	return nil
+	t.State = models.StatePaused
+	return uc.repo.SaveTorrent(t)
 }
 
 func (uc *TorrentUseCase) Resume(hash string) error {
-	if err := uc.engine.Resume(hash); err != nil {
+	t, err := uc.repo.GetTorrent(hash)
+	if err != nil {
 		return err
 	}
-
-	t, err := uc.repo.GetTorrent(hash)
-	if err == nil && t != nil {
-		t.State = models.StateQueued
-		_ = uc.repo.SaveTorrent(t)
+	if t == nil {
+		return TorrentNotFoundError{Hash: hash}
 	}
-	return nil
+
+	if err := uc.engine.Resume(hash); err != nil {
+		if !errors.Is(err, engine.ErrTorrentNotFound) {
+			return err
+		}
+		if _, err := uc.engine.AddInfoHash(hash); err != nil {
+			return err
+		}
+	}
+
+	t.State = models.StateQueued
+	t.Error = models.ErrNone
+	return uc.repo.SaveTorrent(t)
 }
 
 func (uc *TorrentUseCase) Delete(hash string, deleteFiles bool) error {
+	t, err := uc.repo.GetTorrent(hash)
+	if err != nil {
+		return err
+	}
+	if t == nil {
+		return TorrentNotFoundError{Hash: hash}
+	}
+
 	if err := uc.engine.Delete(hash); err != nil {
 		return err
 	}
@@ -100,10 +170,44 @@ func (uc *TorrentUseCase) Delete(hash string, deleteFiles bool) error {
 	return nil
 }
 
+func (uc *TorrentUseCase) RestoreTorrents() error {
+	torrents, err := uc.repo.GetAllTorrents()
+	if err != nil {
+		return err
+	}
+
+	var restoreErr error
+	for _, t := range torrents {
+		switch t.State {
+		case models.StatePaused, models.StateError, models.StateMissingFiles:
+			continue
+		}
+
+		if _, err := uc.engine.AddInfoHash(t.Hash); err != nil {
+			restoreErr = errors.Join(restoreErr, fmt.Errorf("restore torrent %s: %w", t.Hash, err))
+		}
+	}
+
+	return restoreErr
+}
+
 func (uc *TorrentUseCase) AddStream(ctx context.Context, hash string, index int) error {
-	return uc.engine.StreamManager().AddStream(ctx, hash, index)
+	if err := uc.engine.StreamManager().AddStream(ctx, hash, index); err != nil {
+		if errors.Is(err, engine.ErrTorrentNotFound) {
+			return TorrentNotFoundError{Hash: hash}
+		}
+		return err
+	}
+	return nil
 }
 
 func (uc *TorrentUseCase) GetTorrentFile(hash string, index int) (*torrent.File, error) {
-	return uc.engine.GetTorrentFile(hash, index)
+	f, err := uc.engine.GetTorrentFile(hash, index)
+	if err != nil {
+		if errors.Is(err, engine.ErrTorrentNotFound) {
+			return nil, TorrentNotFoundError{Hash: hash}
+		}
+		return nil, err
+	}
+	return f, nil
 }

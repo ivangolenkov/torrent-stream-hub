@@ -32,3 +32,10 @@
 ## Дополнение: исправление добавления торрентов
 1. `/api/v1/torrent/add` теперь возвращает `202 Accepted`, так как добавление magnet-ссылки регистрируется сразу, без блокировки HTTP-запроса на ожидании metadata от пиров.
 2. Реализован endpoint `/torrent/upload` для загрузки `.torrent` файлов через `multipart/form-data`.
+
+## Дополнение: исправление action и JSON-ошибок
+1. Исправлен сценарий, когда torrent есть в SQLite/UI, но отсутствует в in-memory engine: `pause` больше не возвращает `500 torrent not found`, а корректно переводит запись в `Paused`.
+2. `resume` для DB-only торрента восстанавливает torrent в engine по info hash и переводит его обратно в очередь запуска.
+3. Очередь engine теперь запускается сразу при добавлении/возобновлении, а не только на следующем тике фонового monitor; magnet без metadata переводится в `Downloading` без вызова `DownloadAll()` до получения metadata, чтобы не было panic.
+4. REST API и TorrServer-compatible handlers теперь возвращают ошибки в JSON-формате `{"error":"..."}` вместо plain text `http.Error`.
+5. Добавлены тесты на JSON-ошибки API/TorrServer и на action-поведение для DB-only торрентов.

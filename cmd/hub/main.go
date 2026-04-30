@@ -40,6 +40,9 @@ func main() {
 
 	repo := repository.NewTorrentRepo(db)
 	uc := usecase.NewTorrentUseCase(eng, repo)
+	if err := uc.RestoreTorrents(); err != nil {
+		log.Printf("failed to restore persisted torrents: %v", err)
+	}
 	syncWorker := usecase.NewSyncWorker(eng, repo)
 	go syncWorker.Start()
 

@@ -2,9 +2,11 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 
+	"torrent-stream-hub/internal/delivery/http/response"
 	"torrent-stream-hub/internal/usecase"
 
 	"github.com/go-chi/chi/v5"
@@ -33,11 +35,10 @@ func (h *APIHandler) RegisterRoutes(r chi.Router) {
 func (h *APIHandler) GetAllTorrents(w http.ResponseWriter, r *http.Request) {
 	torrents, err := h.uc.GetAllTorrents()
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		response.Error(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(torrents)
+	response.JSON(w, http.StatusOK, torrents)
 }
 
 type AddTorrentReq struct {
@@ -49,22 +50,22 @@ type AddTorrentReq struct {
 func (h *APIHandler) AddTorrent(w http.ResponseWriter, r *http.Request) {
 	var req AddTorrentReq
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+		response.Error(w, http.StatusBadRequest, "Invalid JSON")
 		return
 	}
 
 	if req.Link == "" {
-		http.Error(w, "Link is required", http.StatusBadRequest)
+		response.Error(w, http.StatusBadRequest, "Link is required")
 		return
 	}
 
-	_, err := h.uc.AddMagnet(req.Link)
+	t, err := h.uc.AddMagnet(req.Link)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		response.Error(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
-	w.WriteHeader(http.StatusAccepted)
+	response.JSON(w, http.StatusAccepted, t)
 }
 
 type ActionReq struct {
@@ -76,7 +77,7 @@ func (h *APIHandler) TorrentAction(w http.ResponseWriter, r *http.Request) {
 	hash := chi.URLParam(r, "hash")
 	var req ActionReq
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+		response.Error(w, http.StatusBadRequest, "Invalid JSON")
 		return
 	}
 
@@ -91,33 +92,36 @@ func (h *APIHandler) TorrentAction(w http.ResponseWriter, r *http.Request) {
 	case "recheck":
 		// TODO: implement recheck
 	default:
-		http.Error(w, "Unknown action", http.StatusBadRequest)
+		response.Error(w, http.StatusBadRequest, "Unknown action")
 		return
 	}
 
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		if errors.Is(err, usecase.ErrTorrentNotFound) {
+			response.Error(w, http.StatusNotFound, err.Error())
+			return
+		}
+		response.Error(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
-	w.WriteHeader(http.StatusOK)
+	response.Status(w, http.StatusOK, "ok")
 }
 
 func (h *APIHandler) GetTorrentFiles(w http.ResponseWriter, r *http.Request) {
 	hash := chi.URLParam(r, "hash")
 	t, err := h.uc.GetTorrent(hash)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		response.Error(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
 	if t == nil {
-		http.Error(w, "Torrent not found", http.StatusNotFound)
+		response.Error(w, http.StatusNotFound, "Torrent not found")
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(t.Files)
+	response.JSON(w, http.StatusOK, t.Files)
 }
 
 // SSEEvents handles Server-Sent Events connection for UI updates

@@ -2,11 +2,13 @@ package torrserver
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
 	"time"
 
+	"torrent-stream-hub/internal/delivery/http/response"
 	"torrent-stream-hub/internal/usecase"
 
 	"github.com/go-chi/chi/v5"
@@ -46,33 +48,31 @@ type TorrentsReq struct {
 func (h *TorrServerHandler) Torrents(w http.ResponseWriter, r *http.Request) {
 	var req TorrentsReq
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+		response.Error(w, http.StatusBadRequest, "Invalid JSON")
 		return
 	}
-
-	w.Header().Set("Content-Type", "application/json")
 
 	if req.Action == "list" {
 		torrents, err := h.uc.GetAllTorrents()
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			response.Error(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		json.NewEncoder(w).Encode(torrents)
+		response.JSON(w, http.StatusOK, torrents)
 		return
 	}
 
 	if req.Action == "add" {
 		t, err := h.uc.AddMagnet(req.Link)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			response.Error(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		json.NewEncoder(w).Encode(t)
+		response.JSON(w, http.StatusOK, t)
 		return
 	}
 
-	http.Error(w, "Unknown action", http.StatusBadRequest)
+	response.Error(w, http.StatusBadRequest, "Unknown action")
 }
 
 func (h *TorrServerHandler) Settings(w http.ResponseWriter, r *http.Request) {
@@ -83,26 +83,24 @@ func (h *TorrServerHandler) Settings(w http.ResponseWriter, r *http.Request) {
 
 func (h *TorrServerHandler) UploadTorrent(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseMultipartForm(32 << 20); err != nil {
-		http.Error(w, "Invalid multipart form", http.StatusBadRequest)
+		response.Error(w, http.StatusBadRequest, "Invalid multipart form")
 		return
 	}
 
 	file, _, err := r.FormFile("file")
 	if err != nil {
-		http.Error(w, "Torrent file is required", http.StatusBadRequest)
+		response.Error(w, http.StatusBadRequest, "Torrent file is required")
 		return
 	}
 	defer file.Close()
 
 	t, err := h.uc.AddTorrentFile(file)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		response.Error(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusAccepted)
-	json.NewEncoder(w).Encode(t)
+	response.JSON(w, http.StatusAccepted, t)
 }
 
 func (h *TorrServerHandler) Viewed(w http.ResponseWriter, r *http.Request) {
@@ -115,7 +113,7 @@ func (h *TorrServerHandler) Playlist(w http.ResponseWriter, r *http.Request) {
 	hash := r.URL.Query().Get("hash")
 	t, err := h.uc.GetTorrent(hash)
 	if err != nil || t == nil {
-		http.Error(w, "Torrent not found", http.StatusNotFound)
+		response.Error(w, http.StatusNotFound, "Torrent not found")
 		return
 	}
 
@@ -141,7 +139,7 @@ func (h *TorrServerHandler) Stream(w http.ResponseWriter, r *http.Request) {
 	indexStr := r.URL.Query().Get("index")
 	index, err := strconv.Atoi(indexStr)
 	if err != nil {
-		http.Error(w, "Invalid index", http.StatusBadRequest)
+		response.Error(w, http.StatusBadRequest, "Invalid index")
 		return
 	}
 
@@ -153,7 +151,7 @@ func (h *TorrServerHandler) PlayAlias(w http.ResponseWriter, r *http.Request) {
 	idStr := chi.URLParam(r, "id")
 	index, err := strconv.Atoi(idStr)
 	if err != nil {
-		http.Error(w, "Invalid id", http.StatusBadRequest)
+		response.Error(w, http.StatusBadRequest, "Invalid id")
 		return
 	}
 
@@ -164,7 +162,12 @@ func (h *TorrServerHandler) serveStream(w http.ResponseWriter, r *http.Request, 
 	// 1. Get file from engine
 	file, err := h.uc.GetTorrentFile(hash, index)
 	if err != nil {
-		http.Error(w, "File not found", http.StatusNotFound)
+		status := http.StatusNotFound
+		message := "File not found"
+		if !errors.Is(err, usecase.ErrTorrentNotFound) {
+			message = err.Error()
+		}
+		response.Error(w, status, message)
 		return
 	}
 

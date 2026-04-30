@@ -17,7 +17,7 @@ func (e *Engine) GetCacheStatus(hash string, fileIndex int, currentOffset int64)
 	e.mu.RUnlock()
 
 	if !ok {
-		return nil, fmt.Errorf("torrent not found: %s", hash)
+		return nil, TorrentNotFoundError{Hash: hash}
 	}
 
 	files := mt.t.Files()

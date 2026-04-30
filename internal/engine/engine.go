@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"path/filepath"
@@ -16,6 +17,20 @@ import (
 	"github.com/anacrolix/torrent/storage"
 	"golang.org/x/time/rate"
 )
+
+var ErrTorrentNotFound = errors.New("torrent not found")
+
+type TorrentNotFoundError struct {
+	Hash string
+}
+
+func (e TorrentNotFoundError) Error() string {
+	return fmt.Sprintf("torrent not found: %s", e.Hash)
+}
+
+func (e TorrentNotFoundError) Is(target error) bool {
+	return target == ErrTorrentNotFound
+}
 
 type Engine struct {
 	client *torrent.Client
@@ -75,7 +90,7 @@ func (e *Engine) GetTorrentFile(hash string, index int) (*torrent.File, error) {
 
 	mt, ok := e.managedTorrents[hash]
 	if !ok {
-		return nil, fmt.Errorf("torrent not found: %s", hash)
+		return nil, TorrentNotFoundError{Hash: hash}
 	}
 
 	files := mt.t.Files()
@@ -99,6 +114,10 @@ func (e *Engine) AddMagnet(magnet string) (*models.Torrent, error) {
 	return e.addTorrent(t)
 }
 
+func (e *Engine) AddInfoHash(hash string) (*models.Torrent, error) {
+	return e.AddMagnet("magnet:?xt=urn:btih:" + strings.TrimSpace(hash))
+}
+
 func (e *Engine) AddTorrentFile(r io.Reader) (*models.Torrent, error) {
 	metaInfo, err := metainfo.Load(r)
 	if err != nil {
@@ -117,14 +136,23 @@ func (e *Engine) addTorrent(t *torrent.Torrent) (*models.Torrent, error) {
 	hash := t.InfoHash().HexString()
 
 	e.mu.Lock()
-	e.managedTorrents[hash] = &ManagedTorrent{
+	if mt, ok := e.managedTorrents[hash]; ok {
+		e.mu.Unlock()
+		return e.mapTorrent(mt.t, mt.state, mt.err), nil
+	}
+
+	mt := &ManagedTorrent{
 		t:     t,
 		state: models.StateQueued, // initially queued, resourceMonitor will start it
 		err:   models.ErrNone,
 	}
+	e.managedTorrents[hash] = mt
+	e.manageResourcesLocked()
+	state := mt.state
+	errReason := mt.err
 	e.mu.Unlock()
 
-	return e.mapTorrent(t, models.StateQueued, models.ErrNone), nil
+	return e.mapTorrent(t, state, errReason), nil
 }
 
 func (e *Engine) Pause(hash string) error {
@@ -133,7 +161,7 @@ func (e *Engine) Pause(hash string) error {
 
 	mt, ok := e.managedTorrents[hash]
 	if !ok {
-		return fmt.Errorf("torrent not found: %s", hash)
+		return TorrentNotFoundError{Hash: hash}
 	}
 
 	for _, f := range mt.t.Files() {
@@ -149,10 +177,11 @@ func (e *Engine) Resume(hash string) error {
 
 	mt, ok := e.managedTorrents[hash]
 	if !ok {
-		return fmt.Errorf("torrent not found: %s", hash)
+		return TorrentNotFoundError{Hash: hash}
 	}
 
 	mt.state = models.StateQueued // put to queue, let resource monitor handle it
+	e.manageResourcesLocked()
 	return nil
 }
 
@@ -234,58 +263,69 @@ func (e *Engine) resourceMonitor() {
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 
-	minFreeBytes := uint64(e.cfg.MinFreeSpaceGB) * 1024 * 1024 * 1024
+	e.mu.Lock()
+	e.manageResourcesLocked()
+	e.mu.Unlock()
 
 	for range ticker.C {
 		e.mu.Lock()
+		e.manageResourcesLocked()
+		e.mu.Unlock()
+	}
+}
 
-		freeSpace, err := GetFreeSpace(e.cfg.DownloadDir)
-		diskFull := err == nil && freeSpace < minFreeBytes
+func (e *Engine) manageResourcesLocked() {
+	minFreeBytes := uint64(e.cfg.MinFreeSpaceGB) * 1024 * 1024 * 1024
 
-		activeCount := 0
+	freeSpace, err := GetFreeSpace(e.cfg.DownloadDir)
+	diskFull := err == nil && freeSpace < minFreeBytes
 
-		for _, mt := range e.managedTorrents {
-			if diskFull {
-				if mt.state == models.StateDownloading {
-					mt.state = models.StateDiskFull
-					mt.err = models.ErrDiskFull
-					for _, f := range mt.t.Files() {
-						f.SetPriority(torrent.PiecePriorityNone)
-					}
-				}
-				continue
-			}
+	activeCount := 0
 
-			// If disk space recovered, queued/diskfull can be started
-			if mt.state == models.StateDiskFull {
-				mt.state = models.StateQueued
-				mt.err = models.ErrNone
-			}
-
+	for _, mt := range e.managedTorrents {
+		if diskFull {
 			if mt.state == models.StateDownloading {
-				activeCount++
+				mt.state = models.StateDiskFull
+				mt.err = models.ErrDiskFull
+				for _, f := range mt.t.Files() {
+					f.SetPriority(torrent.PiecePriorityNone)
+				}
+			}
+			continue
+		}
+
+		// If disk space recovered, queued/diskfull can be started
+		if mt.state == models.StateDiskFull {
+			mt.state = models.StateQueued
+			mt.err = models.ErrNone
+		}
+
+		if mt.state == models.StateDownloading {
+			activeCount++
+			if info := mt.t.Info(); info != nil {
+				mt.t.DownloadAll()
 				// Check if finished
-				if info := mt.t.Info(); info != nil && mt.t.BytesCompleted() == info.TotalLength() {
+				if mt.t.BytesCompleted() == info.TotalLength() {
 					mt.state = models.StateSeeding
 					activeCount--
 				}
 			}
 		}
+	}
 
-		if !diskFull {
-			// Start queued torrents up to max limit
-			for _, mt := range e.managedTorrents {
-				if activeCount >= e.cfg.MaxActiveDownloads {
-					break
-				}
-				if mt.state == models.StateQueued {
-					mt.state = models.StateDownloading
+	if !diskFull {
+		// Start queued torrents up to max limit
+		for _, mt := range e.managedTorrents {
+			if activeCount >= e.cfg.MaxActiveDownloads {
+				break
+			}
+			if mt.state == models.StateQueued {
+				mt.state = models.StateDownloading
+				if mt.t.Info() != nil {
 					mt.t.DownloadAll() // start downloading all files (rarest-first by default)
-					activeCount++
 				}
+				activeCount++
 			}
 		}
-
-		e.mu.Unlock()
 	}
 }

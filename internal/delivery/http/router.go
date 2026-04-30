@@ -4,8 +4,10 @@ import (
 	"errors"
 	"io"
 	"io/fs"
+	"log"
 	"net/http"
 	"path"
+	"runtime/debug"
 	"strings"
 
 	"torrent-stream-hub/internal/delivery/http/api"
@@ -24,7 +26,7 @@ func NewRouter(uc *usecase.TorrentUseCase, sw *usecase.SyncWorker, staticFS ...h
 	r.Use(middleware.RequestID)
 	r.Use(middleware.RealIP)
 	r.Use(middleware.Logger)
-	r.Use(middleware.Recoverer)
+	r.Use(jsonRecoverer)
 
 	// Configure CORS to allow all origins as per requirements for Smart TV/Local network
 	r.Use(cors.Handler(cors.Options{
@@ -55,6 +57,19 @@ func NewRouter(uc *usecase.TorrentUseCase, sw *usecase.SyncWorker, staticFS ...h
 	}
 
 	return r
+}
+
+func jsonRecoverer(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() {
+			if rec := recover(); rec != nil {
+				log.Printf("panic serving %s %s: %v\n%s", r.Method, r.URL.Path, rec, debug.Stack())
+				response.Error(w, http.StatusInternalServerError, "internal server error")
+			}
+		}()
+
+		next.ServeHTTP(w, r)
+	})
 }
 
 func spaFallback(staticFS http.FileSystem, fileServer http.Handler) http.HandlerFunc {

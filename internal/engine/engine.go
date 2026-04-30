@@ -93,6 +93,10 @@ func (e *Engine) GetTorrentFile(hash string, index int) (*torrent.File, error) {
 		return nil, TorrentNotFoundError{Hash: hash}
 	}
 
+	if mt.t.Info() == nil {
+		return nil, fmt.Errorf("torrent metadata is not available yet")
+	}
+
 	files := mt.t.Files()
 	if index < 0 || index >= len(files) {
 		return nil, fmt.Errorf("file index out of bounds")
@@ -111,7 +115,12 @@ func (e *Engine) AddMagnet(magnet string) (*models.Torrent, error) {
 		return nil, err
 	}
 
-	return e.addTorrent(t)
+	model, err := e.addTorrent(t)
+	if err != nil {
+		return nil, err
+	}
+	model.SourceURI = magnet
+	return model, nil
 }
 
 func (e *Engine) AddInfoHash(hash string) (*models.Torrent, error) {
@@ -129,7 +138,12 @@ func (e *Engine) AddTorrentFile(r io.Reader) (*models.Torrent, error) {
 		return nil, err
 	}
 
-	return e.addTorrent(t)
+	model, err := e.addTorrent(t)
+	if err != nil {
+		return nil, err
+	}
+	model.SourceURI = metaInfo.Magnet(nil, nil).String()
+	return model, nil
 }
 
 func (e *Engine) addTorrent(t *torrent.Torrent) (*models.Torrent, error) {
@@ -164,8 +178,10 @@ func (e *Engine) Pause(hash string) error {
 		return TorrentNotFoundError{Hash: hash}
 	}
 
-	for _, f := range mt.t.Files() {
-		f.SetPriority(torrent.PiecePriorityNone)
+	if mt.t.Info() != nil {
+		for _, f := range mt.t.Files() {
+			f.SetPriority(torrent.PiecePriorityNone)
+		}
 	}
 	mt.state = models.StatePaused
 	return nil
@@ -287,8 +303,10 @@ func (e *Engine) manageResourcesLocked() {
 			if mt.state == models.StateDownloading {
 				mt.state = models.StateDiskFull
 				mt.err = models.ErrDiskFull
-				for _, f := range mt.t.Files() {
-					f.SetPriority(torrent.PiecePriorityNone)
+				if mt.t.Info() != nil {
+					for _, f := range mt.t.Files() {
+						f.SetPriority(torrent.PiecePriorityNone)
+					}
 				}
 			}
 			continue

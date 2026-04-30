@@ -121,6 +121,9 @@ func (sm *StreamManager) setSequentialMode(hash string, fileIndex int, enable bo
 	if !ok {
 		return TorrentNotFoundError{Hash: hash}
 	}
+	if mt.t.Info() == nil {
+		return fmt.Errorf("torrent metadata is not available yet")
+	}
 
 	files := mt.t.Files()
 	if fileIndex < 0 || fileIndex >= len(files) {

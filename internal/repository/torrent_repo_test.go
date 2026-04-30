@@ -45,6 +45,7 @@ func TestSaveAndGetTorrent(t *testing.T) {
 		Downloaded: 512,
 		State:      models.StateDownloading,
 		Error:      models.ErrNone,
+		SourceURI:  "magnet:?xt=urn:btih:dummyhash123",
 		Files: []*models.File{
 			{Index: 0, Path: "file1.txt", Size: 512, Downloaded: 256, Priority: models.PriorityNormal, IsMedia: false},
 			{Index: 1, Path: "video.mp4", Size: 512, Downloaded: 256, Priority: models.PriorityHigh, IsMedia: true},
@@ -67,7 +68,7 @@ func TestSaveAndGetTorrent(t *testing.T) {
 	}
 
 	// Verify fields
-	if fetched.Hash != torrent.Hash || fetched.Name != torrent.Name || fetched.Size != torrent.Size {
+	if fetched.Hash != torrent.Hash || fetched.Name != torrent.Name || fetched.Size != torrent.Size || fetched.SourceURI != torrent.SourceURI {
 		t.Errorf("Metadata mismatch: expected %+v, got %+v", torrent, fetched)
 	}
 	if fetched.State != torrent.State {
@@ -92,6 +93,7 @@ func TestSaveAndGetTorrent(t *testing.T) {
 	// 3. Update existing
 	torrent.State = models.StateSeeding
 	torrent.Downloaded = 1024
+	torrent.SourceURI = ""
 	torrent.Files[0].Downloaded = 512
 	torrent.Files[1].Downloaded = 512
 
@@ -102,6 +104,9 @@ func TestSaveAndGetTorrent(t *testing.T) {
 	fetchedUpdated, _ := repo.GetTorrent("dummyhash123")
 	if fetchedUpdated.State != models.StateSeeding || fetchedUpdated.Downloaded != 1024 {
 		t.Errorf("Update failed. State: %s, Downloaded: %d", fetchedUpdated.State, fetchedUpdated.Downloaded)
+	}
+	if fetchedUpdated.SourceURI != "magnet:?xt=urn:btih:dummyhash123" {
+		t.Errorf("Expected source URI to be preserved, got %q", fetchedUpdated.SourceURI)
 	}
 	if fetchedUpdated.Files[0].Downloaded != 512 {
 		t.Errorf("File update failed. Downloaded: %d", fetchedUpdated.Files[0].Downloaded)

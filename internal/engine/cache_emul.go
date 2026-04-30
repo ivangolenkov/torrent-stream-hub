@@ -19,6 +19,9 @@ func (e *Engine) GetCacheStatus(hash string, fileIndex int, currentOffset int64)
 	if !ok {
 		return nil, TorrentNotFoundError{Hash: hash}
 	}
+	if mt.t.Info() == nil {
+		return nil, fmt.Errorf("torrent metadata is not available yet")
+	}
 
 	files := mt.t.Files()
 	if fileIndex < 0 || fileIndex >= len(files) {

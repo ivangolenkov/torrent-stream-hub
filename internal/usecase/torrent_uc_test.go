@@ -62,6 +62,30 @@ func TestPauseDBOnlyTorrentUpdatesRepository(t *testing.T) {
 	}
 }
 
+func TestPauseMagnetWithoutMetadataDoesNotPanic(t *testing.T) {
+	uc, repo, cleanup := setupTorrentUseCase(t)
+	defer cleanup()
+
+	if _, err := uc.engine.AddInfoHash(testInfoHash); err != nil {
+		t.Fatalf("failed to add info hash to engine: %v", err)
+	}
+	if err := repo.SaveTorrent(&models.Torrent{Hash: testInfoHash, Name: testInfoHash, State: models.StateDownloading}); err != nil {
+		t.Fatalf("failed to save torrent: %v", err)
+	}
+
+	if err := uc.Pause(testInfoHash); err != nil {
+		t.Fatalf("pause failed: %v", err)
+	}
+
+	fetched, err := repo.GetTorrent(testInfoHash)
+	if err != nil {
+		t.Fatalf("failed to fetch torrent: %v", err)
+	}
+	if fetched.State != models.StatePaused {
+		t.Fatalf("expected paused state, got %s", fetched.State)
+	}
+}
+
 func TestResumeDBOnlyTorrentRestoresEngine(t *testing.T) {
 	uc, repo, cleanup := setupTorrentUseCase(t)
 	defer cleanup()
@@ -81,6 +105,9 @@ func TestResumeDBOnlyTorrentRestoresEngine(t *testing.T) {
 	if fetched.State != models.StateQueued {
 		t.Fatalf("expected queued state in repository, got %s", fetched.State)
 	}
+	if fetched.SourceURI == "" {
+		t.Fatal("expected resume to persist a fallback source URI")
+	}
 
 	engineTorrents := uc.engine.GetAllTorrents()
 	if len(engineTorrents) != 1 {
@@ -91,6 +118,28 @@ func TestResumeDBOnlyTorrentRestoresEngine(t *testing.T) {
 	}
 	if engineTorrents[0].State != models.StateDownloading {
 		t.Fatalf("expected engine torrent to start downloading, got %s", engineTorrents[0].State)
+	}
+}
+
+func TestRestoreTorrentsUsesPersistedSourceURI(t *testing.T) {
+	uc, repo, cleanup := setupTorrentUseCase(t)
+	defer cleanup()
+
+	source := "magnet:?xt=urn:btih:" + testInfoHash + "&tr=http%3A%2F%2Ftracker.example%2Fannounce"
+	if err := repo.SaveTorrent(&models.Torrent{Hash: testInfoHash, Name: testInfoHash, State: models.StateQueued, SourceURI: source}); err != nil {
+		t.Fatalf("failed to save torrent: %v", err)
+	}
+
+	if err := uc.RestoreTorrents(); err != nil {
+		t.Fatalf("restore failed: %v", err)
+	}
+
+	fetched, err := repo.GetTorrent(testInfoHash)
+	if err != nil {
+		t.Fatalf("failed to fetch torrent: %v", err)
+	}
+	if fetched.SourceURI != source {
+		t.Fatalf("expected source URI to be preserved, got %q", fetched.SourceURI)
 	}
 }
 

@@ -22,7 +22,7 @@
    - `CGO_ENABLED=0 go build ./cmd/hub` успешно собрал backend с embedded frontend.
    - `docker build -t torrent-stream-hub:test .` успешно собрал Docker-образ.
     - Контейнер был запущен через `docker run`; проверены `/echo` и SPA root `/` через HTTP.
-6. Дополнительно после QA-исправлений startup теперь вызывает `uc.RestoreTorrents()`, чтобы persisted торренты из SQLite снова регистрировались в engine после перезапуска приложения.
+6. Дополнительно после QA-исправлений startup теперь вызывает `uc.RestoreTorrents()`, чтобы persisted торренты из SQLite снова регистрировались в engine после перезапуска приложения. Для новых записей восстановление использует сохраненный `source_uri` с tracker-ами.
 
 ## Статус выполнения DoD
 - [x] Фронтенд успешно собирается и встраивается в бинарный файл бэкенда через `go:embed`.

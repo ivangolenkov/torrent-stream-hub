@@ -1,0 +1,1 @@
+ALTER TABLE torrents ADD COLUMN source_uri TEXT NOT NULL DEFAULT '';

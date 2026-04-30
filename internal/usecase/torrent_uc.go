@@ -136,8 +136,12 @@ func (uc *TorrentUseCase) Resume(hash string) error {
 		if !errors.Is(err, engine.ErrTorrentNotFound) {
 			return err
 		}
-		if _, err := uc.engine.AddInfoHash(hash); err != nil {
+		restored, err := uc.restoreTorrentToEngine(t)
+		if err != nil {
 			return err
+		}
+		if t.SourceURI == "" {
+			t.SourceURI = restored.SourceURI
 		}
 	}
 
@@ -183,12 +187,27 @@ func (uc *TorrentUseCase) RestoreTorrents() error {
 			continue
 		}
 
-		if _, err := uc.engine.AddInfoHash(t.Hash); err != nil {
+		restored, err := uc.restoreTorrentToEngine(t)
+		if err == nil {
+			if err := uc.repo.SaveTorrent(restored); err != nil {
+				restoreErr = errors.Join(restoreErr, fmt.Errorf("save restored torrent %s: %w", t.Hash, err))
+			}
+			continue
+		}
+		if err != nil {
 			restoreErr = errors.Join(restoreErr, fmt.Errorf("restore torrent %s: %w", t.Hash, err))
 		}
 	}
 
 	return restoreErr
+}
+
+func (uc *TorrentUseCase) restoreTorrentToEngine(t *models.Torrent) (*models.Torrent, error) {
+	if t.SourceURI != "" {
+		return uc.engine.AddMagnet(t.SourceURI)
+	}
+
+	return uc.engine.AddInfoHash(t.Hash)
 }
 
 func (uc *TorrentUseCase) AddStream(ctx context.Context, hash string, index int) error {

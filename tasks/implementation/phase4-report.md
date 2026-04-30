@@ -39,3 +39,11 @@
 3. Очередь engine теперь запускается сразу при добавлении/возобновлении, а не только на следующем тике фонового monitor; magnet без metadata переводится в `Downloading` без вызова `DownloadAll()` до получения metadata, чтобы не было panic.
 4. REST API и TorrServer-compatible handlers теперь возвращают ошибки в JSON-формате `{"error":"..."}` вместо plain text `http.Error`.
 5. Добавлены тесты на JSON-ошибки API/TorrServer и на action-поведение для DB-only торрентов.
+
+## Дополнение: исправление panic при pause и восстановления после рестарта
+1. Исправлен panic при `pause` для magnet без metadata: engine больше не вызывает `Torrent.Files()` до появления `Torrent.Info()`.
+2. Такие же guards добавлены в streaming/cache/resource-monitor paths, где file list доступен только после metadata.
+3. В SQLite добавлена миграция `0002_add_torrent_source_uri.sql`; новые magnet/.torrent добавления сохраняют исходный source URI, включая tracker-ы.
+4. Restore после рестарта теперь использует сохраненный source URI, а не только bare info hash, поэтому metadata/download после restart стартуют надежнее для новых записей.
+5. HTTP panic recovery заменен на JSON recovery: неожиданные panic теперь возвращают `{"error":"internal server error"}`.
+6. Добавлены regression-тесты на pause magnet без metadata и сохранение source URI.

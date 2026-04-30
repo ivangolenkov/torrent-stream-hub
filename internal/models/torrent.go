@@ -50,6 +50,8 @@ type Torrent struct {
 	UploadSpeed   int64 `json:"upload_speed"`
 	Peers         int   `json:"peers"`
 	Seeds         int   `json:"seeds"`
+
+	SourceURI string `json:"-"`
 }
 
 // File represents a single file within a torrent

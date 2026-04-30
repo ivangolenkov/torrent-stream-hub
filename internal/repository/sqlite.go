@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"sort"
 
-	_ "github.com/mattn/go-sqlite3"
+	_ "modernc.org/sqlite"
 )
 
 //go:embed migrations/*.sql
@@ -22,7 +22,7 @@ func NewSQLiteDB(dsn string) (*SQLiteDB, error) {
 	// dsn might be just file path, so let's append params
 	// A simple approach is just opening it and running pragmas.
 
-	db, err := sql.Open("sqlite3", dsn+"?_journal=WAL&_busy_timeout=5000&_foreign_keys=on")
+	db, err := sql.Open("sqlite", dsn+"?_journal=WAL&_busy_timeout=5000&_foreign_keys=on")
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}

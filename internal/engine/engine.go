@@ -19,6 +19,8 @@ type Engine struct {
 
 	mu              sync.RWMutex
 	managedTorrents map[string]*ManagedTorrent
+
+	streamManager *StreamManager
 }
 
 type ManagedTorrent struct {
@@ -52,10 +54,32 @@ func New(cfg *config.Config) (*Engine, error) {
 		cfg:             cfg,
 		managedTorrents: make(map[string]*ManagedTorrent),
 	}
+	eng.streamManager = NewStreamManager(eng)
 
 	go eng.resourceMonitor()
 
 	return eng, nil
+}
+
+func (e *Engine) StreamManager() *StreamManager {
+	return e.streamManager
+}
+
+func (e *Engine) GetTorrentFile(hash string, index int) (*torrent.File, error) {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+
+	mt, ok := e.managedTorrents[hash]
+	if !ok {
+		return nil, fmt.Errorf("torrent not found: %s", hash)
+	}
+
+	files := mt.t.Files()
+	if index < 0 || index >= len(files) {
+		return nil, fmt.Errorf("file index out of bounds")
+	}
+
+	return files[index], nil
 }
 
 func (e *Engine) Close() {
@@ -127,6 +151,17 @@ func (e *Engine) Delete(hash string) error {
 	mt.t.Drop()
 	delete(e.managedTorrents, hash)
 	return nil
+}
+
+func (e *Engine) GetAllTorrents() []*models.Torrent {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+
+	torrents := make([]*models.Torrent, 0, len(e.managedTorrents))
+	for _, mt := range e.managedTorrents {
+		torrents = append(torrents, e.mapTorrent(mt.t, mt.state, mt.err))
+	}
+	return torrents
 }
 
 func (e *Engine) mapTorrent(t *torrent.Torrent, state models.TorrentState, errReason models.ErrorReason) *models.Torrent {

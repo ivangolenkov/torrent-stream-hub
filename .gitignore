@@ -1,0 +1,31 @@
+# OS
+.DS_Store
+Thumbs.db
+
+# Go
+bin/
+obj/
+*.test
+*.out
+vendor/
+torrent-stream-hub # Go compiled binary
+
+# Node / Vue
+web/node_modules/
+web/dist/
+web/dist-ssr/
+web/*.local
+web/.npm
+
+# Application specific data
+/downloads/
+/config/
+hub.db
+hub.db-shm
+hub.db-wal
+
+# IDE / Editors
+.idea/
+.vscode/
+*.swp
+*.suo

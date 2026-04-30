@@ -1,0 +1,29 @@
+services:
+  torrent-hub:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: torrent-stream-hub:latest
+    container_name: torrent-hub
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+      - "50007:50007/tcp"
+      - "50007:50007/udp"
+    volumes:
+      - ./downloads:/downloads
+      - ./config:/config
+    environment:
+      HUB_PORT: "8080"
+      HUB_TORRENT_PORT: "50007"
+      HUB_DOWNLOAD_DIR: /downloads
+      HUB_DB_PATH: /config/hub.db
+      HUB_MAX_ACTIVE_STREAMS: "4"
+      HUB_MAX_ACTIVE_DOWNLOADS: "5"
+      HUB_MIN_FREE_SPACE_GB: "5"
+      HUB_DOWNLOAD_LIMIT: "0"
+      HUB_UPLOAD_LIMIT: "0"
+      HUB_STREAM_CACHE_SIZE: "209715200"
+      HUB_AUTH_ENABLED: "false"
+      HUB_AUTH_USER: admin
+      HUB_AUTH_PASSWORD: admin

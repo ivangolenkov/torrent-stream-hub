@@ -1,0 +1,13 @@
+.git
+.gitignore
+.DS_Store
+
+downloads/
+config/
+storage/
+
+web/node_modules/
+web/dist/
+
+**/*.test
+**/*.out

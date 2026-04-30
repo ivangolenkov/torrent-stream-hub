@@ -8,7 +8,8 @@ obj/
 *.test
 *.out
 vendor/
-torrent-stream-hub # Go compiled binary
+/torrent-stream-hub
+/hub
 
 # Node / Vue
 web/node_modules/

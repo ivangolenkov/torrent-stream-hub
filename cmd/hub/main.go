@@ -14,6 +14,7 @@ import (
 	"torrent-stream-hub/internal/config"
 	deliveryhttp "torrent-stream-hub/internal/delivery/http"
 	"torrent-stream-hub/internal/engine"
+	"torrent-stream-hub/internal/logging"
 	"torrent-stream-hub/internal/repository"
 	"torrent-stream-hub/internal/usecase"
 	"torrent-stream-hub/web"
@@ -21,6 +22,8 @@ import (
 
 func main() {
 	cfg := config.Load()
+	logging.Configure(cfg.LogLevel)
+	logging.Infof("logging initialized level=%s", logging.CurrentLevel())
 
 	if err := ensureRuntimeDirs(cfg.DownloadDir, cfg.DBPath); err != nil {
 		log.Fatalf("failed to prepare runtime directories: %v", err)

@@ -25,6 +25,18 @@ export interface File {
   is_media: boolean;
 }
 
+export interface PeerSummary {
+  known: number;
+  connected: number;
+  pending: number;
+  half_open: number;
+  seeds: number;
+  metadata_ready: boolean;
+  tracker_status?: string;
+  tracker_error?: string;
+  dht_status?: string;
+}
+
 export interface Torrent {
   hash: string;
   name: string;
@@ -38,4 +50,5 @@ export interface Torrent {
   upload_speed: number;
   peers: number;
   seeds: number;
+  peer_summary: PeerSummary;
 }

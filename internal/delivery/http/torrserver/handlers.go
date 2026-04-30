@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"torrent-stream-hub/internal/delivery/http/response"
+	"torrent-stream-hub/internal/logging"
 	"torrent-stream-hub/internal/usecase"
 
 	"github.com/go-chi/chi/v5"
@@ -48,16 +49,20 @@ type TorrentsReq struct {
 func (h *TorrServerHandler) Torrents(w http.ResponseWriter, r *http.Request) {
 	var req TorrentsReq
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		logging.Debugf("torrserver torrents invalid JSON: %v", err)
 		response.Error(w, http.StatusBadRequest, "Invalid JSON")
 		return
 	}
+	logging.Infof("torrserver torrents action=%s link=%s", req.Action, logging.SafeMagnetSummary(req.Link))
 
 	if req.Action == "list" {
 		torrents, err := h.uc.GetAllTorrents()
 		if err != nil {
+			logging.Warnf("torrserver list failed: %v", err)
 			response.Error(w, http.StatusInternalServerError, err.Error())
 			return
 		}
+		logging.Debugf("torrserver list count=%d", len(torrents))
 		response.JSON(w, http.StatusOK, torrents)
 		return
 	}
@@ -65,6 +70,7 @@ func (h *TorrServerHandler) Torrents(w http.ResponseWriter, r *http.Request) {
 	if req.Action == "add" {
 		t, err := h.uc.AddMagnet(req.Link)
 		if err != nil {
+			logging.Warnf("torrserver add failed %s: %v", logging.SafeMagnetSummary(req.Link), err)
 			response.Error(w, http.StatusInternalServerError, err.Error())
 			return
 		}
@@ -72,6 +78,7 @@ func (h *TorrServerHandler) Torrents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	logging.Debugf("torrserver unknown action=%s", req.Action)
 	response.Error(w, http.StatusBadRequest, "Unknown action")
 }
 
@@ -83,19 +90,27 @@ func (h *TorrServerHandler) Settings(w http.ResponseWriter, r *http.Request) {
 
 func (h *TorrServerHandler) UploadTorrent(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseMultipartForm(32 << 20); err != nil {
+		logging.Debugf("torrent upload invalid multipart form: %v", err)
 		response.Error(w, http.StatusBadRequest, "Invalid multipart form")
 		return
 	}
 
-	file, _, err := r.FormFile("file")
+	file, header, err := r.FormFile("file")
 	if err != nil {
+		logging.Debugf("torrent upload missing file: %v", err)
 		response.Error(w, http.StatusBadRequest, "Torrent file is required")
 		return
 	}
 	defer file.Close()
 
+	filename := ""
+	if header != nil {
+		filename = header.Filename
+	}
+	logging.Infof("torrent upload filename=%q", filename)
 	t, err := h.uc.AddTorrentFile(file)
 	if err != nil {
+		logging.Warnf("torrent upload failed filename=%q: %v", filename, err)
 		response.Error(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -113,9 +128,11 @@ func (h *TorrServerHandler) Playlist(w http.ResponseWriter, r *http.Request) {
 	hash := r.URL.Query().Get("hash")
 	t, err := h.uc.GetTorrent(hash)
 	if err != nil || t == nil {
+		logging.Debugf("playlist torrent not found hash=%s err=%v", hash, err)
 		response.Error(w, http.StatusNotFound, "Torrent not found")
 		return
 	}
+	logging.Debugf("playlist requested hash=%s files=%d", hash, len(t.Files))
 
 	w.Header().Set("Content-Type", "audio/x-mpegurl")
 	fmt.Fprintf(w, "#EXTM3U\n")
@@ -139,6 +156,7 @@ func (h *TorrServerHandler) Stream(w http.ResponseWriter, r *http.Request) {
 	indexStr := r.URL.Query().Get("index")
 	index, err := strconv.Atoi(indexStr)
 	if err != nil {
+		logging.Debugf("stream invalid index hash=%s index=%q", hash, indexStr)
 		response.Error(w, http.StatusBadRequest, "Invalid index")
 		return
 	}
@@ -151,6 +169,7 @@ func (h *TorrServerHandler) PlayAlias(w http.ResponseWriter, r *http.Request) {
 	idStr := chi.URLParam(r, "id")
 	index, err := strconv.Atoi(idStr)
 	if err != nil {
+		logging.Debugf("play alias invalid id hash=%s id=%q", hash, idStr)
 		response.Error(w, http.StatusBadRequest, "Invalid id")
 		return
 	}
@@ -159,6 +178,7 @@ func (h *TorrServerHandler) PlayAlias(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *TorrServerHandler) serveStream(w http.ResponseWriter, r *http.Request, hash string, index int) {
+	logging.Infof("stream request hash=%s file_index=%d range=%q remote=%s", hash, index, r.Header.Get("Range"), r.RemoteAddr)
 	// 1. Get file from engine
 	file, err := h.uc.GetTorrentFile(hash, index)
 	if err != nil {
@@ -167,6 +187,7 @@ func (h *TorrServerHandler) serveStream(w http.ResponseWriter, r *http.Request, 
 		if !errors.Is(err, usecase.ErrTorrentNotFound) {
 			message = err.Error()
 		}
+		logging.Warnf("stream file lookup failed hash=%s file_index=%d status=%d: %v", hash, index, status, err)
 		response.Error(w, status, message)
 		return
 	}
@@ -176,7 +197,7 @@ func (h *TorrServerHandler) serveStream(w http.ResponseWriter, r *http.Request, 
 	ctx := r.Context()
 	err = h.uc.AddStream(ctx, hash, index)
 	if err != nil {
-		// Log error, but still try to stream if possible
+		logging.Warnf("stream QoS registration failed hash=%s file_index=%d: %v", hash, index, err)
 	}
 
 	// 3. Set headers for streaming
@@ -187,5 +208,6 @@ func (h *TorrServerHandler) serveStream(w http.ResponseWriter, r *http.Request, 
 	reader := file.NewReader()
 	reader.SetResponsive() // Better performance for streaming
 
+	logging.Debugf("stream serving hash=%s file_index=%d file=%q size=%d", hash, index, file.DisplayPath(), file.Length())
 	http.ServeContent(w, r, file.DisplayPath(), time.Time{}, reader)
 }

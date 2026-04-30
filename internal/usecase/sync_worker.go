@@ -2,11 +2,11 @@ package usecase
 
 import (
 	"encoding/json"
-	"log"
 	"sync"
 	"time"
 
 	"torrent-stream-hub/internal/engine"
+	"torrent-stream-hub/internal/logging"
 	"torrent-stream-hub/internal/models"
 	"torrent-stream-hub/internal/repository"
 )
@@ -30,6 +30,7 @@ func (sw *SyncWorker) AddClient(ch chan []byte) {
 	sw.mu.Lock()
 	defer sw.mu.Unlock()
 	sw.clients[ch] = true
+	logging.Debugf("sync worker client added clients=%d", len(sw.clients))
 }
 
 func (sw *SyncWorker) RemoveClient(ch chan []byte) {
@@ -37,9 +38,11 @@ func (sw *SyncWorker) RemoveClient(ch chan []byte) {
 	defer sw.mu.Unlock()
 	delete(sw.clients, ch)
 	close(ch)
+	logging.Debugf("sync worker client removed clients=%d", len(sw.clients))
 }
 
 func (sw *SyncWorker) Start() {
+	logging.Infof("sync worker started interval=2s")
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
 
@@ -50,7 +53,7 @@ func (sw *SyncWorker) Start() {
 		// Save state to DB
 		for _, t := range activeTorrents {
 			if err := sw.repo.SaveTorrent(t); err != nil {
-				log.Printf("Failed to sync torrent state to DB: %v", err)
+				logging.Warnf("failed to sync torrent state to DB hash=%s: %v", t.Hash, err)
 			}
 		}
 
@@ -76,12 +79,14 @@ func (sw *SyncWorker) Start() {
 				}
 			}
 		} else {
+			logging.Warnf("failed to load DB torrents for sync: %v", err)
 			stateToSend = activeTorrents
 		}
 
 		// Serialize to JSON
 		data, err := json.Marshal(stateToSend)
 		if err != nil {
+			logging.Warnf("failed to marshal sync state: %v", err)
 			continue
 		}
 
@@ -91,7 +96,7 @@ func (sw *SyncWorker) Start() {
 			select {
 			case ch <- data:
 			default:
-				// Client channel full, skip
+				logging.Debugf("sync worker skipped slow SSE client")
 			}
 		}
 		sw.mu.RUnlock()

@@ -2,6 +2,7 @@ package engine
 
 import (
 	"fmt"
+	"torrent-stream-hub/internal/logging"
 )
 
 // CacheStatus represents the emulated sliding window cache status
@@ -17,14 +18,17 @@ func (e *Engine) GetCacheStatus(hash string, fileIndex int, currentOffset int64)
 	e.mu.RUnlock()
 
 	if !ok {
+		logging.Debugf("cache status requested for missing torrent hash=%s file_index=%d offset=%d", hash, fileIndex, currentOffset)
 		return nil, TorrentNotFoundError{Hash: hash}
 	}
 	if mt.t.Info() == nil {
+		logging.Debugf("cache status requested before metadata hash=%s file_index=%d offset=%d", hash, fileIndex, currentOffset)
 		return nil, fmt.Errorf("torrent metadata is not available yet")
 	}
 
 	files := mt.t.Files()
 	if fileIndex < 0 || fileIndex >= len(files) {
+		logging.Debugf("cache status file index out of bounds hash=%s file_index=%d files=%d offset=%d", hash, fileIndex, len(files), currentOffset)
 		return nil, fmt.Errorf("file index out of bounds: %d", fileIndex)
 	}
 
@@ -32,6 +36,7 @@ func (e *Engine) GetCacheStatus(hash string, fileIndex int, currentOffset int64)
 
 	// Optimization: if fully downloaded, skip bitfield calculations
 	if file.BytesCompleted() == file.Length() {
+		logging.Debugf("cache status fully downloaded hash=%s file_index=%d offset=%d", hash, fileIndex, currentOffset)
 		return &CacheStatus{
 			VirtualCacheBytes: file.Length() - currentOffset,
 			IsFullyDownloaded: true,
@@ -74,6 +79,7 @@ func (e *Engine) GetCacheStatus(hash string, fileIndex int, currentOffset int64)
 		virtualCacheBytes = 0
 	}
 
+	logging.Debugf("cache status hash=%s file_index=%d offset=%d virtual_cache_bytes=%d fully_downloaded=%t", hash, fileIndex, currentOffset, virtualCacheBytes, false)
 	return &CacheStatus{
 		VirtualCacheBytes: virtualCacheBytes,
 		IsFullyDownloaded: false,

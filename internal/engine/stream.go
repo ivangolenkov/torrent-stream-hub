@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sync"
 	"time"
+	"torrent-stream-hub/internal/logging"
 
 	"github.com/anacrolix/torrent"
 )
@@ -45,6 +46,7 @@ func (sm *StreamManager) AddStream(ctx context.Context, hash string, fileIndex i
 
 	key := FileKey{Hash: hash, Index: fileIndex}
 	state, exists := sm.states[key]
+	logging.Infof("stream add requested hash=%s file_index=%d existing=%t", hash, fileIndex, exists)
 
 	if !exists {
 		state = &StreamState{
@@ -57,14 +59,17 @@ func (sm *StreamManager) AddStream(ctx context.Context, hash string, fileIndex i
 	if state.DebounceTimer != nil {
 		state.DebounceTimer.Stop()
 		state.DebounceTimer = nil
+		logging.Debugf("stream debounce cancelled hash=%s file_index=%d", hash, fileIndex)
 	}
 
 	state.ActiveStreams++
+	logging.Debugf("stream reference incremented hash=%s file_index=%d active=%d", hash, fileIndex, state.ActiveStreams)
 
 	// If this is the first stream, enable sequential mode
 	if state.ActiveStreams == 1 {
 		if err := sm.setSequentialMode(hash, fileIndex, true); err != nil {
 			state.ActiveStreams--
+			logging.Warnf("failed to enable sequential mode hash=%s file_index=%d: %v", hash, fileIndex, err)
 			return err
 		}
 	}
@@ -90,6 +95,7 @@ func (sm *StreamManager) RemoveStream(hash string, fileIndex int) {
 	}
 
 	state.ActiveStreams--
+	logging.Debugf("stream reference decremented hash=%s file_index=%d active=%d", hash, fileIndex, state.ActiveStreams)
 
 	if state.ActiveStreams <= 0 {
 		state.ActiveStreams = 0
@@ -105,10 +111,14 @@ func (sm *StreamManager) RemoveStream(hash string, fileIndex int) {
 			// Verify if it's still 0 after delay
 			st, ok := sm.states[key]
 			if ok && st.ActiveStreams == 0 {
-				_ = sm.setSequentialMode(hash, fileIndex, false)
+				if err := sm.setSequentialMode(hash, fileIndex, false); err != nil {
+					logging.Warnf("failed to disable sequential mode hash=%s file_index=%d: %v", hash, fileIndex, err)
+				}
+				logging.Infof("stream debounce elapsed hash=%s file_index=%d sequential_disabled=%t", hash, fileIndex, true)
 				delete(sm.states, key)
 			}
 		})
+		logging.Debugf("stream debounce scheduled hash=%s file_index=%d delay=%s", hash, fileIndex, DebounceDelay)
 	}
 }
 
@@ -119,14 +129,17 @@ func (sm *StreamManager) setSequentialMode(hash string, fileIndex int, enable bo
 	sm.engine.mu.RUnlock()
 
 	if !ok {
+		logging.Debugf("sequential mode requested for missing torrent hash=%s file_index=%d enable=%t", hash, fileIndex, enable)
 		return TorrentNotFoundError{Hash: hash}
 	}
 	if mt.t.Info() == nil {
+		logging.Debugf("sequential mode requested before metadata hash=%s file_index=%d enable=%t", hash, fileIndex, enable)
 		return fmt.Errorf("torrent metadata is not available yet")
 	}
 
 	files := mt.t.Files()
 	if fileIndex < 0 || fileIndex >= len(files) {
+		logging.Debugf("sequential mode file index out of bounds hash=%s file_index=%d files=%d enable=%t", hash, fileIndex, len(files), enable)
 		return fmt.Errorf("file index out of bounds: %d", fileIndex)
 	}
 
@@ -135,6 +148,7 @@ func (sm *StreamManager) setSequentialMode(hash string, fileIndex int, enable bo
 	// If the file is already 100% downloaded, we don't need sequential mode
 	if file.BytesCompleted() == file.Length() {
 		enable = false
+		logging.Debugf("sequential mode skipped for completed file hash=%s file_index=%d", hash, fileIndex)
 
 		// Update state to fully downloaded
 		key := FileKey{Hash: hash, Index: fileIndex}
@@ -144,6 +158,7 @@ func (sm *StreamManager) setSequentialMode(hash string, fileIndex int, enable bo
 	}
 
 	if enable {
+		logging.Infof("sequential mode enabled hash=%s file_index=%d file=%q", hash, fileIndex, file.DisplayPath())
 		// Set priorites:
 		// We want to download the file sequentially.
 		// First, let's make sure it's downloading.
@@ -170,6 +185,7 @@ func (sm *StreamManager) setSequentialMode(hash string, fileIndex int, enable bo
 			}
 		}
 	} else {
+		logging.Infof("sequential mode disabled hash=%s file_index=%d", hash, fileIndex)
 		// Disable sequential/egoistic mode. Return to rarest-first/normal.
 		for _, f := range files {
 			f.SetPriority(torrent.PiecePriorityNormal)

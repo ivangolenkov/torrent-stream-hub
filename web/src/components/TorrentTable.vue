@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { useTorrentStore } from '../stores/torrentStore';
 import { PlayIcon, PauseIcon, TrashIcon } from '@heroicons/vue/24/solid';
+import type { Torrent } from '../types';
 
 const store = useTorrentStore();
 
@@ -33,6 +34,23 @@ const getStateColor = (state: string) => {
   };
   return map[state] || 'bg-gray-100 text-gray-800';
 };
+
+const getPeerSummary = (torrent: Torrent) => torrent.peer_summary || {
+  known: torrent.peers || 0,
+  connected: torrent.peers || 0,
+  pending: 0,
+  half_open: 0,
+  seeds: torrent.seeds || 0,
+  metadata_ready: torrent.size > 0,
+  dht_status: '',
+  tracker_status: ''
+};
+
+const formatPeerTitle = (torrent: Torrent) => {
+  const peers = getPeerSummary(torrent);
+  const metadata = peers.metadata_ready ? 'ready' : 'pending';
+  return `Known: ${peers.known}, connected: ${peers.connected}, pending: ${peers.pending}, half-open: ${peers.half_open}, seeds: ${peers.seeds}, metadata: ${metadata}`;
+};
 </script>
 
 <template>
@@ -45,12 +63,13 @@ const getStateColor = (state: string) => {
           <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Progress</th>
           <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
           <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Speed</th>
+          <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Peers</th>
           <th scope="col" class="relative px-6 py-3"><span class="sr-only">Actions</span></th>
         </tr>
       </thead>
       <tbody class="bg-white divide-y divide-gray-200">
         <tr v-if="store.torrents.length === 0">
-          <td colspan="6" class="px-6 py-12 text-center text-gray-500 text-sm">
+          <td colspan="7" class="px-6 py-12 text-center text-gray-500 text-sm">
             No torrents added yet
           </td>
         </tr>
@@ -96,6 +115,20 @@ const getStateColor = (state: string) => {
             </div>
             <div v-else-if="!['Downloading', 'Streaming'].includes(t.state)">
               -
+            </div>
+          </td>
+          <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500" :title="formatPeerTitle(t)">
+            <div class="font-medium text-gray-900">
+              {{ getPeerSummary(t).connected }} / {{ getPeerSummary(t).known }}
+            </div>
+            <div class="text-xs text-gray-500">
+              seeds {{ getPeerSummary(t).seeds }}
+              <span v-if="getPeerSummary(t).pending || getPeerSummary(t).half_open">
+                - pending {{ getPeerSummary(t).pending }} - half-open {{ getPeerSummary(t).half_open }}
+              </span>
+            </div>
+            <div v-if="!getPeerSummary(t).metadata_ready" class="text-xs text-amber-600">
+              metadata pending
             </div>
           </td>
           <td class="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">

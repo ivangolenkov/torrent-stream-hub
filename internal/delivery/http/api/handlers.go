@@ -7,6 +7,7 @@ import (
 	"net/http"
 
 	"torrent-stream-hub/internal/delivery/http/response"
+	"torrent-stream-hub/internal/logging"
 	"torrent-stream-hub/internal/usecase"
 
 	"github.com/go-chi/chi/v5"
@@ -35,9 +36,11 @@ func (h *APIHandler) RegisterRoutes(r chi.Router) {
 func (h *APIHandler) GetAllTorrents(w http.ResponseWriter, r *http.Request) {
 	torrents, err := h.uc.GetAllTorrents()
 	if err != nil {
+		logging.Warnf("api get torrents failed: %v", err)
 		response.Error(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	logging.Debugf("api get torrents count=%d", len(torrents))
 	response.JSON(w, http.StatusOK, torrents)
 }
 
@@ -50,17 +53,21 @@ type AddTorrentReq struct {
 func (h *APIHandler) AddTorrent(w http.ResponseWriter, r *http.Request) {
 	var req AddTorrentReq
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		logging.Debugf("api add torrent invalid JSON: %v", err)
 		response.Error(w, http.StatusBadRequest, "Invalid JSON")
 		return
 	}
 
 	if req.Link == "" {
+		logging.Debugf("api add torrent missing link")
 		response.Error(w, http.StatusBadRequest, "Link is required")
 		return
 	}
 
+	logging.Infof("api add torrent %s", logging.SafeMagnetSummary(req.Link))
 	t, err := h.uc.AddMagnet(req.Link)
 	if err != nil {
+		logging.Warnf("api add torrent failed %s: %v", logging.SafeMagnetSummary(req.Link), err)
 		response.Error(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -77,10 +84,12 @@ func (h *APIHandler) TorrentAction(w http.ResponseWriter, r *http.Request) {
 	hash := chi.URLParam(r, "hash")
 	var req ActionReq
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		logging.Debugf("api torrent action invalid JSON hash=%s: %v", hash, err)
 		response.Error(w, http.StatusBadRequest, "Invalid JSON")
 		return
 	}
 
+	logging.Infof("api torrent action hash=%s action=%s delete_files=%t", hash, req.Action, req.DeleteFiles)
 	var err error
 	switch req.Action {
 	case "pause":
@@ -92,15 +101,18 @@ func (h *APIHandler) TorrentAction(w http.ResponseWriter, r *http.Request) {
 	case "recheck":
 		// TODO: implement recheck
 	default:
+		logging.Debugf("api torrent action unknown hash=%s action=%s", hash, req.Action)
 		response.Error(w, http.StatusBadRequest, "Unknown action")
 		return
 	}
 
 	if err != nil {
 		if errors.Is(err, usecase.ErrTorrentNotFound) {
+			logging.Debugf("api torrent action not found hash=%s action=%s", hash, req.Action)
 			response.Error(w, http.StatusNotFound, err.Error())
 			return
 		}
+		logging.Warnf("api torrent action failed hash=%s action=%s: %v", hash, req.Action, err)
 		response.Error(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -112,15 +124,18 @@ func (h *APIHandler) GetTorrentFiles(w http.ResponseWriter, r *http.Request) {
 	hash := chi.URLParam(r, "hash")
 	t, err := h.uc.GetTorrent(hash)
 	if err != nil {
+		logging.Warnf("api get torrent files failed hash=%s: %v", hash, err)
 		response.Error(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
 	if t == nil {
+		logging.Debugf("api get torrent files not found hash=%s", hash)
 		response.Error(w, http.StatusNotFound, "Torrent not found")
 		return
 	}
 
+	logging.Debugf("api get torrent files hash=%s files=%d", hash, len(t.Files))
 	response.JSON(w, http.StatusOK, t.Files)
 }
 
@@ -133,6 +148,7 @@ func (h *APIHandler) SSEEvents(w http.ResponseWriter, r *http.Request) {
 	ch := make(chan []byte, 10)
 	h.syncWorker.AddClient(ch)
 	defer h.syncWorker.RemoveClient(ch)
+	logging.Infof("api sse client connected remote=%s", r.RemoteAddr)
 
 	for {
 		select {
@@ -145,6 +161,7 @@ func (h *APIHandler) SSEEvents(w http.ResponseWriter, r *http.Request) {
 				f.Flush()
 			}
 		case <-r.Context().Done():
+			logging.Infof("api sse client disconnected remote=%s", r.RemoteAddr)
 			return
 		}
 	}

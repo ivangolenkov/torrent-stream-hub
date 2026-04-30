@@ -20,6 +20,7 @@ type Config struct {
 	AuthEnabled        bool
 	AuthUser           string
 	AuthPassword       string
+	LogLevel           string
 }
 
 func Load() *Config {
@@ -40,6 +41,7 @@ func Load() *Config {
 	flag.StringVar(&cfg.AuthPassword, "auth-password", getEnv("HUB_AUTH_PASSWORD", "admin"), "Basic auth password")
 
 	flag.Parse()
+	cfg.LogLevel = getEnv("HUB_LOG_LEVEL", "debug")
 
 	return cfg
 }

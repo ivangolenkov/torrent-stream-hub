@@ -4,7 +4,6 @@ import (
 	"errors"
 	"io"
 	"io/fs"
-	"log"
 	"net/http"
 	"path"
 	"runtime/debug"
@@ -13,6 +12,7 @@ import (
 	"torrent-stream-hub/internal/delivery/http/api"
 	"torrent-stream-hub/internal/delivery/http/response"
 	"torrent-stream-hub/internal/delivery/http/torrserver"
+	"torrent-stream-hub/internal/logging"
 	"torrent-stream-hub/internal/usecase"
 
 	"github.com/go-chi/chi/v5"
@@ -63,7 +63,7 @@ func jsonRecoverer(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer func() {
 			if rec := recover(); rec != nil {
-				log.Printf("panic serving %s %s: %v\n%s", r.Method, r.URL.Path, rec, debug.Stack())
+				logging.Errorf("panic serving %s %s: %v\n%s", r.Method, r.URL.Path, rec, debug.Stack())
 				response.Error(w, http.StatusInternalServerError, "internal server error")
 			}
 		}()

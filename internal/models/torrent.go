@@ -46,12 +46,26 @@ type Torrent struct {
 	Error      ErrorReason  `json:"error,omitempty"`
 	Files      []*File      `json:"files,omitempty"`
 	// Runtime statistics
-	DownloadSpeed int64 `json:"download_speed"`
-	UploadSpeed   int64 `json:"upload_speed"`
-	Peers         int   `json:"peers"`
-	Seeds         int   `json:"seeds"`
+	DownloadSpeed int64       `json:"download_speed"`
+	UploadSpeed   int64       `json:"upload_speed"`
+	Peers         int         `json:"peers"`
+	Seeds         int         `json:"seeds"`
+	PeerSummary   PeerSummary `json:"peer_summary"`
 
 	SourceURI string `json:"-"`
+}
+
+// PeerSummary contains runtime-only aggregate swarm diagnostics.
+type PeerSummary struct {
+	Known         int    `json:"known"`
+	Connected     int    `json:"connected"`
+	Pending       int    `json:"pending"`
+	HalfOpen      int    `json:"half_open"`
+	Seeds         int    `json:"seeds"`
+	MetadataReady bool   `json:"metadata_ready"`
+	TrackerStatus string `json:"tracker_status,omitempty"`
+	TrackerError  string `json:"tracker_error,omitempty"`
+	DHTStatus     string `json:"dht_status,omitempty"`
 }
 
 // File represents a single file within a torrent

@@ -64,6 +64,7 @@ func (uc *TorrentUseCase) AddMagnetWithMetadata(magnet string, metadata TorrentM
 	// Save initial state to DB
 	if err := uc.repo.SaveTorrent(t); err != nil {
 		logging.Warnf("failed to persist torrent after magnet add hash=%s: %v", t.Hash, err)
+		return nil, err
 	}
 
 	return t, nil
@@ -79,6 +80,7 @@ func (uc *TorrentUseCase) AddTorrentFile(r io.Reader) (*models.Torrent, error) {
 
 	if err := uc.repo.SaveTorrent(t); err != nil {
 		logging.Warnf("failed to persist torrent after file add hash=%s: %v", t.Hash, err)
+		return nil, err
 	}
 
 	return t, nil

@@ -9,6 +9,7 @@ import (
 	"io"
 	"mime"
 	"net/http"
+	"net/url"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -78,6 +79,7 @@ type TorrentsReq struct {
 	Data     string `json:"data"`
 	Poster   string `json:"poster"`
 	Category string `json:"category"`
+	SaveToDB bool   `json:"save_to_db"`
 }
 
 type torrentResponse struct {
@@ -152,9 +154,7 @@ func (h *TorrServerHandler) Torrents(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if req.Action == "add" {
-		t, err := h.uc.AddMagnetWithMetadata(normalizeTorrentLink(req.Link), usecase.TorrentMetadata{
-			Title: req.Title, Data: req.Data, Poster: req.Poster, Category: req.Category,
-		})
+		t, err := h.addTorrent(req)
 		if err != nil {
 			logging.Warnf("torrserver add failed %s: %v", logging.SafeMagnetSummary(req.Link), err)
 			response.Error(w, http.StatusInternalServerError, err.Error())
@@ -208,6 +208,31 @@ func (h *TorrServerHandler) Torrents(w http.ResponseWriter, r *http.Request) {
 
 	logging.Debugf("torrserver unknown action=%s", req.Action)
 	response.Error(w, http.StatusBadRequest, "Unknown action")
+}
+
+func (h *TorrServerHandler) addTorrent(req TorrentsReq) (*models.Torrent, error) {
+	metadata := usecase.TorrentMetadata{
+		Title:    req.Title,
+		Data:     req.Data,
+		Poster:   req.Poster,
+		Category: req.Category,
+	}
+	link := normalizeTorrentLink(req.Link)
+	if strings.HasPrefix(strings.ToLower(link), "http://") || strings.HasPrefix(strings.ToLower(link), "https://") {
+		resolved, torrentData, err := resolveHTTPLink(link)
+		if err != nil {
+			return nil, err
+		}
+		if len(torrentData) > 0 {
+			t, err := h.uc.AddTorrentFile(bytes.NewReader(torrentData))
+			if err != nil {
+				return nil, err
+			}
+			return h.uc.UpdateMetadata(t.Hash, metadata)
+		}
+		link = normalizeTorrentLink(resolved)
+	}
+	return h.uc.AddMagnetWithMetadata(link, metadata)
 }
 
 func (h *TorrServerHandler) Settings(w http.ResponseWriter, r *http.Request) {
@@ -623,6 +648,37 @@ func normalizeTorrentLink(link string) string {
 		return "magnet:?xt=urn:btih:" + trimmed
 	}
 	return trimmed
+}
+
+func resolveHTTPLink(link string) (string, []byte, error) {
+	client := &http.Client{Timeout: 60 * time.Second}
+	req, err := http.NewRequest(http.MethodGet, link, nil)
+	if err != nil {
+		return "", nil, err
+	}
+	req.Header.Set("User-Agent", "DWL/1.1.1 (Torrent)")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		if urlErr, ok := err.(*url.Error); ok && strings.HasPrefix(strings.ToLower(urlErr.URL), "magnet:") {
+			return urlErr.URL, nil, nil
+		}
+		return "", nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", nil, errors.New(resp.Status)
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 64<<20))
+	if err != nil {
+		return "", nil, err
+	}
+	trimmed := strings.TrimSpace(string(body))
+	if strings.HasPrefix(strings.ToLower(trimmed), "magnet:") {
+		return trimmed, nil, nil
+	}
+	return "", body, nil
 }
 
 func internalIndexToTorrserver(index int) int {

@@ -4,11 +4,16 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"torrent-stream-hub/internal/config"
+	"torrent-stream-hub/internal/engine"
 	"torrent-stream-hub/internal/models"
+	"torrent-stream-hub/internal/repository"
+	"torrent-stream-hub/internal/usecase"
 )
 
 func TestEchoHandler(t *testing.T) {
@@ -132,6 +137,72 @@ func TestCacheRequestAcceptsJSONWithFormContentType(t *testing.T) {
 	}
 	if body.Action != "get" || body.Hash != "abc" || body.Index != 1 {
 		t.Fatalf("unexpected cache request: %+v", body)
+	}
+}
+
+func TestResolveHTTPLinkSupportsMagnetRedirect(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567", http.StatusFound)
+	}))
+	defer server.Close()
+
+	link, data, err := resolveHTTPLink(server.URL)
+	if err != nil {
+		t.Fatalf("expected magnet redirect to resolve, got error: %v", err)
+	}
+	if len(data) != 0 {
+		t.Fatalf("expected no torrent data for magnet redirect, got %d bytes", len(data))
+	}
+	if link != "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567" {
+		t.Fatalf("unexpected resolved link: %q", link)
+	}
+}
+
+func TestTorrentsAddPersistsEvenWhenSaveToDBFalse(t *testing.T) {
+	dir := t.TempDir()
+	db, err := repository.NewSQLiteDB(filepath.Join(dir, "hub.db"))
+	if err != nil {
+		t.Fatalf("failed to create test DB: %v", err)
+	}
+	defer db.Close()
+
+	eng, err := engine.New(&config.Config{
+		DownloadDir:        dir,
+		TorrentPort:        0,
+		MaxActiveDownloads: 1,
+		MinFreeSpaceGB:     0,
+	})
+	if err != nil {
+		t.Fatalf("failed to create engine: %v", err)
+	}
+	defer eng.Close()
+
+	repo := repository.NewTorrentRepo(db)
+	h := NewTorrServerHandler(usecase.NewTorrentUseCase(eng, repo))
+	req := httptest.NewRequest(http.MethodPost, "/torrents", strings.NewReader(`{
+		"action":"add",
+		"link":"magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567",
+		"title":"[LAMPA] Test",
+		"poster":"https://example.com/poster.jpg",
+		"data":"{}",
+		"save_to_db":false
+	}`))
+	rr := httptest.NewRecorder()
+
+	h.Torrents(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, rr.Code, rr.Body.String())
+	}
+	fetched, err := repo.GetTorrent("0123456789abcdef0123456789abcdef01234567")
+	if err != nil {
+		t.Fatalf("failed to get persisted torrent: %v", err)
+	}
+	if fetched == nil {
+		t.Fatalf("expected torrent to be persisted despite save_to_db=false")
+	}
+	if fetched.Title != "[LAMPA] Test" || fetched.Poster != "https://example.com/poster.jpg" {
+		t.Fatalf("expected metadata to be persisted, got %+v", fetched)
 	}
 }
 

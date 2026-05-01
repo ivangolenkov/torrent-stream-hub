@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, onUnmounted, ref } from 'vue';
+import { computed, onMounted, onUnmounted, ref } from 'vue';
 import { XMarkIcon } from '@heroicons/vue/24/solid';
 
 const props = defineProps<{
@@ -11,25 +11,33 @@ const props = defineProps<{
 const emit = defineEmits(['close']);
 
 const videoUrl = ref('');
+const playbackError = ref(false);
+
+const fileExtension = computed(() => {
+  const cleanTitle = props.title.split('?')[0].toLowerCase();
+  return cleanTitle.includes('.') ? cleanTitle.split('.').pop() || '' : '';
+});
+
+const browserPlayableHint = computed(() => {
+  const playable = ['mp4', 'm4v', 'webm', 'ogv', 'ogg'];
+  return playable.includes(fileExtension.value);
+});
 
 onMounted(() => {
-  // Construct the stream URL
-  videoUrl.value = `/api/v1/stream?hash=${props.hash}&index=${props.index}`;
-  // Wait, our backend stream URL is `/stream`, not `/api/v1/stream` according to router
-  // torrServerHandler is mounted on `/` basically via router.Group without prefix
   videoUrl.value = `/stream?hash=${props.hash}&index=${props.index}`;
-  
-  // Disable body scroll when modal is open
   document.body.style.overflow = 'hidden';
 });
 
 onUnmounted(() => {
-  // Re-enable body scroll
   document.body.style.overflow = '';
 });
 
 const handleClose = () => {
   emit('close');
+};
+
+const handlePlaybackError = () => {
+  playbackError.value = true;
 };
 </script>
 
@@ -54,9 +62,24 @@ const handleClose = () => {
         autoplay 
         class="w-full h-full max-h-screen object-contain"
         :src="videoUrl"
+        @error="handlePlaybackError"
       >
         Your browser does not support the video tag.
       </video>
+
+      <div
+        v-if="playbackError || !browserPlayableHint"
+        class="absolute bottom-6 left-1/2 w-[calc(100%-2rem)] max-w-2xl -translate-x-1/2 rounded-xl border border-white/10 bg-black/85 p-4 text-sm text-white shadow-2xl"
+      >
+        <div class="font-semibold">Browser playback may not be supported for .{{ fileExtension || 'unknown' }}</div>
+        <p class="mt-1 text-white/75">
+          The stream endpoint is available, but Chrome can only play a limited set of containers/codecs directly.
+          Use MP4/WebM for browser playback, or open this stream in an external player.
+        </p>
+        <a class="mt-3 inline-block break-all text-blue-300 hover:text-blue-200" :href="videoUrl" target="_blank" rel="noreferrer">
+          {{ videoUrl }}
+        </a>
+      </div>
     </div>
   </div>
 </template>

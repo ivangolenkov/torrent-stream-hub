@@ -87,6 +87,15 @@ func TestTorrentResponseUsesTorrServerCompatibleFields(t *testing.T) {
 	}
 }
 
+func TestStreamContentTypeAvoidsBlockingSniff(t *testing.T) {
+	if got := streamContentType("The.Sopranos.S01E01.avi"); got != "video/x-msvideo" {
+		t.Fatalf("expected AVI content type, got %q", got)
+	}
+	if got := streamContentType("file.unknownext"); got != "application/octet-stream" {
+		t.Fatalf("expected fallback content type, got %q", got)
+	}
+}
+
 func TestTorrentsInvalidJSONReturnsJSONError(t *testing.T) {
 	h := NewTorrServerHandler(nil)
 

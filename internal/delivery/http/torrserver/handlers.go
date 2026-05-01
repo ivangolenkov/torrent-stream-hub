@@ -4,7 +4,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"mime"
 	"net/http"
+	"path/filepath"
 	"strconv"
 	"time"
 
@@ -331,12 +333,26 @@ func (h *TorrServerHandler) serveStream(w http.ResponseWriter, r *http.Request, 
 
 	// 3. Set headers for streaming
 	w.Header().Set("Accept-Ranges", "bytes")
+	if contentType := streamContentType(file.DisplayPath()); contentType != "" {
+		w.Header().Set("Content-Type", contentType)
+	}
 
 	// Create reader for the torrent file.
 	// anacrolix/torrent provides an io.ReadSeeker which http.ServeContent uses natively to handle Range requests.
 	reader := file.NewReader()
+	reader.SetContext(ctx)
+	defer reader.Close()
 	reader.SetResponsive() // Better performance for streaming
 
 	logging.Debugf("stream serving hash=%s file_index=%d file=%q size=%d", hash, index, file.DisplayPath(), file.Length())
 	http.ServeContent(w, r, file.DisplayPath(), time.Time{}, reader)
+}
+
+func streamContentType(name string) string {
+	contentType := mime.TypeByExtension(filepath.Ext(name))
+	if contentType != "" {
+		return contentType
+	}
+
+	return "application/octet-stream"
 }

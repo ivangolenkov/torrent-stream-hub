@@ -76,7 +76,7 @@ const handleAdd = async () => {
 
   try {
     if (mode.value === 'file' && selectedFile.value) {
-      await apiClient.uploadTorrent(selectedFile.value);
+      await apiClient.uploadTorrent(selectedFile.value, poster.value.trim());
     } else {
       await apiClient.addTorrent(link.value, '', false, poster.value.trim());
     }
@@ -240,6 +240,15 @@ const onDrop = (e: DragEvent) => {
                     {{ selectedFile.name }}
                   </p>
                 </div>
+
+                <label for="poster-file" class="mt-4 block text-sm font-medium text-gray-700">Poster URL (optional)</label>
+                <input
+                  id="poster-file"
+                  v-model="poster"
+                  type="url"
+                  class="mt-2 block w-full rounded-md border border-gray-300 p-3 text-sm shadow-sm focus:border-blue-500 focus:ring-blue-500"
+                  placeholder="https://example.com/poster.jpg"
+                >
               </div>
 
               <p v-if="error" class="mt-3 rounded-md bg-red-50 px-3 py-2 text-sm text-red-700">

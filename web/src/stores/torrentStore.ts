@@ -53,6 +53,9 @@ export const useTorrentStore = defineStore('torrents', () => {
     if (action === 'delete' && selectedHash.value === hash) {
       closeInspector();
     }
+    if (action === 'delete') {
+      delete files.value[hash];
+    }
     await loadTorrents();
   };
 

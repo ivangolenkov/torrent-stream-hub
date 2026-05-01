@@ -119,6 +119,10 @@ func (e *Engine) StreamManager() *StreamManager {
 	return e.streamManager
 }
 
+func (e *Engine) DownloadDir() string {
+	return e.cfg.DownloadDir
+}
+
 func (e *Engine) GetTorrentFile(hash string, index int) (*torrent.File, error) {
 	e.mu.RLock()
 	defer e.mu.RUnlock()

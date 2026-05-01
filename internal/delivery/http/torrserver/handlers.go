@@ -316,6 +316,14 @@ func (h *TorrServerHandler) UploadTorrent(w http.ResponseWriter, r *http.Request
 		response.Error(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	if poster := strings.TrimSpace(r.FormValue("poster")); poster != "" {
+		t, err = h.uc.UpdateMetadata(t.Hash, usecase.TorrentMetadata{Poster: poster})
+		if err != nil {
+			logging.Warnf("torrent upload metadata failed filename=%q hash=%s: %v", filename, t.Hash, err)
+			response.Error(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+	}
 
 	response.JSON(w, http.StatusAccepted, toTorrentResponse(t, true))
 }

@@ -72,7 +72,8 @@ func (sw *SyncWorker) Start() {
 
 			for _, dbT := range dbTorrents {
 				if engT, ok := engineMap[dbT.Hash]; ok {
-					// Use engine's updated stats
+					mergePersistedMetadata(engT, dbT)
+					// Use engine's updated stats with persisted compatibility metadata.
 					stateToSend = append(stateToSend, engT)
 				} else {
 					stateToSend = append(stateToSend, dbT)

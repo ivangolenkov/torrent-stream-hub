@@ -53,7 +53,6 @@ const playVideo = (hash: string, index: number, path: string) => {
           v-if="currentTorrent.poster"
           :src="currentTorrent.poster"
           alt=""
-          loading="lazy"
           class="h-14 w-10 flex-none rounded object-cover bg-gray-100"
         >
         <h3 class="text-sm font-medium text-gray-900 truncate pr-4" :title="currentTorrent.name">

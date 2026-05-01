@@ -20,9 +20,10 @@ export const apiClient = {
     if (!response.ok) throw new Error(await readError(response, 'Failed to add torrent'));
   },
 
-  async uploadTorrent(file: globalThis.File): Promise<void> {
+  async uploadTorrent(file: globalThis.File, poster: string = ''): Promise<void> {
     const formData = new FormData();
     formData.append('file', file);
+    if (poster.trim()) formData.append('poster', poster.trim());
 
     const response = await fetch('/torrent/upload', {
       method: 'POST',

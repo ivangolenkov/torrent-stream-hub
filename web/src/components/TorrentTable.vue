@@ -1,9 +1,14 @@
 <script setup lang="ts">
+import { computed, ref } from 'vue';
 import { useTorrentStore } from '../stores/torrentStore';
 import { PlayIcon, PauseIcon, TrashIcon } from '@heroicons/vue/24/solid';
+import { FolderMinusIcon } from '@heroicons/vue/24/outline';
 import type { Torrent } from '../types';
+import ConfirmDialog from './ConfirmDialog.vue';
 
 const store = useTorrentStore();
+const pendingDelete = ref<{ torrent: Torrent; deleteFiles: boolean } | null>(null);
+const deleting = ref(false);
 
 const formatSize = (bytes: number) => {
   if (!bytes) return '0 B';
@@ -51,6 +56,41 @@ const formatPeerTitle = (torrent: Torrent) => {
   const metadata = peers.metadata_ready ? 'ready' : 'pending';
   return `Known: ${peers.known}, connected: ${peers.connected}, pending: ${peers.pending}, half-open: ${peers.half_open}, seeds: ${peers.seeds}, metadata: ${metadata}`;
 };
+
+const torrentLabel = (torrent: Torrent) => torrent.name || torrent.title || torrent.hash;
+
+const deleteTitle = computed(() => {
+  if (!pendingDelete.value) return '';
+  return pendingDelete.value.deleteFiles ? 'Delete Torrent And Files' : 'Remove Torrent';
+});
+
+const deleteMessage = computed(() => {
+  if (!pendingDelete.value) return '';
+  const name = torrentLabel(pendingDelete.value.torrent);
+  return pendingDelete.value.deleteFiles
+    ? `Remove "${name}" from the client and delete all downloaded files from disk.\n\nThis cannot be undone.`
+    : `Remove "${name}" from the client.\n\nDownloaded files will stay on disk.`;
+});
+
+const openDeleteDialog = (torrent: Torrent, deleteFiles: boolean) => {
+  pendingDelete.value = { torrent, deleteFiles };
+};
+
+const cancelDelete = () => {
+  if (deleting.value) return;
+  pendingDelete.value = null;
+};
+
+const confirmDelete = async () => {
+  if (!pendingDelete.value) return;
+  deleting.value = true;
+  try {
+    await store.performAction(pendingDelete.value.torrent.hash, 'delete', pendingDelete.value.deleteFiles);
+    pendingDelete.value = null;
+  } finally {
+    deleting.value = false;
+  }
+};
 </script>
 
 <template>
@@ -88,11 +128,10 @@ const formatPeerTitle = (torrent: Torrent) => {
                 v-if="t.poster"
                 :src="t.poster"
                 alt=""
-                loading="lazy"
                 class="h-12 w-9 flex-none rounded object-cover bg-gray-100"
               >
-              <div class="text-sm font-medium text-gray-900 truncate max-w-[200px] lg:max-w-xs" :title="t.name">
-                {{ t.name || t.hash }}
+              <div class="text-sm font-medium text-gray-900 truncate max-w-[200px] lg:max-w-xs" :title="torrentLabel(t)">
+                {{ torrentLabel(t) }}
               </div>
             </div>
           </td>
@@ -158,16 +197,35 @@ const formatPeerTitle = (torrent: Torrent) => {
               </button>
               
               <button 
-                @click.stop="store.performAction(t.hash, 'delete', true)"
-                class="text-red-600 hover:text-red-900 p-1 rounded-full hover:bg-red-50"
-                title="Delete with files"
+                @click.stop="openDeleteDialog(t, false)"
+                class="text-red-500 hover:text-red-800 p-1 rounded-full hover:bg-red-50"
+                title="Remove torrent only"
               >
                 <TrashIcon class="w-5 h-5" />
+              </button>
+
+              <button 
+                @click.stop="openDeleteDialog(t, true)"
+                class="text-red-600 hover:text-red-900 p-1 rounded-full hover:bg-red-50"
+                title="Remove torrent and files"
+              >
+                <FolderMinusIcon class="w-5 h-5" />
               </button>
             </div>
           </td>
         </tr>
       </tbody>
     </table>
+
+    <ConfirmDialog
+      :is-open="Boolean(pendingDelete)"
+      :title="deleteTitle"
+      :message="deleteMessage"
+      :confirm-label="pendingDelete?.deleteFiles ? 'Delete Files' : 'Remove Torrent'"
+      :danger="true"
+      :loading="deleting"
+      @confirm="confirmDelete"
+      @cancel="cancelDelete"
+    />
   </div>
 </template>

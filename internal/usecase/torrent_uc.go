@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"torrent-stream-hub/internal/engine"
 	"torrent-stream-hub/internal/logging"
@@ -232,16 +234,50 @@ func (uc *TorrentUseCase) Delete(hash string, deleteFiles bool) error {
 		return err
 	}
 
-	// Delete from DB
+	if deleteFiles {
+		if err := uc.deleteTorrentFiles(t); err != nil {
+			logging.Warnf("failed to delete torrent files hash=%s: %v", hash, err)
+			return err
+		}
+	}
+
+	// Delete from DB after optional file removal so a failed file delete remains visible.
 	if err := uc.repo.DeleteTorrent(hash); err != nil {
 		logging.Warnf("failed to delete torrent from DB hash=%s: %v", hash, err)
 		return err
 	}
 
-	// TODO: Actually delete files from disk if deleteFiles is true
-	// We might need to ask the engine for the download dir and construct the path
-
 	return nil
+}
+
+func (uc *TorrentUseCase) deleteTorrentFiles(t *models.Torrent) error {
+	if t == nil {
+		return nil
+	}
+	downloadDir := filepath.Clean(uc.engine.DownloadDir())
+	for _, file := range t.Files {
+		if file == nil || file.Path == "" {
+			continue
+		}
+		path := filepath.Clean(filepath.Join(downloadDir, file.Path))
+		if path == downloadDir || !strings.HasPrefix(path, downloadDir+string(os.PathSeparator)) {
+			return fmt.Errorf("refusing to delete path outside download dir: %s", file.Path)
+		}
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		pruneEmptyDirs(filepath.Dir(path), downloadDir)
+	}
+	return nil
+}
+
+func pruneEmptyDirs(dir, stop string) {
+	for dir != stop && strings.HasPrefix(dir, stop+string(os.PathSeparator)) {
+		if err := os.Remove(dir); err != nil {
+			return
+		}
+		dir = filepath.Dir(dir)
+	}
 }
 
 func (uc *TorrentUseCase) RestoreTorrents() error {

@@ -83,7 +83,14 @@ const formatPeerTitle = (torrent: Torrent) => {
           ]"
         >
           <td class="px-6 py-4 whitespace-nowrap">
-            <div class="flex items-center">
+            <div class="flex items-center gap-3">
+              <img
+                v-if="t.poster"
+                :src="t.poster"
+                alt=""
+                loading="lazy"
+                class="h-12 w-9 flex-none rounded object-cover bg-gray-100"
+              >
               <div class="text-sm font-medium text-gray-900 truncate max-w-[200px] lg:max-w-xs" :title="t.name">
                 {{ t.name || t.hash }}
               </div>

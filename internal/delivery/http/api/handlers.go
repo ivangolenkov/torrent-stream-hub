@@ -48,6 +48,7 @@ type AddTorrentReq struct {
 	Link       string `json:"link"`
 	SavePath   string `json:"save_path"`
 	Sequential bool   `json:"sequential"`
+	Poster     string `json:"poster"`
 }
 
 func (h *APIHandler) AddTorrent(w http.ResponseWriter, r *http.Request) {
@@ -65,7 +66,7 @@ func (h *APIHandler) AddTorrent(w http.ResponseWriter, r *http.Request) {
 	}
 
 	logging.Infof("api add torrent %s", logging.SafeMagnetSummary(req.Link))
-	t, err := h.uc.AddMagnet(req.Link)
+	t, err := h.uc.AddMagnetWithMetadata(req.Link, usecase.TorrentMetadata{Poster: req.Poster})
 	if err != nil {
 		logging.Warnf("api add torrent failed %s: %v", logging.SafeMagnetSummary(req.Link), err)
 		response.Error(w, http.StatusInternalServerError, err.Error())

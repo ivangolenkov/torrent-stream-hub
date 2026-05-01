@@ -40,6 +40,10 @@ export interface PeerSummary {
 export interface Torrent {
   hash: string;
   name: string;
+  title?: string;
+  data?: string;
+  poster?: string;
+  category?: string;
   size: number;
   downloaded: number;
   progress: number;

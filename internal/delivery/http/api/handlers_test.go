@@ -86,6 +86,45 @@ func TestGetAllTorrentsIncludesPeerSummary(t *testing.T) {
 	}
 }
 
+func TestAddTorrentPersistsPoster(t *testing.T) {
+	dir := t.TempDir()
+	db, err := repository.NewSQLiteDB(filepath.Join(dir, "hub.db"))
+	if err != nil {
+		t.Fatalf("failed to create test DB: %v", err)
+	}
+	defer db.Close()
+
+	eng, err := engine.New(&config.Config{
+		DownloadDir:        dir,
+		TorrentPort:        0,
+		MaxActiveDownloads: 1,
+		MinFreeSpaceGB:     0,
+	})
+	if err != nil {
+		t.Fatalf("failed to create engine: %v", err)
+	}
+	defer eng.Close()
+
+	repo := repository.NewTorrentRepo(db)
+	uc := usecase.NewTorrentUseCase(eng, repo)
+	h := NewAPIHandler(uc, nil)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/torrent/add", strings.NewReader(`{"link":"magnet:?xt=urn:btih:`+apiTestInfoHash+`","poster":"https://example.com/poster.jpg"}`))
+	rr := httptest.NewRecorder()
+
+	h.AddTorrent(rr, req)
+
+	if rr.Code != http.StatusAccepted {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusAccepted, rr.Code, rr.Body.String())
+	}
+	fetched, err := repo.GetTorrent(apiTestInfoHash)
+	if err != nil {
+		t.Fatalf("failed to get torrent: %v", err)
+	}
+	if fetched == nil || fetched.Poster != "https://example.com/poster.jpg" {
+		t.Fatalf("expected poster to be persisted, got %+v", fetched)
+	}
+}
+
 func assertJSONError(t *testing.T, rr *httptest.ResponseRecorder, status int, message string) {
 	t.Helper()
 

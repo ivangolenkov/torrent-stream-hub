@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"torrent-stream-hub/internal/engine"
 	"torrent-stream-hub/internal/logging"
 	"torrent-stream-hub/internal/models"
@@ -32,6 +33,13 @@ type TorrentUseCase struct {
 	repo   *repository.TorrentRepo
 }
 
+type TorrentMetadata struct {
+	Title    string
+	Data     string
+	Poster   string
+	Category string
+}
+
 func NewTorrentUseCase(e *engine.Engine, r *repository.TorrentRepo) *TorrentUseCase {
 	return &TorrentUseCase{
 		engine: e,
@@ -40,12 +48,18 @@ func NewTorrentUseCase(e *engine.Engine, r *repository.TorrentRepo) *TorrentUseC
 }
 
 func (uc *TorrentUseCase) AddMagnet(magnet string) (*models.Torrent, error) {
+	return uc.AddMagnetWithMetadata(magnet, TorrentMetadata{})
+}
+
+func (uc *TorrentUseCase) AddMagnetWithMetadata(magnet string, metadata TorrentMetadata) (*models.Torrent, error) {
 	logging.Infof("usecase add magnet %s", logging.SafeMagnetSummary(magnet))
 	t, err := uc.engine.AddMagnet(magnet)
 	if err != nil {
 		logging.Warnf("usecase add magnet failed %s: %v", logging.SafeMagnetSummary(magnet), err)
 		return nil, err
 	}
+
+	applyMetadata(t, metadata)
 
 	// Save initial state to DB
 	if err := uc.repo.SaveTorrent(t); err != nil {
@@ -90,6 +104,7 @@ func (uc *TorrentUseCase) GetAllTorrents() ([]*models.Torrent, error) {
 	seen := make(map[string]bool, len(dbTorrents)+len(engineTorrents))
 	for _, dbT := range dbTorrents {
 		if engineT, ok := engineByHash[dbT.Hash]; ok {
+			mergePersistedMetadata(engineT, dbT)
 			merged = append(merged, engineT)
 		} else {
 			merged = append(merged, dbT)
@@ -107,7 +122,31 @@ func (uc *TorrentUseCase) GetAllTorrents() ([]*models.Torrent, error) {
 }
 
 func (uc *TorrentUseCase) GetTorrent(hash string) (*models.Torrent, error) {
-	return uc.repo.GetTorrent(hash)
+	dbT, err := uc.repo.GetTorrent(hash)
+	if err != nil {
+		return nil, err
+	}
+	engineT := uc.engine.GetTorrent(hash)
+	if engineT == nil {
+		return dbT, nil
+	}
+	mergePersistedMetadata(engineT, dbT)
+	return engineT, nil
+}
+
+func (uc *TorrentUseCase) UpdateMetadata(hash string, metadata TorrentMetadata) (*models.Torrent, error) {
+	t, err := uc.repo.GetTorrent(hash)
+	if err != nil {
+		return nil, err
+	}
+	if t == nil {
+		return nil, TorrentNotFoundError{Hash: hash}
+	}
+	applyMetadata(t, metadata)
+	if err := uc.repo.SaveTorrent(t); err != nil {
+		return nil, err
+	}
+	return uc.GetTorrent(hash)
 }
 
 func (uc *TorrentUseCase) Pause(hash string) error {
@@ -222,6 +261,7 @@ func (uc *TorrentUseCase) RestoreTorrents() error {
 		logging.Infof("restoring torrent hash=%s state=%s source_present=%t", t.Hash, t.State, t.SourceURI != "")
 		restored, err := uc.restoreTorrentToEngine(t)
 		if err == nil {
+			mergePersistedMetadata(restored, t)
 			if err := uc.repo.SaveTorrent(restored); err != nil {
 				logging.Warnf("failed to save restored torrent hash=%s: %v", t.Hash, err)
 				restoreErr = errors.Join(restoreErr, fmt.Errorf("save restored torrent %s: %w", t.Hash, err))
@@ -245,6 +285,14 @@ func (uc *TorrentUseCase) restoreTorrentToEngine(t *models.Torrent) (*models.Tor
 
 	logging.Warnf("restore falling back to bare info hash hash=%s", t.Hash)
 	return uc.engine.AddInfoHash(t.Hash)
+}
+
+func (uc *TorrentUseCase) GetCacheStatus(hash string, index int, offset int64) (*engine.CacheStatus, error) {
+	return uc.engine.GetCacheStatus(hash, index, offset)
+}
+
+func (uc *TorrentUseCase) Warmup(ctx context.Context, hash string, index int) (int64, int64, error) {
+	return uc.engine.Warmup(ctx, hash, index)
 }
 
 func (uc *TorrentUseCase) AddStream(ctx context.Context, hash string, index int) error {
@@ -272,4 +320,42 @@ func (uc *TorrentUseCase) GetTorrentFile(hash string, index int) (*torrent.File,
 		return nil, err
 	}
 	return f, nil
+}
+
+func applyMetadata(t *models.Torrent, metadata TorrentMetadata) {
+	if t == nil {
+		return
+	}
+	if metadata.Title != "" {
+		t.Title = metadata.Title
+	}
+	if metadata.Data != "" {
+		t.Data = metadata.Data
+	}
+	if metadata.Poster != "" {
+		t.Poster = metadata.Poster
+	}
+	if metadata.Category != "" {
+		t.Category = metadata.Category
+	}
+}
+
+func mergePersistedMetadata(runtime, persisted *models.Torrent) {
+	if runtime == nil || persisted == nil {
+		return
+	}
+	runtime.Title = firstNonEmpty(runtime.Title, persisted.Title)
+	runtime.Data = firstNonEmpty(runtime.Data, persisted.Data)
+	runtime.Poster = firstNonEmpty(runtime.Poster, persisted.Poster)
+	runtime.Category = firstNonEmpty(runtime.Category, persisted.Category)
+	runtime.SourceURI = firstNonEmpty(runtime.SourceURI, persisted.SourceURI)
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
 }

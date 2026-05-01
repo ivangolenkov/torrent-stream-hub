@@ -38,7 +38,7 @@ func TestEchoHandler(t *testing.T) {
 func TestSettingsHandler(t *testing.T) {
 	h := NewTorrServerHandler(nil)
 
-	req, _ := http.NewRequest("POST", "/settings", nil)
+	req, _ := http.NewRequest("POST", "/settings", strings.NewReader(`{"action":"get"}`))
 	rr := httptest.NewRecorder()
 
 	http.HandlerFunc(h.Settings).ServeHTTP(rr, req)
@@ -48,7 +48,8 @@ func TestSettingsHandler(t *testing.T) {
 	}
 
 	var body struct {
-		CacheSize int64 `json:"CacheSize"`
+		CacheSize       int64 `json:"CacheSize"`
+		ReaderReadAHead int64 `json:"ReaderReadAHead"`
 	}
 	if err := json.NewDecoder(rr.Body).Decode(&body); err != nil {
 		t.Fatalf("failed to decode response body: %v", err)
@@ -56,13 +57,34 @@ func TestSettingsHandler(t *testing.T) {
 	if body.CacheSize == 0 {
 		t.Fatalf("expected CacheSize for Lampa TorrServer compatibility")
 	}
+	if body.ReaderReadAHead == 0 {
+		t.Fatalf("expected ReaderReadAHead for TorrServer compatibility")
+	}
+}
+
+func TestSettingsSetAndDefAreNoOpCompatibilityResponses(t *testing.T) {
+	h := NewTorrServerHandler(nil)
+	for _, action := range []string{"set", "def"} {
+		req := httptest.NewRequest(http.MethodPost, "/settings", strings.NewReader(`{"action":"`+action+`"}`))
+		rr := httptest.NewRecorder()
+
+		h.Settings(rr, req)
+
+		if rr.Code != http.StatusOK {
+			t.Fatalf("expected status %d for action %s, got %d", http.StatusOK, action, rr.Code)
+		}
+	}
 }
 
 func TestTorrentResponseUsesTorrServerCompatibleFields(t *testing.T) {
 	torrent := &models.Torrent{
-		Hash: "abc123",
-		Name: "[LAMPA] Movie",
-		Size: 2048,
+		Hash:     "abc123",
+		Name:     "[LAMPA] Movie",
+		Title:    "LAMPA Title",
+		Data:     `{"id":"1"}`,
+		Poster:   "https://example.com/poster.jpg",
+		Category: "movies",
+		Size:     2048,
 		Files: []*models.File{
 			{Index: 3, Path: "Movie/Movie.mkv", Size: 2048},
 		},
@@ -73,17 +95,42 @@ func TestTorrentResponseUsesTorrServerCompatibleFields(t *testing.T) {
 	if body.Hash != torrent.Hash {
 		t.Fatalf("expected hash %q, got %q", torrent.Hash, body.Hash)
 	}
-	if body.Title != torrent.Name {
-		t.Fatalf("expected title %q, got %q", torrent.Name, body.Title)
+	if body.Title != torrent.Title {
+		t.Fatalf("expected title %q, got %q", torrent.Title, body.Title)
 	}
-	if body.Data != "{}" {
-		t.Fatalf("expected JSON object string data, got %q", body.Data)
+	if body.Data != torrent.Data || body.Poster != torrent.Poster || body.Category != torrent.Category {
+		t.Fatalf("unexpected metadata response: %+v", body)
 	}
 	if len(body.FileStats) != 1 {
 		t.Fatalf("expected one file_stat, got %d", len(body.FileStats))
 	}
-	if body.FileStats[0].ID != 3 || body.FileStats[0].Path != "Movie/Movie.mkv" || body.FileStats[0].Length != 2048 {
+	if body.FileStats[0].ID != 4 || body.FileStats[0].Path != "Movie/Movie.mkv" || body.FileStats[0].Length != 2048 {
 		t.Fatalf("unexpected file_stat: %+v", body.FileStats[0])
+	}
+}
+
+func TestTorrServerFileIDMapping(t *testing.T) {
+	if got := internalIndexToTorrserver(0); got != 1 {
+		t.Fatalf("expected internal 0 to become TorrServer id 1, got %d", got)
+	}
+	if got := torrserverIndexToInternal(1); got != 0 {
+		t.Fatalf("expected TorrServer id 1 to become internal 0, got %d", got)
+	}
+	if got := torrserverIndexToInternal(0); got != 0 {
+		t.Fatalf("expected id 0 fallback to stay internal 0, got %d", got)
+	}
+}
+
+func TestCacheRequestAcceptsJSONWithFormContentType(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPost, "/cache", strings.NewReader(`{"action":"get","hash":"abc","index":1}`))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded; charset=UTF-8")
+
+	body, err := decodeCacheRequest(req)
+	if err != nil {
+		t.Fatalf("failed to decode cache request: %v", err)
+	}
+	if body.Action != "get" || body.Hash != "abc" || body.Index != 1 {
+		t.Fatalf("unexpected cache request: %+v", body)
 	}
 }
 

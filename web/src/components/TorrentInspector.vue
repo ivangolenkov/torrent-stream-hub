@@ -47,10 +47,19 @@ const playVideo = (hash: string, index: number, path: string) => {
 <template>
   <div v-if="currentTorrent" class="h-full flex flex-col max-h-[calc(100vh-8rem)]">
     <!-- Header -->
-    <div class="px-4 py-3 bg-gray-50 border-b border-gray-200 flex justify-between items-center">
-      <h3 class="text-sm font-medium text-gray-900 truncate pr-4" :title="currentTorrent.name">
-        {{ currentTorrent.name || currentTorrent.hash }}
-      </h3>
+    <div class="px-4 py-3 bg-gray-50 border-b border-gray-200 flex justify-between items-center gap-3">
+      <div class="flex min-w-0 items-center gap-3">
+        <img
+          v-if="currentTorrent.poster"
+          :src="currentTorrent.poster"
+          alt=""
+          loading="lazy"
+          class="h-14 w-10 flex-none rounded object-cover bg-gray-100"
+        >
+        <h3 class="text-sm font-medium text-gray-900 truncate pr-4" :title="currentTorrent.name">
+          {{ currentTorrent.name || currentTorrent.hash }}
+        </h3>
+      </div>
       <button @click="store.closeInspector()" class="text-gray-400 hover:text-gray-500">
         <XMarkIcon class="h-5 w-5" />
       </button>

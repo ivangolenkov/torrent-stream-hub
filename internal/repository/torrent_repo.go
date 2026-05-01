@@ -24,17 +24,21 @@ func (r *TorrentRepo) SaveTorrent(t *models.Torrent) error {
 
 	// Insert or replace torrent metadata
 	_, err = tx.Exec(`
-		INSERT INTO torrents (hash, name, size, downloaded, state, error, source_uri, updated_at) 
-		VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+		INSERT INTO torrents (hash, name, title, data, poster, category, size, downloaded, state, error, source_uri, updated_at) 
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
 		ON CONFLICT(hash) DO UPDATE SET 
 			name=excluded.name, 
+			title=CASE WHEN excluded.title != '' THEN excluded.title ELSE torrents.title END,
+			data=CASE WHEN excluded.data != '' THEN excluded.data ELSE torrents.data END,
+			poster=CASE WHEN excluded.poster != '' THEN excluded.poster ELSE torrents.poster END,
+			category=CASE WHEN excluded.category != '' THEN excluded.category ELSE torrents.category END,
 			size=excluded.size, 
 			downloaded=excluded.downloaded, 
 			state=excluded.state, 
 			error=excluded.error,
 			source_uri=CASE WHEN excluded.source_uri != '' THEN excluded.source_uri ELSE torrents.source_uri END,
 			updated_at=CURRENT_TIMESTAMP
-	`, t.Hash, t.Name, t.Size, t.Downloaded, string(t.State), string(t.Error), t.SourceURI)
+	`, t.Hash, t.Name, t.Title, t.Data, t.Poster, t.Category, t.Size, t.Downloaded, string(t.State), string(t.Error), t.SourceURI)
 	if err != nil {
 		return fmt.Errorf("failed to save torrent: %w", err)
 	}
@@ -66,12 +70,12 @@ func (r *TorrentRepo) SaveTorrent(t *models.Torrent) error {
 }
 
 func (r *TorrentRepo) GetTorrent(hash string) (*models.Torrent, error) {
-	row := r.db.DB().QueryRow(`SELECT hash, name, size, downloaded, state, error, source_uri FROM torrents WHERE hash = ?`, hash)
+	row := r.db.DB().QueryRow(`SELECT hash, name, title, data, poster, category, size, downloaded, state, error, source_uri FROM torrents WHERE hash = ?`, hash)
 
 	t := &models.Torrent{}
 	var stateStr, errorStr string
 
-	if err := row.Scan(&t.Hash, &t.Name, &t.Size, &t.Downloaded, &stateStr, &errorStr, &t.SourceURI); err != nil {
+	if err := row.Scan(&t.Hash, &t.Name, &t.Title, &t.Data, &t.Poster, &t.Category, &t.Size, &t.Downloaded, &stateStr, &errorStr, &t.SourceURI); err != nil {
 		if err == sql.ErrNoRows {
 			return nil, nil // not found
 		}
@@ -100,7 +104,7 @@ func (r *TorrentRepo) GetTorrent(hash string) (*models.Torrent, error) {
 }
 
 func (r *TorrentRepo) GetAllTorrents() ([]*models.Torrent, error) {
-	rows, err := r.db.DB().Query(`SELECT hash, name, size, downloaded, state, error, source_uri FROM torrents ORDER BY created_at DESC`)
+	rows, err := r.db.DB().Query(`SELECT hash, name, title, data, poster, category, size, downloaded, state, error, source_uri FROM torrents ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, err
 	}
@@ -110,7 +114,7 @@ func (r *TorrentRepo) GetAllTorrents() ([]*models.Torrent, error) {
 	for rows.Next() {
 		t := &models.Torrent{}
 		var stateStr, errorStr string
-		if err := rows.Scan(&t.Hash, &t.Name, &t.Size, &t.Downloaded, &stateStr, &errorStr, &t.SourceURI); err != nil {
+		if err := rows.Scan(&t.Hash, &t.Name, &t.Title, &t.Data, &t.Poster, &t.Category, &t.Size, &t.Downloaded, &stateStr, &errorStr, &t.SourceURI); err != nil {
 			return nil, err
 		}
 		t.State = models.TorrentState(stateStr)

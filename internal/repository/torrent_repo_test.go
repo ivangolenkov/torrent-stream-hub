@@ -46,6 +46,10 @@ func TestSaveAndGetTorrent(t *testing.T) {
 		State:      models.StateDownloading,
 		Error:      models.ErrNone,
 		SourceURI:  "magnet:?xt=urn:btih:dummyhash123",
+		Title:      "Custom Title",
+		Data:       `{"kinopoisk":"1"}`,
+		Poster:     "https://example.com/poster.jpg",
+		Category:   "movies",
 		Files: []*models.File{
 			{Index: 0, Path: "file1.txt", Size: 512, Downloaded: 256, Priority: models.PriorityNormal, IsMedia: false},
 			{Index: 1, Path: "video.mp4", Size: 512, Downloaded: 256, Priority: models.PriorityHigh, IsMedia: true},
@@ -71,6 +75,9 @@ func TestSaveAndGetTorrent(t *testing.T) {
 	if fetched.Hash != torrent.Hash || fetched.Name != torrent.Name || fetched.Size != torrent.Size || fetched.SourceURI != torrent.SourceURI {
 		t.Errorf("Metadata mismatch: expected %+v, got %+v", torrent, fetched)
 	}
+	if fetched.Title != torrent.Title || fetched.Data != torrent.Data || fetched.Poster != torrent.Poster || fetched.Category != torrent.Category {
+		t.Errorf("TorrServer metadata mismatch: expected %+v, got %+v", torrent, fetched)
+	}
 	if fetched.State != torrent.State {
 		t.Errorf("Expected state %s, got %s", torrent.State, fetched.State)
 	}
@@ -94,6 +101,10 @@ func TestSaveAndGetTorrent(t *testing.T) {
 	torrent.State = models.StateSeeding
 	torrent.Downloaded = 1024
 	torrent.SourceURI = ""
+	torrent.Title = ""
+	torrent.Data = ""
+	torrent.Poster = ""
+	torrent.Category = ""
 	torrent.Files[0].Downloaded = 512
 	torrent.Files[1].Downloaded = 512
 
@@ -107,6 +118,9 @@ func TestSaveAndGetTorrent(t *testing.T) {
 	}
 	if fetchedUpdated.SourceURI != "magnet:?xt=urn:btih:dummyhash123" {
 		t.Errorf("Expected source URI to be preserved, got %q", fetchedUpdated.SourceURI)
+	}
+	if fetchedUpdated.Title != "Custom Title" || fetchedUpdated.Data != `{"kinopoisk":"1"}` || fetchedUpdated.Poster != "https://example.com/poster.jpg" || fetchedUpdated.Category != "movies" {
+		t.Errorf("Expected TorrServer metadata to be preserved, got %+v", fetchedUpdated)
 	}
 	if fetchedUpdated.Files[0].Downloaded != 512 {
 		t.Errorf("File update failed. Downloaded: %d", fetchedUpdated.Files[0].Downloaded)

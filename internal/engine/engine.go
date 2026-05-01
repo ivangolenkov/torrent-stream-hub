@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -140,6 +141,38 @@ func (e *Engine) GetTorrentFile(hash string, index int) (*torrent.File, error) {
 	}
 
 	return files[index], nil
+}
+
+func (e *Engine) GetTorrent(hash string) *models.Torrent {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	mt, ok := e.managedTorrents[hash]
+	if !ok {
+		return nil
+	}
+	return e.mapManagedTorrent(mt)
+}
+
+func (e *Engine) Warmup(ctx context.Context, hash string, index int) (int64, int64, error) {
+	file, err := e.GetTorrentFile(hash, index)
+	if err != nil {
+		return 0, 0, err
+	}
+	file.SetPriority(torrent.PiecePriorityHigh)
+
+	reader := file.NewReader()
+	reader.SetContext(ctx)
+	reader.SetResponsive()
+	defer reader.Close()
+
+	const warmupSize = 4 << 20
+	limited := io.LimitReader(reader, warmupSize)
+	read, err := io.Copy(io.Discard, limited)
+	if err != nil && !errors.Is(err, context.Canceled) {
+		return read, minInt64(warmupSize, file.Length()), err
+	}
+	return read, minInt64(warmupSize, file.Length()), nil
 }
 
 func (e *Engine) Close() {
@@ -356,6 +389,13 @@ func isMediaFile(filePath string) bool {
 	default:
 		return false
 	}
+}
+
+func minInt64(a, b int64) int64 {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 func (e *Engine) setStateLocked(hash string, mt *ManagedTorrent, state models.TorrentState, errReason models.ErrorReason, reason string) {

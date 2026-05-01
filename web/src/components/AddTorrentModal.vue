@@ -15,6 +15,7 @@ type AddMode = 'magnet' | 'file';
 const store = useTorrentStore();
 const mode = ref<AddMode>('magnet');
 const link = ref('');
+const poster = ref('');
 const selectedFile = ref<File | null>(null);
 const fileInput = ref<HTMLInputElement | null>(null);
 const isDragging = ref(false);
@@ -35,6 +36,7 @@ const actionLabel = computed(() => {
 const resetForm = () => {
   mode.value = 'magnet';
   link.value = '';
+  poster.value = '';
   selectedFile.value = null;
   error.value = '';
   isDragging.value = false;
@@ -76,7 +78,7 @@ const handleAdd = async () => {
     if (mode.value === 'file' && selectedFile.value) {
       await apiClient.uploadTorrent(selectedFile.value);
     } else {
-      await apiClient.addTorrent(link.value, '', false);
+      await apiClient.addTorrent(link.value, '', false, poster.value.trim());
     }
 
     await store.loadTorrents();
@@ -200,6 +202,15 @@ const onDrop = (e: DragEvent) => {
                 <p class="mt-2 text-xs text-gray-500">
                   Raw BTIH hashes are automatically converted to magnet links before sending.
                 </p>
+
+                <label for="poster" class="mt-4 block text-sm font-medium text-gray-700">Poster URL (optional)</label>
+                <input
+                  id="poster"
+                  v-model="poster"
+                  type="url"
+                  class="mt-2 block w-full rounded-md border border-gray-300 p-3 text-sm shadow-sm focus:border-blue-500 focus:ring-blue-500"
+                  placeholder="https://example.com/poster.jpg"
+                >
               </div>
 
               <div v-else>

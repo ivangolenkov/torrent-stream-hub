@@ -10,12 +10,12 @@ export const apiClient = {
     return Array.isArray(data) ? data : [];
   },
 
-  async addTorrent(link: string, savePath: string = '', sequential: boolean = false): Promise<void> {
+  async addTorrent(link: string, savePath: string = '', sequential: boolean = false, poster: string = ''): Promise<void> {
     const normalizedLink = normalizeTorrentLink(link);
     const response = await fetch(`${API_BASE}/torrent/add`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ link: normalizedLink, save_path: savePath, sequential })
+      body: JSON.stringify({ link: normalizedLink, save_path: savePath, sequential, poster })
     });
     if (!response.ok) throw new Error(await readError(response, 'Failed to add torrent'));
   },

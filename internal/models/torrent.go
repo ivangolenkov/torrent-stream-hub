@@ -39,6 +39,10 @@ const (
 type Torrent struct {
 	Hash       string       `json:"hash"`
 	Name       string       `json:"name"`
+	Title      string       `json:"title,omitempty"`
+	Data       string       `json:"data,omitempty"`
+	Poster     string       `json:"poster,omitempty"`
+	Category   string       `json:"category,omitempty"`
 	Size       int64        `json:"size"`
 	Downloaded int64        `json:"downloaded"`
 	Progress   float64      `json:"progress"`

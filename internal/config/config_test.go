@@ -83,3 +83,35 @@ func TestGetEnvAsBool(t *testing.T) {
 		t.Errorf("Expected false, got %v", val)
 	}
 }
+
+func TestApplyDefaultsSetsBTDefaults(t *testing.T) {
+	cfg := &Config{}
+
+	ApplyDefaults(cfg)
+
+	if cfg.BTClientProfile != "qbittorrent" {
+		t.Fatalf("expected qbittorrent profile, got %q", cfg.BTClientProfile)
+	}
+	if cfg.BTRetrackersMode != "append" {
+		t.Fatalf("expected append retrackers mode, got %q", cfg.BTRetrackersMode)
+	}
+	if cfg.BTRetrackersFile != "/config/trackers.txt" {
+		t.Fatalf("expected default retrackers file, got %q", cfg.BTRetrackersFile)
+	}
+	if cfg.BTEstablishedConns != 50 || cfg.BTHalfOpenConns != 50 || cfg.BTTotalHalfOpen != 500 {
+		t.Fatalf("unexpected connection defaults: %+v", cfg)
+	}
+	if cfg.BTPeersLowWater != 100 || cfg.BTPeersHighWater != 1000 || cfg.BTDialRateLimit != 20 {
+		t.Fatalf("unexpected peer discovery defaults: %+v", cfg)
+	}
+}
+
+func TestApplyDefaultsClampsPeerWatermarks(t *testing.T) {
+	cfg := &Config{BTPeersLowWater: 200, BTPeersHighWater: 100}
+
+	ApplyDefaults(cfg)
+
+	if cfg.BTPeersHighWater != cfg.BTPeersLowWater {
+		t.Fatalf("expected high water to be clamped to low water, got low=%d high=%d", cfg.BTPeersLowWater, cfg.BTPeersHighWater)
+	}
+}

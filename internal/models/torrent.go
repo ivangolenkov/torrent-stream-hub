@@ -72,6 +72,39 @@ type PeerSummary struct {
 	DHTStatus     string `json:"dht_status,omitempty"`
 }
 
+type BTHealth struct {
+	SeedEnabled              bool              `json:"seed_enabled"`
+	UploadEnabled            bool              `json:"upload_enabled"`
+	DHTEnabled               bool              `json:"dht_enabled"`
+	PEXEnabled               bool              `json:"pex_enabled"`
+	UPNPEnabled              bool              `json:"upnp_enabled"`
+	TCPEnabled               bool              `json:"tcp_enabled"`
+	UTPEnabled               bool              `json:"utp_enabled"`
+	IPv6Enabled              bool              `json:"ipv6_enabled"`
+	ListenPort               int               `json:"listen_port"`
+	ClientProfile            string            `json:"client_profile"`
+	RetrackersMode           string            `json:"retrackers_mode"`
+	DownloadLimit            int               `json:"download_limit"`
+	UploadLimit              int               `json:"upload_limit"`
+	IncomingConnectivityNote string            `json:"incoming_connectivity_note"`
+	Torrents                 []BTTorrentHealth `json:"torrents"`
+}
+
+type BTTorrentHealth struct {
+	Hash          string       `json:"hash"`
+	Name          string       `json:"name"`
+	State         TorrentState `json:"state"`
+	Known         int          `json:"known"`
+	Connected     int          `json:"connected"`
+	Pending       int          `json:"pending"`
+	HalfOpen      int          `json:"half_open"`
+	Seeds         int          `json:"seeds"`
+	TrackerStatus string       `json:"tracker_status,omitempty"`
+	TrackerError  string       `json:"tracker_error,omitempty"`
+	DownloadSpeed int64        `json:"download_speed"`
+	UploadSpeed   int64        `json:"upload_speed"`
+}
+
 // File represents a single file within a torrent
 type File struct {
 	Index      int          `json:"index"`

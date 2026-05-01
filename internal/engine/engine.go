@@ -2,9 +2,13 @@ package engine
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/base32"
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -65,21 +69,31 @@ type ManagedTorrent struct {
 }
 
 func New(cfg *config.Config) (*Engine, error) {
-	logging.Infof("initializing torrent engine download_dir=%s torrent_port=%d max_downloads=%d min_free_space_gb=%d", cfg.DownloadDir, cfg.TorrentPort, cfg.MaxActiveDownloads, cfg.MinFreeSpaceGB)
+	config.ApplyDefaults(cfg)
+	logging.Infof("initializing torrent engine download_dir=%s torrent_port=%d max_downloads=%d min_free_space_gb=%d bt_seed=%t bt_no_upload=%t bt_profile=%s bt_retrackers=%s dht=%t pex=%t upnp=%t tcp=%t utp=%t ipv6=%t established_conns=%d half_open=%d total_half_open=%d peers_low=%d peers_high=%d dial_rate=%d",
+		cfg.DownloadDir,
+		cfg.TorrentPort,
+		cfg.MaxActiveDownloads,
+		cfg.MinFreeSpaceGB,
+		cfg.BTSeed,
+		cfg.BTNoUpload,
+		cfg.BTClientProfile,
+		cfg.BTRetrackersMode,
+		!cfg.BTDisableDHT,
+		!cfg.BTDisablePEX,
+		!cfg.BTDisableUPNP,
+		!cfg.BTDisableTCP,
+		!cfg.BTDisableUTP,
+		!cfg.BTDisableIPv6,
+		cfg.BTEstablishedConns,
+		cfg.BTHalfOpenConns,
+		cfg.BTTotalHalfOpen,
+		cfg.BTPeersLowWater,
+		cfg.BTPeersHighWater,
+		cfg.BTDialRateLimit,
+	)
 
-	clientConfig := torrent.NewDefaultClientConfig()
-	clientConfig.DataDir = cfg.DownloadDir
-	clientConfig.ListenPort = cfg.TorrentPort
-
-	// Limit mmap: Use standard file storage instead of mmap which consumes too much RAM
-	clientConfig.DefaultStorage = storage.NewFile(cfg.DownloadDir)
-
-	if cfg.DownloadLimit > 0 {
-		clientConfig.DownloadRateLimiter = rate.NewLimiter(rate.Limit(cfg.DownloadLimit), cfg.DownloadLimit)
-	}
-	if cfg.UploadLimit > 0 {
-		clientConfig.UploadRateLimiter = rate.NewLimiter(rate.Limit(cfg.UploadLimit), cfg.UploadLimit)
-	}
+	clientConfig := buildClientConfig(cfg)
 
 	var eng *Engine
 	clientConfig.Callbacks.StatusUpdated = append(clientConfig.Callbacks.StatusUpdated, func(event torrent.StatusUpdatedEvent) {
@@ -113,6 +127,65 @@ func New(cfg *config.Config) (*Engine, error) {
 	go eng.resourceMonitor()
 
 	return eng, nil
+}
+
+func buildClientConfig(cfg *config.Config) *torrent.ClientConfig {
+	config.ApplyDefaults(cfg)
+	clientConfig := torrent.NewDefaultClientConfig()
+	clientConfig.DataDir = cfg.DownloadDir
+	clientConfig.ListenPort = cfg.TorrentPort
+	clientConfig.DefaultStorage = storage.NewFile(cfg.DownloadDir)
+	clientConfig.Seed = cfg.BTSeed
+	clientConfig.NoUpload = cfg.BTNoUpload
+	clientConfig.NoDHT = cfg.BTDisableDHT
+	clientConfig.DisablePEX = cfg.BTDisablePEX
+	clientConfig.NoDefaultPortForwarding = cfg.BTDisableUPNP
+	clientConfig.DisableTCP = cfg.BTDisableTCP
+	clientConfig.DisableUTP = cfg.BTDisableUTP
+	clientConfig.DisableIPv6 = cfg.BTDisableIPv6
+	clientConfig.EstablishedConnsPerTorrent = cfg.BTEstablishedConns
+	clientConfig.HalfOpenConnsPerTorrent = cfg.BTHalfOpenConns
+	clientConfig.TotalHalfOpenConns = cfg.BTTotalHalfOpen
+	clientConfig.TorrentPeersLowWater = cfg.BTPeersLowWater
+	clientConfig.TorrentPeersHighWater = cfg.BTPeersHighWater
+	clientConfig.DialRateLimiter = rate.NewLimiter(rate.Limit(cfg.BTDialRateLimit), cfg.BTDialRateLimit)
+
+	if strings.EqualFold(cfg.BTClientProfile, "qbittorrent") || cfg.BTClientProfile == "" {
+		applyQBittorrentProfile(clientConfig)
+	} else if !strings.EqualFold(cfg.BTClientProfile, "default") {
+		logging.Warnf("unknown bt client profile %q, using qbittorrent", cfg.BTClientProfile)
+		applyQBittorrentProfile(clientConfig)
+	}
+
+	if cfg.DownloadLimit > 0 {
+		clientConfig.DownloadRateLimiter = rate.NewLimiter(rate.Limit(cfg.DownloadLimit), cfg.DownloadLimit)
+	}
+	if cfg.UploadLimit > 0 {
+		clientConfig.UploadRateLimiter = rate.NewLimiter(rate.Limit(cfg.UploadLimit), cfg.UploadLimit)
+	}
+
+	return clientConfig
+}
+
+func applyQBittorrentProfile(clientConfig *torrent.ClientConfig) {
+	const (
+		userAgent = "qBittorrent/4.3.9"
+		peerID    = "-qB4390-"
+	)
+	clientConfig.HTTPUserAgent = userAgent
+	clientConfig.ExtendedHandshakeClientVersion = userAgent
+	clientConfig.Bep20 = peerID
+	clientConfig.PeerID = randomPeerID(peerID)
+}
+
+func randomPeerID(prefix string) string {
+	randomBytes := make([]byte, 32)
+	if _, err := rand.Read(randomBytes); err != nil {
+		logging.Warnf("failed to generate random peer id, using deterministic fallback: %v", err)
+		return (prefix + "00000000000000000000")[:20]
+	}
+	encoded := base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(randomBytes)
+	return (prefix + encoded)[:20]
 }
 
 func (e *Engine) StreamManager() *StreamManager {
@@ -191,9 +264,15 @@ func (e *Engine) Close() {
 
 func (e *Engine) AddMagnet(magnet string) (*models.Torrent, error) {
 	logging.Infof("adding torrent from magnet %s", logging.SafeMagnetSummary(magnet))
-	t, err := e.client.AddMagnet(magnet)
+	spec, err := torrent.TorrentSpecFromMagnetUri(magnet)
 	if err != nil {
-		logging.Warnf("failed to add magnet %s: %v", logging.SafeMagnetSummary(magnet), err)
+		logging.Warnf("failed to parse magnet %s: %v", logging.SafeMagnetSummary(magnet), err)
+		return nil, err
+	}
+	e.augmentTorrentSpec(spec)
+	t, _, err := e.client.AddTorrentSpec(spec)
+	if err != nil {
+		logging.Warnf("failed to add magnet spec %s: %v", logging.SafeMagnetSummary(magnet), err)
 		return nil, err
 	}
 
@@ -221,7 +300,13 @@ func (e *Engine) AddTorrentFile(r io.Reader) (*models.Torrent, error) {
 	}
 	logging.Debugf(".torrent file parsed hash=%s trackers=%d", metaInfo.HashInfoBytes().HexString(), len(metaInfo.UpvertedAnnounceList().DistinctValues()))
 
-	t, err := e.client.AddTorrent(metaInfo)
+	spec, err := torrent.TorrentSpecFromMetaInfoErr(metaInfo)
+	if err != nil {
+		logging.Warnf("failed to build torrent spec hash=%s: %v", metaInfo.HashInfoBytes().HexString(), err)
+		return nil, err
+	}
+	e.augmentTorrentSpec(spec)
+	t, _, err := e.client.AddTorrentSpec(spec)
 	if err != nil {
 		logging.Warnf("failed to add .torrent hash=%s: %v", metaInfo.HashInfoBytes().HexString(), err)
 		return nil, err
@@ -234,6 +319,109 @@ func (e *Engine) AddTorrentFile(r io.Reader) (*models.Torrent, error) {
 	model.SourceURI = metaInfo.Magnet(nil, nil).String()
 	logging.Infof("torrent added hash=%s source=file state=%s", model.Hash, model.State)
 	return model, nil
+}
+
+func (e *Engine) augmentTorrentSpec(spec *torrent.TorrentSpec) {
+	if spec == nil {
+		return
+	}
+	trackers := e.retrackers()
+	if len(trackers) == 0 {
+		return
+	}
+
+	switch strings.ToLower(strings.TrimSpace(e.cfg.BTRetrackersMode)) {
+	case "off":
+		return
+	case "replace":
+		spec.Trackers = [][]string{trackers}
+	case "", "append":
+		spec.Trackers = appendTrackerTier(spec.Trackers, trackers)
+	default:
+		logging.Warnf("unknown retrackers mode %q, using append", e.cfg.BTRetrackersMode)
+		spec.Trackers = appendTrackerTier(spec.Trackers, trackers)
+	}
+}
+
+func (e *Engine) retrackers() []string {
+	return mergeTrackers(defaultRetrackers(), loadTrackersFile(e.cfg.BTRetrackersFile))
+}
+
+func appendTrackerTier(existing [][]string, trackers []string) [][]string {
+	if len(trackers) == 0 {
+		return existing
+	}
+	merged := make([][]string, 0, len(existing)+1)
+	for _, tier := range existing {
+		cleanTier := mergeTrackers(tier)
+		if len(cleanTier) > 0 {
+			merged = append(merged, cleanTier)
+		}
+	}
+	merged = append(merged, mergeTrackers(trackers))
+	return merged
+}
+
+func mergeTrackers(groups ...[]string) []string {
+	seen := make(map[string]bool)
+	var merged []string
+	for _, group := range groups {
+		for _, tracker := range group {
+			tracker = strings.TrimSpace(tracker)
+			if tracker == "" || seen[tracker] || !validTrackerURL(tracker) {
+				continue
+			}
+			seen[tracker] = true
+			merged = append(merged, tracker)
+		}
+	}
+	return merged
+}
+
+func validTrackerURL(raw string) bool {
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return false
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "udp", "http", "https", "ws", "wss":
+		return true
+	default:
+		return false
+	}
+}
+
+func loadTrackersFile(path string) []string {
+	if strings.TrimSpace(path) == "" {
+		return nil
+	}
+	buf, err := os.ReadFile(path)
+	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			logging.Warnf("failed to read retrackers file path=%s: %v", path, err)
+		}
+		return nil
+	}
+	return strings.Split(string(buf), "\n")
+}
+
+func defaultRetrackers() []string {
+	return []string{
+		"http://retracker.local/announce",
+		"http://bt4.t-ru.org/ann?magnet",
+		"http://retracker.mgts.by:80/announce",
+		"http://tracker.city9x.com:2710/announce",
+		"http://tracker.electro-torrent.pl:80/announce",
+		"http://tracker.internetwarriors.net:1337/announce",
+		"http://tracker2.itzmx.com:6961/announce",
+		"udp://opentor.org:2710",
+		"udp://public.popcorn-tracker.org:6969/announce",
+		"udp://tracker.opentrackr.org:1337/announce",
+		"http://bt.svao-ix.ru/announce",
+		"udp://explodie.org:6969",
+		"wss://tracker.btorrent.xyz",
+		"wss://tracker.openwebtorrent.com",
+	}
 }
 
 func (e *Engine) addTorrent(t *torrent.Torrent) (*models.Torrent, error) {
@@ -328,6 +516,68 @@ func (e *Engine) GetAllTorrents() []*models.Torrent {
 		torrents = append(torrents, e.mapManagedTorrent(mt))
 	}
 	return torrents
+}
+
+func (e *Engine) BTHealth() *models.BTHealth {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	health := &models.BTHealth{
+		SeedEnabled:              e.cfg.BTSeed,
+		UploadEnabled:            !e.cfg.BTNoUpload,
+		DHTEnabled:               !e.cfg.BTDisableDHT,
+		PEXEnabled:               !e.cfg.BTDisablePEX,
+		UPNPEnabled:              !e.cfg.BTDisableUPNP,
+		TCPEnabled:               !e.cfg.BTDisableTCP,
+		UTPEnabled:               !e.cfg.BTDisableUTP,
+		IPv6Enabled:              !e.cfg.BTDisableIPv6,
+		ListenPort:               e.cfg.TorrentPort,
+		ClientProfile:            normalizedBTClientProfile(e.cfg.BTClientProfile),
+		RetrackersMode:           normalizedRetrackersMode(e.cfg.BTRetrackersMode),
+		DownloadLimit:            e.cfg.DownloadLimit,
+		UploadLimit:              e.cfg.UploadLimit,
+		IncomingConnectivityNote: "Incoming peers may not reach this client unless TCP/UDP torrent port is forwarded or UPnP succeeds.",
+		Torrents:                 make([]models.BTTorrentHealth, 0, len(e.managedTorrents)),
+	}
+
+	for _, mt := range e.managedTorrents {
+		stats := mt.t.Stats()
+		e.updateSpeedsLocked(mt, stats)
+		health.Torrents = append(health.Torrents, models.BTTorrentHealth{
+			Hash:          mt.t.InfoHash().HexString(),
+			Name:          mt.t.Name(),
+			State:         mt.state,
+			Known:         stats.TotalPeers,
+			Connected:     stats.ActivePeers,
+			Pending:       stats.PendingPeers,
+			HalfOpen:      stats.HalfOpenPeers,
+			Seeds:         stats.ConnectedSeeders,
+			TrackerStatus: mt.trackerStatus,
+			TrackerError:  mt.trackerError,
+			DownloadSpeed: mt.downloadSpeed,
+			UploadSpeed:   mt.uploadSpeed,
+		})
+	}
+
+	return health
+}
+
+func normalizedBTClientProfile(profile string) string {
+	switch strings.ToLower(strings.TrimSpace(profile)) {
+	case "default":
+		return "default"
+	default:
+		return "qbittorrent"
+	}
+}
+
+func normalizedRetrackersMode(mode string) string {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "off", "replace":
+		return strings.ToLower(strings.TrimSpace(mode))
+	default:
+		return "append"
+	}
 }
 
 func (e *Engine) mapManagedTorrent(mt *ManagedTorrent) *models.Torrent {

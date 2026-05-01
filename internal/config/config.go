@@ -21,6 +21,24 @@ type Config struct {
 	AuthUser           string
 	AuthPassword       string
 	LogLevel           string
+	BTSeed             bool
+	BTSeedConfigured   bool
+	BTNoUpload         bool
+	BTClientProfile    string
+	BTRetrackersMode   string
+	BTRetrackersFile   string
+	BTDisableDHT       bool
+	BTDisablePEX       bool
+	BTDisableUPNP      bool
+	BTDisableTCP       bool
+	BTDisableUTP       bool
+	BTDisableIPv6      bool
+	BTEstablishedConns int
+	BTHalfOpenConns    int
+	BTTotalHalfOpen    int
+	BTPeersLowWater    int
+	BTPeersHighWater   int
+	BTDialRateLimit    int
 }
 
 func Load() *Config {
@@ -39,11 +57,69 @@ func Load() *Config {
 	flag.BoolVar(&cfg.AuthEnabled, "auth-enabled", getEnvAsBool("HUB_AUTH_ENABLED", false), "Enable basic authentication")
 	flag.StringVar(&cfg.AuthUser, "auth-user", getEnv("HUB_AUTH_USER", "admin"), "Basic auth username")
 	flag.StringVar(&cfg.AuthPassword, "auth-password", getEnv("HUB_AUTH_PASSWORD", "admin"), "Basic auth password")
+	flag.BoolVar(&cfg.BTSeed, "bt-seed", getEnvAsBool("HUB_BT_SEED", true), "Enable altruistic seeding after download completion")
+	flag.BoolVar(&cfg.BTNoUpload, "bt-no-upload", getEnvAsBool("HUB_BT_NO_UPLOAD", false), "Disable BitTorrent uploads")
+	flag.StringVar(&cfg.BTClientProfile, "bt-client-profile", getEnv("HUB_BT_CLIENT_PROFILE", "qbittorrent"), "BitTorrent client profile: qbittorrent or default")
+	flag.StringVar(&cfg.BTRetrackersMode, "bt-retrackers-mode", getEnv("HUB_BT_RETRACKERS_MODE", "append"), "Retrackers mode: append, replace, off")
+	flag.StringVar(&cfg.BTRetrackersFile, "bt-retrackers-file", getEnv("HUB_BT_RETRACKERS_FILE", "/config/trackers.txt"), "Path to additional retrackers list")
+	flag.BoolVar(&cfg.BTDisableDHT, "bt-disable-dht", getEnvAsBool("HUB_BT_DISABLE_DHT", false), "Disable BitTorrent DHT")
+	flag.BoolVar(&cfg.BTDisablePEX, "bt-disable-pex", getEnvAsBool("HUB_BT_DISABLE_PEX", false), "Disable BitTorrent PEX")
+	flag.BoolVar(&cfg.BTDisableUPNP, "bt-disable-upnp", getEnvAsBool("HUB_BT_DISABLE_UPNP", false), "Disable UPnP port forwarding")
+	flag.BoolVar(&cfg.BTDisableTCP, "bt-disable-tcp", getEnvAsBool("HUB_BT_DISABLE_TCP", false), "Disable BitTorrent TCP")
+	flag.BoolVar(&cfg.BTDisableUTP, "bt-disable-utp", getEnvAsBool("HUB_BT_DISABLE_UTP", false), "Disable BitTorrent uTP")
+	flag.BoolVar(&cfg.BTDisableIPv6, "bt-disable-ipv6", getEnvAsBool("HUB_BT_DISABLE_IPV6", false), "Disable BitTorrent IPv6")
+	flag.IntVar(&cfg.BTEstablishedConns, "bt-established-conns", getEnvAsInt("HUB_BT_ESTABLISHED_CONNS_PER_TORRENT", 50), "Established peer connections per torrent")
+	flag.IntVar(&cfg.BTHalfOpenConns, "bt-half-open-conns", getEnvAsInt("HUB_BT_HALF_OPEN_CONNS_PER_TORRENT", 50), "Half-open peer connections per torrent")
+	flag.IntVar(&cfg.BTTotalHalfOpen, "bt-total-half-open", getEnvAsInt("HUB_BT_TOTAL_HALF_OPEN_CONNS", 500), "Total half-open peer connections")
+	flag.IntVar(&cfg.BTPeersLowWater, "bt-peers-low-water", getEnvAsInt("HUB_BT_PEERS_LOW_WATER", 100), "Minimum peer reserve before more discovery")
+	flag.IntVar(&cfg.BTPeersHighWater, "bt-peers-high-water", getEnvAsInt("HUB_BT_PEERS_HIGH_WATER", 1000), "Maximum peer reserve")
+	flag.IntVar(&cfg.BTDialRateLimit, "bt-dial-rate-limit", getEnvAsInt("HUB_BT_DIAL_RATE_LIMIT", 20), "Peer dial rate limit per second")
 
 	flag.Parse()
+	cfg.BTSeedConfigured = true
 	cfg.LogLevel = getEnv("HUB_LOG_LEVEL", "debug")
+	ApplyDefaults(cfg)
 
 	return cfg
+}
+
+func ApplyDefaults(cfg *Config) {
+	if cfg == nil {
+		return
+	}
+	if !cfg.BTSeedConfigured {
+		cfg.BTSeed = true
+	}
+	if cfg.BTClientProfile == "" {
+		cfg.BTClientProfile = "qbittorrent"
+	}
+	if cfg.BTRetrackersMode == "" {
+		cfg.BTRetrackersMode = "append"
+	}
+	if cfg.BTRetrackersFile == "" {
+		cfg.BTRetrackersFile = "/config/trackers.txt"
+	}
+	if cfg.BTEstablishedConns <= 0 {
+		cfg.BTEstablishedConns = 50
+	}
+	if cfg.BTHalfOpenConns <= 0 {
+		cfg.BTHalfOpenConns = 50
+	}
+	if cfg.BTTotalHalfOpen <= 0 {
+		cfg.BTTotalHalfOpen = 500
+	}
+	if cfg.BTPeersLowWater <= 0 {
+		cfg.BTPeersLowWater = 100
+	}
+	if cfg.BTPeersHighWater <= 0 {
+		cfg.BTPeersHighWater = 1000
+	}
+	if cfg.BTDialRateLimit <= 0 {
+		cfg.BTDialRateLimit = 20
+	}
+	if cfg.BTPeersHighWater < cfg.BTPeersLowWater {
+		cfg.BTPeersHighWater = cfg.BTPeersLowWater
+	}
 }
 
 func getEnv(key, fallback string) string {

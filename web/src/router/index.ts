@@ -1,6 +1,7 @@
 import { createRouter, createWebHistory } from 'vue-router'
 import MainLayout from '../layouts/MainLayout.vue'
 import Home from '../views/Home.vue'
+import BTHealth from '../views/BTHealth.vue'
 
 const router = createRouter({
   history: createWebHistory(),
@@ -13,6 +14,11 @@ const router = createRouter({
           path: '',
           name: 'Home',
           component: Home
+        },
+        {
+          path: 'health/bt',
+          name: 'BTHealth',
+          component: BTHealth
         }
       ]
     }

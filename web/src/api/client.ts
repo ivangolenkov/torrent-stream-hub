@@ -1,4 +1,4 @@
-import type { Torrent, File } from '../types';
+import type { Torrent, File, BTHealth } from '../types';
 
 const API_BASE = '/api/v1';
 
@@ -46,6 +46,12 @@ export const apiClient = {
     if (!response.ok) throw new Error(await readError(response, 'Failed to fetch files'));
     const data = await response.json();
     return Array.isArray(data) ? data : [];
+  },
+
+  async getBTHealth(): Promise<BTHealth> {
+    const response = await fetch(`${API_BASE}/health/bt`);
+    if (!response.ok) throw new Error(await readError(response, 'Failed to fetch BitTorrent health'));
+    return await response.json();
   }
 };
 

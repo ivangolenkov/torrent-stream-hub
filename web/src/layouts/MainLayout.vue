@@ -12,11 +12,25 @@ import { PlayIcon } from '@heroicons/vue/24/solid';
             <PlayIcon class="h-8 w-8 text-blue-600" />
             <span class="text-xl font-bold text-gray-900 tracking-tight">TorrentStreamHub</span>
           </div>
-          <div class="flex items-center space-x-4">
+          <nav class="flex items-center space-x-4">
+            <RouterLink
+              to="/"
+              class="text-sm font-medium text-gray-500 hover:text-gray-900 transition"
+              exact-active-class="text-blue-600"
+            >
+              Dashboard
+            </RouterLink>
+            <RouterLink
+              to="/health/bt"
+              class="text-sm font-medium text-gray-500 hover:text-gray-900 transition"
+              exact-active-class="text-blue-600"
+            >
+              BitTorrent Health
+            </RouterLink>
             <a href="https://github.com/anacrolix/torrent" target="_blank" class="text-sm font-medium text-gray-500 hover:text-gray-900 transition">
               About
             </a>
-          </div>
+          </nav>
         </div>
       </div>
     </header>

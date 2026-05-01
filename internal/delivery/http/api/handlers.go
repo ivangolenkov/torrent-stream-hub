@@ -30,6 +30,7 @@ func (h *APIHandler) RegisterRoutes(r chi.Router) {
 	r.Post("/torrent/add", h.AddTorrent)
 	r.Post("/torrent/{hash}/action", h.TorrentAction)
 	r.Get("/torrent/{hash}/files", h.GetTorrentFiles)
+	r.Get("/health/bt", h.BTHealth)
 	r.Get("/events", h.SSEEvents)
 }
 
@@ -138,6 +139,10 @@ func (h *APIHandler) GetTorrentFiles(w http.ResponseWriter, r *http.Request) {
 
 	logging.Debugf("api get torrent files hash=%s files=%d", hash, len(t.Files))
 	response.JSON(w, http.StatusOK, t.Files)
+}
+
+func (h *APIHandler) BTHealth(w http.ResponseWriter, r *http.Request) {
+	response.JSON(w, http.StatusOK, h.uc.BTHealth())
 }
 
 // SSEEvents handles Server-Sent Events connection for UI updates

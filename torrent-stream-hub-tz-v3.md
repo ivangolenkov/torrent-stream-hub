@@ -379,6 +379,24 @@ services:
       - HUB_DOWNLOAD_LIMIT=0      # 0 = безлимит (байт/с)
       - HUB_UPLOAD_LIMIT=0
       - HUB_STREAM_CACHE_SIZE=209715200 # 200 МБ в байтах
+      # BitTorrent engine core
+      - HUB_BT_SEED=true
+      - HUB_BT_NO_UPLOAD=false
+      - HUB_BT_CLIENT_PROFILE=qbittorrent
+      - HUB_BT_RETRACKERS_MODE=append
+      - HUB_BT_RETRACKERS_FILE=/config/trackers.txt
+      - HUB_BT_DISABLE_DHT=false
+      - HUB_BT_DISABLE_PEX=false
+      - HUB_BT_DISABLE_UPNP=false
+      - HUB_BT_DISABLE_TCP=false
+      - HUB_BT_DISABLE_UTP=false
+      - HUB_BT_DISABLE_IPV6=false
+      - HUB_BT_ESTABLISHED_CONNS_PER_TORRENT=50
+      - HUB_BT_HALF_OPEN_CONNS_PER_TORRENT=50
+      - HUB_BT_TOTAL_HALF_OPEN_CONNS=500
+      - HUB_BT_PEERS_LOW_WATER=100
+      - HUB_BT_PEERS_HIGH_WATER=1000
+      - HUB_BT_DIAL_RATE_LIMIT=20
       # Безопасность (опционально)
       - HUB_AUTH_ENABLED=false
       - HUB_AUTH_USER=admin

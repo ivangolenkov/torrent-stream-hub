@@ -125,6 +125,10 @@ func (uc *TorrentUseCase) GetAllTorrents() ([]*models.Torrent, error) {
 	return merged, nil
 }
 
+func (uc *TorrentUseCase) BTHealth() *models.BTHealth {
+	return uc.engine.BTHealth()
+}
+
 func (uc *TorrentUseCase) GetTorrent(hash string) (*models.Torrent, error) {
 	dbT, err := uc.repo.GetTorrent(hash)
 	if err != nil {

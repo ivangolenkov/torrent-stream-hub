@@ -125,6 +125,55 @@ func TestAddTorrentPersistsPoster(t *testing.T) {
 	}
 }
 
+func TestBTHealthReturnsDiagnostics(t *testing.T) {
+	dir := t.TempDir()
+	db, err := repository.NewSQLiteDB(filepath.Join(dir, "hub.db"))
+	if err != nil {
+		t.Fatalf("failed to create test DB: %v", err)
+	}
+	defer db.Close()
+
+	eng, err := engine.New(&config.Config{
+		DownloadDir:        dir,
+		TorrentPort:        0,
+		MaxActiveDownloads: 1,
+		MinFreeSpaceGB:     0,
+	})
+	if err != nil {
+		t.Fatalf("failed to create engine: %v", err)
+	}
+	defer eng.Close()
+
+	repo := repository.NewTorrentRepo(db)
+	uc := usecase.NewTorrentUseCase(eng, repo)
+	h := NewAPIHandler(uc, nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/health/bt", nil)
+	rr := httptest.NewRecorder()
+
+	h.BTHealth(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, rr.Code, rr.Body.String())
+	}
+	var body map[string]any
+	if err := json.NewDecoder(rr.Body).Decode(&body); err != nil {
+		t.Fatalf("failed to decode response body: %v", err)
+	}
+	if body["seed_enabled"] != true {
+		t.Fatalf("expected seed_enabled=true, got %#v", body["seed_enabled"])
+	}
+	if body["upload_enabled"] != true {
+		t.Fatalf("expected upload_enabled=true, got %#v", body["upload_enabled"])
+	}
+	if _, ok := body["incoming_connectivity_note"]; !ok {
+		t.Fatalf("expected incoming connectivity note in response: %#v", body)
+	}
+	encoded := rr.Body.String()
+	if strings.Contains(encoded, "peer_ip") || strings.Contains(encoded, "peer_port") {
+		t.Fatalf("health response must not expose peer IP/ports: %s", encoded)
+	}
+}
+
 func assertJSONError(t *testing.T, rr *httptest.ResponseRecorder, status int, message string) {
 	t.Helper()
 

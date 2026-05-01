@@ -23,20 +23,20 @@ import (
 func NewRouter(uc *usecase.TorrentUseCase, sw *usecase.SyncWorker, staticFS ...http.FileSystem) http.Handler {
 	r := chi.NewRouter()
 
-	r.Use(middleware.RequestID)
-	r.Use(middleware.RealIP)
-	r.Use(middleware.Logger)
-	r.Use(jsonRecoverer)
-
 	// Configure CORS to allow all origins as per requirements for Smart TV/Local network
 	r.Use(cors.Handler(cors.Options{
 		AllowedOrigins:   []string{"*"},
 		AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
-		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type", "X-CSRF-Token"},
-		ExposedHeaders:   []string{"Link"},
+		AllowedHeaders:   []string{"*"},
+		ExposedHeaders:   []string{"Accept-Ranges", "Content-Length", "Content-Range", "Content-Type"},
 		AllowCredentials: false,
 		MaxAge:           300,
 	}))
+
+	r.Use(middleware.RequestID)
+	r.Use(middleware.RealIP)
+	r.Use(middleware.Logger)
+	r.Use(jsonRecoverer)
 
 	// TorrServer Layer
 	torrServerHandler := torrserver.NewTorrServerHandler(uc)

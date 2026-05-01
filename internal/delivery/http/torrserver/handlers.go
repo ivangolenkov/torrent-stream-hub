@@ -10,6 +10,7 @@ import (
 
 	"torrent-stream-hub/internal/delivery/http/response"
 	"torrent-stream-hub/internal/logging"
+	"torrent-stream-hub/internal/models"
 	"torrent-stream-hub/internal/usecase"
 
 	"github.com/go-chi/chi/v5"
@@ -33,6 +34,7 @@ func (h *TorrServerHandler) RegisterRoutes(r chi.Router) {
 	r.Post("/viewed", h.Viewed)
 	r.Get("/playlist", h.Playlist)
 	r.Get("/stream", h.Stream)
+	r.Get("/stream/{name}", h.Stream)
 	r.Get("/play/{hash}/{id}", h.PlayAlias)
 }
 
@@ -44,6 +46,28 @@ func (h *TorrServerHandler) Echo(w http.ResponseWriter, r *http.Request) {
 type TorrentsReq struct {
 	Action string `json:"action"`
 	Link   string `json:"link"`
+	Hash   string `json:"hash"`
+}
+
+type torrentResponse struct {
+	Hash       string              `json:"hash"`
+	Title      string              `json:"title"`
+	Name       string              `json:"name"`
+	Size       int64               `json:"size"`
+	Data       string              `json:"data"`
+	Poster     string              `json:"poster"`
+	FileStats  []torrentFileStat   `json:"file_stats,omitempty"`
+	Downloaded int64               `json:"downloaded"`
+	Progress   float64             `json:"progress"`
+	Stat       models.TorrentState `json:"stat,omitempty"`
+	Error      models.ErrorReason  `json:"error,omitempty"`
+}
+
+type torrentFileStat struct {
+	ID     int    `json:"id"`
+	Path   string `json:"path"`
+	Length int64  `json:"length"`
+	Size   int64  `json:"size"`
 }
 
 func (h *TorrServerHandler) Torrents(w http.ResponseWriter, r *http.Request) {
@@ -63,7 +87,22 @@ func (h *TorrServerHandler) Torrents(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		logging.Debugf("torrserver list count=%d", len(torrents))
-		response.JSON(w, http.StatusOK, torrents)
+		items := make([]torrentResponse, 0, len(torrents))
+		for _, t := range torrents {
+			items = append(items, toTorrentResponse(t, false))
+		}
+		response.JSON(w, http.StatusOK, items)
+		return
+	}
+
+	if req.Action == "get" {
+		t, err := h.uc.GetTorrent(req.Hash)
+		if err != nil || t == nil {
+			logging.Debugf("torrserver get missing hash=%s err=%v", req.Hash, err)
+			response.Error(w, http.StatusNotFound, "Torrent not found")
+			return
+		}
+		response.JSON(w, http.StatusOK, toTorrentResponse(t, true))
 		return
 	}
 
@@ -74,7 +113,17 @@ func (h *TorrServerHandler) Torrents(w http.ResponseWriter, r *http.Request) {
 			response.Error(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		response.JSON(w, http.StatusOK, t)
+		response.JSON(w, http.StatusOK, toTorrentResponse(t, true))
+		return
+	}
+
+	if req.Action == "drop" || req.Action == "rem" {
+		if err := h.uc.Delete(req.Hash, req.Action == "rem"); err != nil {
+			logging.Warnf("torrserver %s failed hash=%s: %v", req.Action, req.Hash, err)
+			response.Error(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		response.JSON(w, http.StatusOK, map[string]string{"status": "ok"})
 		return
 	}
 
@@ -85,7 +134,7 @@ func (h *TorrServerHandler) Torrents(w http.ResponseWriter, r *http.Request) {
 func (h *TorrServerHandler) Settings(w http.ResponseWriter, r *http.Request) {
 	// Stub for back-compatibility
 	w.Header().Set("Content-Type", "application/json")
-	w.Write([]byte(`{}`))
+	w.Write([]byte(`{"CacheSize":209715200}`))
 }
 
 func (h *TorrServerHandler) UploadTorrent(w http.ResponseWriter, r *http.Request) {
@@ -115,7 +164,7 @@ func (h *TorrServerHandler) UploadTorrent(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	response.JSON(w, http.StatusAccepted, t)
+	response.JSON(w, http.StatusAccepted, toTorrentResponse(t, true))
 }
 
 func (h *TorrServerHandler) Viewed(w http.ResponseWriter, r *http.Request) {
@@ -153,6 +202,9 @@ func (h *TorrServerHandler) Playlist(w http.ResponseWriter, r *http.Request) {
 
 func (h *TorrServerHandler) Stream(w http.ResponseWriter, r *http.Request) {
 	hash := r.URL.Query().Get("hash")
+	if hash == "" {
+		hash = r.URL.Query().Get("link")
+	}
 	indexStr := r.URL.Query().Get("index")
 	index, err := strconv.Atoi(indexStr)
 	if err != nil {
@@ -161,7 +213,84 @@ func (h *TorrServerHandler) Stream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if _, ok := r.URL.Query()["preload"]; ok {
+		h.servePreloadStatus(w, r, hash, index)
+		return
+	}
+	if _, ok := r.URL.Query()["stat"]; ok {
+		h.servePreloadStatus(w, r, hash, index)
+		return
+	}
+
 	h.serveStream(w, r, hash, index)
+}
+
+func toTorrentResponse(t *models.Torrent, includeFiles bool) torrentResponse {
+	if t == nil {
+		return torrentResponse{}
+	}
+	title := t.Name
+	if title == "" {
+		title = t.Hash
+	}
+	res := torrentResponse{
+		Hash:       t.Hash,
+		Title:      title,
+		Name:       t.Name,
+		Size:       t.Size,
+		Data:       "{}",
+		Poster:     "",
+		Downloaded: t.Downloaded,
+		Progress:   t.Progress,
+		Stat:       t.State,
+		Error:      t.Error,
+	}
+	if includeFiles {
+		res.FileStats = toTorrentFileStats(t.Files)
+	}
+	return res
+}
+
+func toTorrentFileStats(files []*models.File) []torrentFileStat {
+	stats := make([]torrentFileStat, 0, len(files))
+	for _, f := range files {
+		if f == nil {
+			continue
+		}
+		stats = append(stats, torrentFileStat{
+			ID:     f.Index,
+			Path:   f.Path,
+			Length: f.Size,
+			Size:   f.Size,
+		})
+	}
+	return stats
+}
+
+func (h *TorrServerHandler) servePreloadStatus(w http.ResponseWriter, r *http.Request, hash string, index int) {
+	t, err := h.uc.GetTorrent(hash)
+	if err != nil || t == nil {
+		logging.Debugf("preload status torrent not found hash=%s file_index=%d err=%v", hash, index, err)
+		response.Error(w, http.StatusNotFound, "Torrent not found")
+		return
+	}
+
+	var size int64
+	for _, f := range t.Files {
+		if f != nil && f.Index == index {
+			size = f.Size
+			break
+		}
+	}
+	if size == 0 {
+		size = t.Size
+	}
+
+	response.JSON(w, http.StatusOK, map[string]any{
+		"preloaded_bytes": size,
+		"preload_size":    size,
+		"download_speed":  t.DownloadSpeed,
+	})
 }
 
 func (h *TorrServerHandler) PlayAlias(w http.ResponseWriter, r *http.Request) {

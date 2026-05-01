@@ -6,6 +6,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"torrent-stream-hub/internal/models"
 )
 
 func TestEchoHandler(t *testing.T) {
@@ -45,9 +47,43 @@ func TestSettingsHandler(t *testing.T) {
 		t.Errorf("handler returned wrong status code: got %v want %v", status, http.StatusOK)
 	}
 
-	expected := `{}`
-	if rr.Body.String() != expected {
-		t.Errorf("Expected body %s, got %s", expected, rr.Body.String())
+	var body struct {
+		CacheSize int64 `json:"CacheSize"`
+	}
+	if err := json.NewDecoder(rr.Body).Decode(&body); err != nil {
+		t.Fatalf("failed to decode response body: %v", err)
+	}
+	if body.CacheSize == 0 {
+		t.Fatalf("expected CacheSize for Lampa TorrServer compatibility")
+	}
+}
+
+func TestTorrentResponseUsesTorrServerCompatibleFields(t *testing.T) {
+	torrent := &models.Torrent{
+		Hash: "abc123",
+		Name: "[LAMPA] Movie",
+		Size: 2048,
+		Files: []*models.File{
+			{Index: 3, Path: "Movie/Movie.mkv", Size: 2048},
+		},
+	}
+
+	body := toTorrentResponse(torrent, true)
+
+	if body.Hash != torrent.Hash {
+		t.Fatalf("expected hash %q, got %q", torrent.Hash, body.Hash)
+	}
+	if body.Title != torrent.Name {
+		t.Fatalf("expected title %q, got %q", torrent.Name, body.Title)
+	}
+	if body.Data != "{}" {
+		t.Fatalf("expected JSON object string data, got %q", body.Data)
+	}
+	if len(body.FileStats) != 1 {
+		t.Fatalf("expected one file_stat, got %d", len(body.FileStats))
+	}
+	if body.FileStats[0].ID != 3 || body.FileStats[0].Path != "Movie/Movie.mkv" || body.FileStats[0].Length != 2048 {
+		t.Fatalf("unexpected file_stat: %+v", body.FileStats[0])
 	}
 }
 

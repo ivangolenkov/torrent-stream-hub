@@ -30,8 +30,14 @@
    - В инспектор torrent-а добавлен блок `Peer diagnostics` с агрегированными счетчиками, metadata status, DHT status, tracker status и tracker error.
    - UI корректно показывает `metadata pending` до получения metadata.
 6. Добавлены тесты:
-   - `internal/logging/logging_test.go` проверяет sanitization и безопасные summaries.
-   - `internal/delivery/http/api/handlers_test.go` проверяет наличие `peer_summary` и speed-полей в API response.
+    - `internal/logging/logging_test.go` проверяет sanitization и безопасные summaries.
+    - `internal/delivery/http/api/handlers_test.go` проверяет наличие `peer_summary` и speed-полей в API response.
+7. Дополнительно исправлена совместимость TorrServer API с Lampa:
+   - `/torrents` для `action=list/get/add` отдает совместимые поля `title`, `data`, `file_stats[].id/path/length`.
+   - Поддержаны `action=drop/rem`.
+   - `/settings` отдает `CacheSize`, который Lampa использует как признак совместимого TorrServer.
+   - Добавлен маршрут `/stream/{filename}?link=<hash>&index=<id>` и JSON-ответ для `preload/stat` запросов Lampa.
+   - CORS исправлен для wildcard origin: `AllowCredentials=false`, exposed headers включают range/content headers.
 
 ## Статус выполнения DoD
 - [x] У backend есть настраиваемый уровень логирования, включая `debug`.

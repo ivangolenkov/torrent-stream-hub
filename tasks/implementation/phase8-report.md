@@ -14,6 +14,7 @@
 - Основной Web API `/api/v1/torrent/add` принимает optional `poster`.
 - Web GUI позволяет задать optional `Poster URL` при добавлении magnet/hash.
 - Web GUI показывает poster в таблице torrent-ов и в inspector header, если он задан.
+- `drop` и `wipe` в TorrServer compatibility layer сделаны безопасными no-op, чтобы Lampa не могла удалить или десинхронизировать torrent при закрытии страницы.
 - Добавлены и обновлены тесты repository, API и TorrServer compatibility layer.
 
 ## Измененные файлы
@@ -59,6 +60,8 @@
 - Поле `category` пока только сохраняется и возвращается через TorrServer/API-модель, без UI-редактирования, как было согласовано.
 - `/cache` реализован как compatibility view поверх текущего disk-backed состояния. Если torrent runtime state недоступен или metadata еще не готова, endpoint возвращает `{}`, что соответствует совместимому fallback поведению.
 - `preloaded_bytes` не имитирует полный RAM cache TorrServer и отражает фактический downloaded/warmup progress, чтобы не показывать ложную готовность данных.
+- В оригинальном TorrServer `drop` удаляет runtime torrent, но не DB запись. В Torrent-Stream-Hub это могло бы десинхронизировать engine и SQLite, поэтому `drop` принят как no-op compatibility response.
+- `wipe` в compatibility layer принят как no-op, потому что массовое удаление слишком опасно для запроса, который может прийти от внешнего клиента.
 
 ## Проверки
 

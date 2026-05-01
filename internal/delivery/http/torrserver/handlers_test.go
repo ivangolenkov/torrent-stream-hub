@@ -16,6 +16,8 @@ import (
 	"torrent-stream-hub/internal/usecase"
 )
 
+const torrserverTestInfoHash = "0123456789abcdef0123456789abcdef01234567"
+
 func TestEchoHandler(t *testing.T) {
 	h := NewTorrServerHandler(nil) // nil usecase is fine for Echo
 
@@ -159,29 +161,12 @@ func TestResolveHTTPLinkSupportsMagnetRedirect(t *testing.T) {
 }
 
 func TestTorrentsAddPersistsEvenWhenSaveToDBFalse(t *testing.T) {
-	dir := t.TempDir()
-	db, err := repository.NewSQLiteDB(filepath.Join(dir, "hub.db"))
-	if err != nil {
-		t.Fatalf("failed to create test DB: %v", err)
-	}
-	defer db.Close()
+	_, repo, h, cleanup := setupTorrServerIntegration(t)
+	defer cleanup()
 
-	eng, err := engine.New(&config.Config{
-		DownloadDir:        dir,
-		TorrentPort:        0,
-		MaxActiveDownloads: 1,
-		MinFreeSpaceGB:     0,
-	})
-	if err != nil {
-		t.Fatalf("failed to create engine: %v", err)
-	}
-	defer eng.Close()
-
-	repo := repository.NewTorrentRepo(db)
-	h := NewTorrServerHandler(usecase.NewTorrentUseCase(eng, repo))
 	req := httptest.NewRequest(http.MethodPost, "/torrents", strings.NewReader(`{
 		"action":"add",
-		"link":"magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567",
+		"link":"magnet:?xt=urn:btih:`+torrserverTestInfoHash+`",
 		"title":"[LAMPA] Test",
 		"poster":"https://example.com/poster.jpg",
 		"data":"{}",
@@ -194,7 +179,7 @@ func TestTorrentsAddPersistsEvenWhenSaveToDBFalse(t *testing.T) {
 	if rr.Code != http.StatusOK {
 		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, rr.Code, rr.Body.String())
 	}
-	fetched, err := repo.GetTorrent("0123456789abcdef0123456789abcdef01234567")
+	fetched, err := repo.GetTorrent(torrserverTestInfoHash)
 	if err != nil {
 		t.Fatalf("failed to get persisted torrent: %v", err)
 	}
@@ -204,6 +189,86 @@ func TestTorrentsAddPersistsEvenWhenSaveToDBFalse(t *testing.T) {
 	if fetched.Title != "[LAMPA] Test" || fetched.Poster != "https://example.com/poster.jpg" {
 		t.Fatalf("expected metadata to be persisted, got %+v", fetched)
 	}
+}
+
+func TestTorrentsDropAndWipeAreSafeNoOps(t *testing.T) {
+	_, repo, h, cleanup := setupTorrServerIntegration(t)
+	defer cleanup()
+
+	if _, err := h.uc.AddMagnet("magnet:?xt=urn:btih:" + torrserverTestInfoHash); err != nil {
+		t.Fatalf("failed to add torrent: %v", err)
+	}
+
+	for _, action := range []string{"drop", "wipe"} {
+		req := httptest.NewRequest(http.MethodPost, "/torrents", strings.NewReader(`{"action":"`+action+`","hash":"`+torrserverTestInfoHash+`"}`))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded; charset=UTF-8")
+		rr := httptest.NewRecorder()
+
+		h.Torrents(rr, req)
+
+		if rr.Code != http.StatusOK {
+			t.Fatalf("expected %s status %d, got %d: %s", action, http.StatusOK, rr.Code, rr.Body.String())
+		}
+		fetched, err := repo.GetTorrent(torrserverTestInfoHash)
+		if err != nil {
+			t.Fatalf("failed to get torrent after %s: %v", action, err)
+		}
+		if fetched == nil {
+			t.Fatalf("expected torrent to remain after %s", action)
+		}
+	}
+}
+
+func TestTorrentsRemDeletesFromDB(t *testing.T) {
+	_, repo, h, cleanup := setupTorrServerIntegration(t)
+	defer cleanup()
+
+	if _, err := h.uc.AddMagnet("magnet:?xt=urn:btih:" + torrserverTestInfoHash); err != nil {
+		t.Fatalf("failed to add torrent: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/torrents", strings.NewReader(`{"action":"rem","hash":"`+torrserverTestInfoHash+`"}`))
+	rr := httptest.NewRecorder()
+
+	h.Torrents(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, rr.Code, rr.Body.String())
+	}
+	fetched, err := repo.GetTorrent(torrserverTestInfoHash)
+	if err != nil {
+		t.Fatalf("failed to get torrent after rem: %v", err)
+	}
+	if fetched != nil {
+		t.Fatalf("expected torrent to be deleted by rem, got %+v", fetched)
+	}
+}
+
+func setupTorrServerIntegration(t *testing.T) (string, *repository.TorrentRepo, *TorrServerHandler, func()) {
+	t.Helper()
+	dir := t.TempDir()
+	db, err := repository.NewSQLiteDB(filepath.Join(dir, "hub.db"))
+	if err != nil {
+		t.Fatalf("failed to create test DB: %v", err)
+	}
+
+	eng, err := engine.New(&config.Config{
+		DownloadDir:        dir,
+		TorrentPort:        0,
+		MaxActiveDownloads: 1,
+		MinFreeSpaceGB:     0,
+	})
+	if err != nil {
+		db.Close()
+		t.Fatalf("failed to create engine: %v", err)
+	}
+
+	repo := repository.NewTorrentRepo(db)
+	h := NewTorrServerHandler(usecase.NewTorrentUseCase(eng, repo))
+	cleanup := func() {
+		eng.Close()
+		db.Close()
+	}
+	return dir, repo, h, cleanup
 }
 
 func TestStreamContentTypeAvoidsBlockingSniff(t *testing.T) {

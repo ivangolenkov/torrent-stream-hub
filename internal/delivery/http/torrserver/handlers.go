@@ -181,9 +181,15 @@ func (h *TorrServerHandler) Torrents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.Action == "drop" || req.Action == "rem" {
-		if err := h.uc.Delete(req.Hash, req.Action == "rem"); err != nil {
-			logging.Warnf("torrserver %s failed hash=%s: %v", req.Action, req.Hash, err)
+	if req.Action == "drop" {
+		// Lampa calls drop when closing a torrent page. Keep engine and DB in sync by making it a safe no-op.
+		response.JSON(w, http.StatusOK, map[string]string{"status": "ok"})
+		return
+	}
+
+	if req.Action == "rem" {
+		if err := h.uc.Delete(req.Hash, false); err != nil {
+			logging.Warnf("torrserver rem failed hash=%s: %v", req.Hash, err)
 			response.Error(w, http.StatusInternalServerError, err.Error())
 			return
 		}
@@ -192,16 +198,7 @@ func (h *TorrServerHandler) Torrents(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if req.Action == "wipe" {
-		torrents, err := h.uc.GetAllTorrents()
-		if err != nil {
-			response.Error(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-		for _, t := range torrents {
-			if t != nil {
-				_ = h.uc.Delete(t.Hash, true)
-			}
-		}
+		// Wipe is too destructive for the compatibility layer. Accept it but do nothing.
 		response.JSON(w, http.StatusOK, map[string]string{"status": "ok"})
 		return
 	}

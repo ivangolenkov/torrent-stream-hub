@@ -154,7 +154,7 @@ func (e *Engine) GetTorrent(hash string) *models.Torrent {
 	return e.mapManagedTorrent(mt)
 }
 
-func (e *Engine) Warmup(ctx context.Context, hash string, index int) (int64, int64, error) {
+func (e *Engine) Warmup(ctx context.Context, hash string, index int, size int64) (int64, int64, error) {
 	file, err := e.GetTorrentFile(hash, index)
 	if err != nil {
 		return 0, 0, err
@@ -166,13 +166,18 @@ func (e *Engine) Warmup(ctx context.Context, hash string, index int) (int64, int
 	reader.SetResponsive()
 	defer reader.Close()
 
-	const warmupSize = 4 << 20
-	limited := io.LimitReader(reader, warmupSize)
+	if size <= 0 {
+		size = 20 << 20
+	}
+	if size > file.Length() {
+		size = file.Length()
+	}
+	limited := io.LimitReader(reader, size)
 	read, err := io.Copy(io.Discard, limited)
 	if err != nil && !errors.Is(err, context.Canceled) {
-		return read, minInt64(warmupSize, file.Length()), err
+		return read, size, err
 	}
-	return read, minInt64(warmupSize, file.Length()), nil
+	return read, size, nil
 }
 
 func (e *Engine) Close() {

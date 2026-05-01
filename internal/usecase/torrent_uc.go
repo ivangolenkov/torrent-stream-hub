@@ -291,8 +291,8 @@ func (uc *TorrentUseCase) GetCacheStatus(hash string, index int, offset int64) (
 	return uc.engine.GetCacheStatus(hash, index, offset)
 }
 
-func (uc *TorrentUseCase) Warmup(ctx context.Context, hash string, index int) (int64, int64, error) {
-	return uc.engine.Warmup(ctx, hash, index)
+func (uc *TorrentUseCase) Warmup(ctx context.Context, hash string, index int, size int64) (int64, int64, error) {
+	return uc.engine.Warmup(ctx, hash, index, size)
 }
 
 func (uc *TorrentUseCase) AddStream(ctx context.Context, hash string, index int) error {

@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"torrent-stream-hub/internal/models"
 )
@@ -138,8 +139,20 @@ func TestStreamContentTypeAvoidsBlockingSniff(t *testing.T) {
 	if got := streamContentType("The.Sopranos.S01E01.avi"); got != "video/x-msvideo" {
 		t.Fatalf("expected AVI content type, got %q", got)
 	}
+	if got := streamContentType("movie.mkv"); got != "video/x-matroska" {
+		t.Fatalf("expected MKV content type, got %q", got)
+	}
 	if got := streamContentType("file.unknownext"); got != "application/octet-stream" {
 		t.Fatalf("expected fallback content type, got %q", got)
+	}
+}
+
+func TestPreloadTargetPersistsForStatPolling(t *testing.T) {
+	h := NewTorrServerHandler(nil)
+	h.setPreload("hash", 0, preloadState{TargetBytes: 12345, StartedAt: time.Now()})
+
+	if got := h.preloadTarget("hash", 0, 999999); got != 12345 {
+		t.Fatalf("expected persisted preload target, got %d", got)
 	}
 }
 

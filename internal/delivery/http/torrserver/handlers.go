@@ -2,6 +2,7 @@ package torrserver
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"torrent-stream-hub/internal/delivery/http/response"
@@ -22,12 +24,28 @@ import (
 )
 
 type TorrServerHandler struct {
-	uc *usecase.TorrentUseCase
+	uc       *usecase.TorrentUseCase
+	preloads map[preloadKey]preloadState
+	mu       sync.Mutex
+}
+
+const defaultPreloadSize int64 = 20 << 20
+
+type preloadKey struct {
+	Hash  string
+	Index int
+}
+
+type preloadState struct {
+	TargetBytes int64
+	ReadBytes   int64
+	StartedAt   time.Time
 }
 
 func NewTorrServerHandler(uc *usecase.TorrentUseCase) *TorrServerHandler {
 	return &TorrServerHandler{
-		uc: uc,
+		uc:       uc,
+		preloads: make(map[preloadKey]preloadState),
 	}
 }
 
@@ -234,14 +252,15 @@ func (h *TorrServerHandler) Cache(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	filled := status.VirtualCacheBytes
+	t, _ := h.uc.GetTorrent(hash)
 	response.JSON(w, http.StatusOK, map[string]any{
 		"Hash":         hash,
-		"Capacity":     filled,
+		"Capacity":     defaultPreloadSize,
 		"Filled":       filled,
 		"PiecesLength": 0,
 		"PiecesCount":  0,
-		"Torrent":      hash,
-		"Pieces":       []int{},
+		"Torrent":      toTorrentResponse(t, true),
+		"Pieces":       map[int]any{},
 		"Readers":      []any{},
 	})
 }
@@ -418,30 +437,78 @@ func (h *TorrServerHandler) serveTorrentStatus(w http.ResponseWriter, r *http.Re
 		size = t.Size
 	}
 
+	target := h.preloadTarget(hash, index, size)
 	res := toTorrentResponse(t, true)
-	res.PreloadedBytes = fileDownloaded(t, index)
-	res.PreloadSize = size
+	res.PreloadSize = target
+	res.PreloadedBytes = h.preloadedBytes(hash, index, t, target)
 	response.JSON(w, http.StatusOK, res)
 }
 
 func (h *TorrServerHandler) servePreload(w http.ResponseWriter, r *http.Request, hash string, index int) {
-	read, size, err := h.uc.Warmup(r.Context(), hash, index)
-	if err != nil {
-		logging.Debugf("preload warmup incomplete hash=%s file_index=%d read=%d: %v", hash, index, read, err)
-	}
-	h.serveTorrentStatusWithWarmup(w, r, hash, index, read, size)
-}
-
-func (h *TorrServerHandler) serveTorrentStatusWithWarmup(w http.ResponseWriter, r *http.Request, hash string, index int, read int64, size int64) {
 	t, err := h.uc.GetTorrent(hash)
 	if err != nil || t == nil {
 		response.Error(w, http.StatusNotFound, "Torrent not found")
 		return
 	}
+	target := h.preloadTarget(hash, index, fileSize(t, index))
+	h.setPreload(hash, index, preloadState{TargetBytes: target, StartedAt: time.Now()})
+
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		read, _, err := h.uc.Warmup(ctx, hash, index, target)
+		if err != nil {
+			logging.Debugf("preload warmup incomplete hash=%s file_index=%d read=%d: %v", hash, index, read, err)
+		}
+		h.setPreload(hash, index, preloadState{TargetBytes: target, ReadBytes: read, StartedAt: time.Now()})
+	}()
+
 	res := toTorrentResponse(t, true)
-	res.PreloadedBytes = maxInt64(fileDownloaded(t, index), read)
-	res.PreloadSize = size
+	res.PreloadSize = target
+	res.PreloadedBytes = h.preloadedBytes(hash, index, t, target)
 	response.JSON(w, http.StatusOK, res)
+}
+
+func (h *TorrServerHandler) setPreload(hash string, index int, state preloadState) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.preloads[preloadKey{Hash: hash, Index: index}] = state
+}
+
+func (h *TorrServerHandler) preloadTarget(hash string, index int, size int64) int64 {
+	h.mu.Lock()
+	state, ok := h.preloads[preloadKey{Hash: hash, Index: index}]
+	if ok && time.Since(state.StartedAt) < 10*time.Minute && state.TargetBytes > 0 {
+		h.mu.Unlock()
+		return state.TargetBytes
+	}
+	if ok {
+		delete(h.preloads, preloadKey{Hash: hash, Index: index})
+	}
+	h.mu.Unlock()
+
+	target := defaultPreloadSize
+	if size > 0 && size < target {
+		target = size
+	}
+	return target
+}
+
+func (h *TorrServerHandler) preloadedBytes(hash string, index int, t *models.Torrent, target int64) int64 {
+	if target <= 0 {
+		return 0
+	}
+	size := fileSize(t, index)
+	if size > 0 && fileDownloaded(t, index) >= size {
+		return target
+	}
+	if status, err := h.uc.GetCacheStatus(hash, index, 0); err == nil && status != nil {
+		return minInt64(status.VirtualCacheBytes, target)
+	}
+	h.mu.Lock()
+	state := h.preloads[preloadKey{Hash: hash, Index: index}]
+	h.mu.Unlock()
+	return minInt64(maxInt64(fileDownloaded(t, index), state.ReadBytes), target)
 }
 
 func (h *TorrServerHandler) PlayAlias(w http.ResponseWriter, r *http.Request) {
@@ -590,6 +657,25 @@ func fileDownloaded(t *models.Torrent, index int) int64 {
 	return 0
 }
 
+func fileSize(t *models.Torrent, index int) int64 {
+	if t == nil {
+		return 0
+	}
+	for _, f := range t.Files {
+		if f != nil && f.Index == index {
+			return f.Size
+		}
+	}
+	return 0
+}
+
+func minInt64(a, b int64) int64 {
+	if a < b {
+		return a
+	}
+	return b
+}
+
 func maxInt64(a, b int64) int64 {
 	if a > b {
 		return a
@@ -598,6 +684,21 @@ func maxInt64(a, b int64) int64 {
 }
 
 func streamContentType(name string) string {
+	switch strings.ToLower(filepath.Ext(name)) {
+	case ".avi":
+		return "video/x-msvideo"
+	case ".mkv":
+		return "video/x-matroska"
+	case ".mp4", ".m4v":
+		return "video/mp4"
+	case ".mov":
+		return "video/quicktime"
+	case ".webm":
+		return "video/webm"
+	case ".ts":
+		return "video/mp2t"
+	}
+
 	contentType := mime.TypeByExtension(filepath.Ext(name))
 	if contentType != "" {
 		return contentType

@@ -43,6 +43,27 @@ const totals = computed(() => {
 
 const flagClass = (enabled: boolean) => enabled ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800';
 
+const isBoosted = (until?: string) => !!until && new Date(until).getTime() > Date.now();
+
+const statusLabel = (torrent: { degraded: boolean; boosted_until?: string }) => {
+  if (isBoosted(torrent.boosted_until)) return 'Boosted';
+  return torrent.degraded ? 'Degraded' : 'Healthy';
+};
+
+const statusClass = (torrent: { degraded: boolean; boosted_until?: string }) => {
+  if (isBoosted(torrent.boosted_until)) return 'bg-blue-100 text-blue-800';
+  return torrent.degraded ? 'bg-amber-100 text-amber-800' : 'bg-green-100 text-green-800';
+};
+
+const formatTime = (value?: string) => {
+  if (!value) return 'never';
+  return new Intl.DateTimeFormat(undefined, {
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  }).format(new Date(value));
+};
+
 onMounted(() => {
   loadHealth();
   timer = window.setInterval(loadHealth, 5000);
@@ -82,13 +103,18 @@ onUnmounted(() => {
         <span :class="['rounded-full px-2.5 py-1 text-xs font-semibold', flagClass(health.tcp_enabled)]">TCP {{ health.tcp_enabled ? 'on' : 'off' }}</span>
         <span :class="['rounded-full px-2.5 py-1 text-xs font-semibold', flagClass(health.utp_enabled)]">uTP {{ health.utp_enabled ? 'on' : 'off' }}</span>
         <span :class="['rounded-full px-2.5 py-1 text-xs font-semibold', flagClass(health.ipv6_enabled)]">IPv6 {{ health.ipv6_enabled ? 'on' : 'off' }}</span>
+        <span :class="['rounded-full px-2.5 py-1 text-xs font-semibold', flagClass(health.swarm_watchdog_enabled)]">Watchdog {{ health.swarm_watchdog_enabled ? 'on' : 'off' }}</span>
       </div>
 
       <div class="rounded-md border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
         {{ health.incoming_connectivity_note }} Listen port: {{ health.listen_port || 'auto' }}.
       </div>
 
-      <div class="grid grid-cols-2 gap-4 text-sm md:grid-cols-4">
+      <div class="rounded-md border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-800">
+        Without router port-forward the service relies mostly on outgoing peers. The swarm watchdog refreshes degraded torrents every {{ health.swarm_refresh_cooldown_sec }}s and checks health every {{ health.swarm_check_interval_sec }}s.
+      </div>
+
+      <div class="grid grid-cols-2 gap-4 text-sm md:grid-cols-5">
         <div>
           <div class="text-gray-500 text-xs uppercase tracking-wider">Profile</div>
           <div class="mt-1 font-medium text-gray-900">{{ health.client_profile }}</div>
@@ -105,6 +131,10 @@ onUnmounted(() => {
           <div class="text-gray-500 text-xs uppercase tracking-wider">Global Speed</div>
           <div class="mt-1 font-medium text-gray-900">↓ {{ formatSpeed(totals.down) }} · ↑ {{ formatSpeed(totals.up) }}</div>
         </div>
+        <div>
+          <div class="text-gray-500 text-xs uppercase tracking-wider">Watchdog</div>
+          <div class="mt-1 font-medium text-gray-900">{{ health.swarm_watchdog_enabled ? 'enabled' : 'disabled' }}</div>
+        </div>
       </div>
 
       <div v-if="health.torrents.length" class="overflow-x-auto">
@@ -113,6 +143,7 @@ onUnmounted(() => {
             <tr>
               <th class="px-4 py-3 text-left font-medium">Torrent</th>
               <th class="px-4 py-3 text-left font-medium">Peers</th>
+              <th class="px-4 py-3 text-left font-medium">Swarm</th>
               <th class="px-4 py-3 text-left font-medium">Tracker</th>
               <th class="px-4 py-3 text-left font-medium">Speed</th>
             </tr>
@@ -123,6 +154,17 @@ onUnmounted(() => {
               <td class="px-4 py-3 text-gray-500">
                 {{ torrent.connected }} / {{ torrent.known }}
                 <span class="text-gray-400">seeds {{ torrent.seeds }}</span>
+              </td>
+              <td class="px-4 py-3 text-gray-500">
+                <span :class="['inline-flex rounded-full px-2 py-0.5 text-xs font-semibold', statusClass(torrent)]">
+                  {{ statusLabel(torrent) }}
+                </span>
+                <div class="mt-1 text-xs text-gray-400">
+                  refresh {{ formatTime(torrent.last_refresh_at) }}
+                </div>
+                <div v-if="torrent.last_refresh_reason" class="mt-1 max-w-xs truncate text-xs text-gray-500" :title="torrent.last_refresh_reason">
+                  {{ torrent.last_refresh_reason }}
+                </div>
               </td>
               <td class="px-4 py-3 max-w-xs truncate" :title="torrent.tracker_error || torrent.tracker_status">
                 <span :class="torrent.tracker_error ? 'text-amber-700' : 'text-gray-500'">{{ torrent.tracker_error || torrent.tracker_status || 'n/a' }}</span>

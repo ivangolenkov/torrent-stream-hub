@@ -168,6 +168,12 @@ func TestBTHealthReturnsDiagnostics(t *testing.T) {
 	if _, ok := body["incoming_connectivity_note"]; !ok {
 		t.Fatalf("expected incoming connectivity note in response: %#v", body)
 	}
+	if body["swarm_watchdog_enabled"] != true {
+		t.Fatalf("expected swarm watchdog to be enabled, got %#v", body["swarm_watchdog_enabled"])
+	}
+	if body["swarm_check_interval_sec"] == nil || body["swarm_refresh_cooldown_sec"] == nil {
+		t.Fatalf("expected swarm watchdog timings in response: %#v", body)
+	}
 	encoded := rr.Body.String()
 	if strings.Contains(encoded, "peer_ip") || strings.Contains(encoded, "peer_port") {
 		t.Fatalf("health response must not expose peer IP/ports: %s", encoded)

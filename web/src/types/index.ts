@@ -70,6 +70,12 @@ export interface BTTorrentHealth {
   tracker_error?: string;
   download_speed: number;
   upload_speed: number;
+  degraded: boolean;
+  last_refresh_at?: string;
+  last_refresh_reason?: string;
+  last_healthy_at?: string;
+  boosted_until?: string;
+  max_established_conns: number;
 }
 
 export interface BTHealth {
@@ -86,6 +92,9 @@ export interface BTHealth {
   retrackers_mode: string;
   download_limit: number;
   upload_limit: number;
+  swarm_watchdog_enabled: boolean;
+  swarm_check_interval_sec: number;
+  swarm_refresh_cooldown_sec: number;
   incoming_connectivity_note: string;
   torrents: BTTorrentHealth[];
 }

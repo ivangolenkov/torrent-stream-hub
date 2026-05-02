@@ -25,10 +25,10 @@ func TestBuildClientConfigAppliesBTDefaults(t *testing.T) {
 	if clientConfig.NoDHT || clientConfig.DisablePEX || clientConfig.DisableTCP || clientConfig.DisableUTP || clientConfig.NoDefaultPortForwarding {
 		t.Fatalf("expected DHT/PEX/TCP/UTP/UPnP to be enabled by default")
 	}
-	if clientConfig.EstablishedConnsPerTorrent != 50 || clientConfig.HalfOpenConnsPerTorrent != 50 || clientConfig.TotalHalfOpenConns != 500 {
+	if clientConfig.EstablishedConnsPerTorrent != 120 || clientConfig.HalfOpenConnsPerTorrent != 80 || clientConfig.TotalHalfOpenConns != 1000 {
 		t.Fatalf("unexpected connection defaults: %+v", clientConfig)
 	}
-	if clientConfig.TorrentPeersLowWater != 100 || clientConfig.TorrentPeersHighWater != 1000 {
+	if clientConfig.TorrentPeersLowWater != 500 || clientConfig.TorrentPeersHighWater != 1200 {
 		t.Fatalf("unexpected peer watermarks: low=%d high=%d", clientConfig.TorrentPeersLowWater, clientConfig.TorrentPeersHighWater)
 	}
 }

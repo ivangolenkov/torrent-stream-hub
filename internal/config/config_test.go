@@ -98,11 +98,20 @@ func TestApplyDefaultsSetsBTDefaults(t *testing.T) {
 	if cfg.BTRetrackersFile != "/config/trackers.txt" {
 		t.Fatalf("expected default retrackers file, got %q", cfg.BTRetrackersFile)
 	}
-	if cfg.BTEstablishedConns != 50 || cfg.BTHalfOpenConns != 50 || cfg.BTTotalHalfOpen != 500 {
+	if cfg.BTEstablishedConns != 120 || cfg.BTHalfOpenConns != 80 || cfg.BTTotalHalfOpen != 1000 {
 		t.Fatalf("unexpected connection defaults: %+v", cfg)
 	}
-	if cfg.BTPeersLowWater != 100 || cfg.BTPeersHighWater != 1000 || cfg.BTDialRateLimit != 20 {
+	if cfg.BTPeersLowWater != 500 || cfg.BTPeersHighWater != 1200 || cfg.BTDialRateLimit != 60 {
 		t.Fatalf("unexpected peer discovery defaults: %+v", cfg)
+	}
+	if !cfg.BTSwarmWatchdogEnabled || cfg.BTSwarmCheckIntervalSec != 60 || cfg.BTSwarmRefreshCooldownSec != 180 {
+		t.Fatalf("unexpected swarm watchdog defaults: %+v", cfg)
+	}
+	if cfg.BTSwarmMinConnectedPeers != 8 || cfg.BTSwarmMinConnectedSeeds != 2 || cfg.BTSwarmStalledSpeedBps != 32768 {
+		t.Fatalf("unexpected swarm threshold defaults: %+v", cfg)
+	}
+	if cfg.BTSwarmStalledDurationSec != 180 || cfg.BTSwarmBoostConns != 120 || cfg.BTSwarmBoostDurationSec != 300 {
+		t.Fatalf("unexpected swarm boost defaults: %+v", cfg)
 	}
 }
 

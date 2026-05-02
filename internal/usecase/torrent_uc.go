@@ -233,6 +233,12 @@ func (uc *TorrentUseCase) Delete(hash string, deleteFiles bool) error {
 		return TorrentNotFoundError{Hash: hash}
 	}
 
+	engineTorrent := uc.engine.GetTorrent(hash)
+	if engineTorrent != nil && len(engineTorrent.Files) > len(t.Files) {
+		mergePersistedMetadata(engineTorrent, t)
+		t = engineTorrent
+	}
+
 	if err := uc.engine.Delete(hash); err != nil {
 		logging.Warnf("engine delete failed hash=%s: %v", hash, err)
 		return err
@@ -259,20 +265,87 @@ func (uc *TorrentUseCase) deleteTorrentFiles(t *models.Torrent) error {
 		return nil
 	}
 	downloadDir := filepath.Clean(uc.engine.DownloadDir())
+	deleted := false
 	for _, file := range t.Files {
 		if file == nil || file.Path == "" {
 			continue
 		}
-		path := filepath.Clean(filepath.Join(downloadDir, file.Path))
-		if path == downloadDir || !strings.HasPrefix(path, downloadDir+string(os.PathSeparator)) {
-			return fmt.Errorf("refusing to delete path outside download dir: %s", file.Path)
-		}
-		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		if err := validateRelativeDownloadPath(file.Path); err != nil {
 			return err
 		}
-		pruneEmptyDirs(filepath.Dir(path), downloadDir)
+		for _, path := range torrentFilePathCandidates(downloadDir, t.Name, file.Path) {
+			if err := removeTorrentFilePath(path, downloadDir); err != nil {
+				return err
+			}
+			deleted = true
+		}
+	}
+
+	if !deleted && t.Name != "" {
+		path, err := safeDownloadPath(downloadDir, t.Name)
+		if err != nil {
+			return err
+		}
+		if err := os.RemoveAll(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		if err := os.Remove(path + ".part"); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
 	}
 	return nil
+}
+
+func torrentFilePathCandidates(downloadDir, torrentName, filePath string) []string {
+	candidates := make([]string, 0, 2)
+	if path, err := safeDownloadPath(downloadDir, filePath); err == nil {
+		candidates = append(candidates, path)
+	}
+	if torrentName != "" {
+		if path, err := safeDownloadPath(downloadDir, filepath.Join(torrentName, filePath)); err == nil && !containsPath(candidates, path) {
+			candidates = append(candidates, path)
+		}
+	}
+	return candidates
+}
+
+func removeTorrentFilePath(path, downloadDir string) error {
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if err := os.Remove(path + ".part"); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	pruneEmptyDirs(filepath.Dir(path), downloadDir)
+	return nil
+}
+
+func safeDownloadPath(downloadDir, relPath string) (string, error) {
+	if err := validateRelativeDownloadPath(relPath); err != nil {
+		return "", err
+	}
+	path := filepath.Clean(filepath.Join(downloadDir, relPath))
+	if path == downloadDir || !strings.HasPrefix(path, downloadDir+string(os.PathSeparator)) {
+		return "", fmt.Errorf("refusing to delete path outside download dir: %s", relPath)
+	}
+	return path, nil
+}
+
+func validateRelativeDownloadPath(relPath string) error {
+	clean := filepath.Clean(relPath)
+	if clean == "." || clean == ".." || filepath.IsAbs(clean) || strings.HasPrefix(clean, ".."+string(os.PathSeparator)) {
+		return fmt.Errorf("refusing to delete path outside download dir: %s", relPath)
+	}
+	return nil
+}
+
+func containsPath(paths []string, path string) bool {
+	for _, existing := range paths {
+		if existing == path {
+			return true
+		}
+	}
+	return false
 }
 
 func pruneEmptyDirs(dir, stop string) {

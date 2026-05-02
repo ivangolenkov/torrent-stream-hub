@@ -86,23 +86,32 @@ type BTHealth struct {
 	RetrackersMode           string            `json:"retrackers_mode"`
 	DownloadLimit            int               `json:"download_limit"`
 	UploadLimit              int               `json:"upload_limit"`
+	SwarmWatchdogEnabled     bool              `json:"swarm_watchdog_enabled"`
+	SwarmCheckIntervalSec    int               `json:"swarm_check_interval_sec"`
+	SwarmRefreshCooldownSec  int               `json:"swarm_refresh_cooldown_sec"`
 	IncomingConnectivityNote string            `json:"incoming_connectivity_note"`
 	Torrents                 []BTTorrentHealth `json:"torrents"`
 }
 
 type BTTorrentHealth struct {
-	Hash          string       `json:"hash"`
-	Name          string       `json:"name"`
-	State         TorrentState `json:"state"`
-	Known         int          `json:"known"`
-	Connected     int          `json:"connected"`
-	Pending       int          `json:"pending"`
-	HalfOpen      int          `json:"half_open"`
-	Seeds         int          `json:"seeds"`
-	TrackerStatus string       `json:"tracker_status,omitempty"`
-	TrackerError  string       `json:"tracker_error,omitempty"`
-	DownloadSpeed int64        `json:"download_speed"`
-	UploadSpeed   int64        `json:"upload_speed"`
+	Hash                string       `json:"hash"`
+	Name                string       `json:"name"`
+	State               TorrentState `json:"state"`
+	Known               int          `json:"known"`
+	Connected           int          `json:"connected"`
+	Pending             int          `json:"pending"`
+	HalfOpen            int          `json:"half_open"`
+	Seeds               int          `json:"seeds"`
+	TrackerStatus       string       `json:"tracker_status,omitempty"`
+	TrackerError        string       `json:"tracker_error,omitempty"`
+	DownloadSpeed       int64        `json:"download_speed"`
+	UploadSpeed         int64        `json:"upload_speed"`
+	Degraded            bool         `json:"degraded"`
+	LastRefreshAt       string       `json:"last_refresh_at,omitempty"`
+	LastRefreshReason   string       `json:"last_refresh_reason,omitempty"`
+	LastHealthyAt       string       `json:"last_healthy_at,omitempty"`
+	BoostedUntil        string       `json:"boosted_until,omitempty"`
+	MaxEstablishedConns int          `json:"max_established_conns"`
 }
 
 // File represents a single file within a torrent

@@ -2,6 +2,7 @@ package usecase
 
 import (
 	"errors"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -150,5 +151,75 @@ func TestPauseMissingTorrentReturnsNotFound(t *testing.T) {
 	err := uc.Pause(testInfoHash)
 	if !errors.Is(err, ErrTorrentNotFound) {
 		t.Fatalf("expected not found error, got %v", err)
+	}
+}
+
+func TestDeleteTorrentFilesRemovesSingleFileAndPartFile(t *testing.T) {
+	uc, _, cleanup := setupTorrentUseCase(t)
+	defer cleanup()
+
+	downloadDir := uc.engine.DownloadDir()
+	filePath := filepath.Join(downloadDir, "movie.mkv")
+	partPath := filePath + ".part"
+	if err := os.WriteFile(filePath, []byte("data"), 0o600); err != nil {
+		t.Fatalf("failed to create file: %v", err)
+	}
+	if err := os.WriteFile(partPath, []byte("part"), 0o600); err != nil {
+		t.Fatalf("failed to create part file: %v", err)
+	}
+
+	err := uc.deleteTorrentFiles(&models.Torrent{
+		Name:  "movie.mkv",
+		Files: []*models.File{{Path: "movie.mkv"}},
+	})
+	if err != nil {
+		t.Fatalf("delete files failed: %v", err)
+	}
+	if _, err := os.Stat(filePath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected file to be removed, stat err=%v", err)
+	}
+	if _, err := os.Stat(partPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected part file to be removed, stat err=%v", err)
+	}
+}
+
+func TestDeleteTorrentFilesRemovesMultiFileStorageLayout(t *testing.T) {
+	uc, _, cleanup := setupTorrentUseCase(t)
+	defer cleanup()
+
+	downloadDir := uc.engine.DownloadDir()
+	filePath := filepath.Join(downloadDir, "Torrent Root", "Season 1", "episode.mkv")
+	if err := os.MkdirAll(filepath.Dir(filePath), 0o700); err != nil {
+		t.Fatalf("failed to create dir: %v", err)
+	}
+	if err := os.WriteFile(filePath, []byte("data"), 0o600); err != nil {
+		t.Fatalf("failed to create file: %v", err)
+	}
+
+	err := uc.deleteTorrentFiles(&models.Torrent{
+		Name:  "Torrent Root",
+		Files: []*models.File{{Path: "Season 1/episode.mkv"}},
+	})
+	if err != nil {
+		t.Fatalf("delete files failed: %v", err)
+	}
+	if _, err := os.Stat(filePath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected nested file to be removed, stat err=%v", err)
+	}
+	if _, err := os.Stat(filepath.Join(downloadDir, "Torrent Root")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected empty torrent root to be pruned, stat err=%v", err)
+	}
+}
+
+func TestDeleteTorrentFilesRejectsUnsafePath(t *testing.T) {
+	uc, _, cleanup := setupTorrentUseCase(t)
+	defer cleanup()
+
+	err := uc.deleteTorrentFiles(&models.Torrent{
+		Name:  "unsafe",
+		Files: []*models.File{{Path: "../outside.mkv"}},
+	})
+	if err == nil {
+		t.Fatal("expected unsafe path error")
 	}
 }

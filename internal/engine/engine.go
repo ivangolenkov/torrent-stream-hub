@@ -51,26 +51,34 @@ type Engine struct {
 }
 
 type ManagedTorrent struct {
-	t                  *torrent.Torrent
-	state              models.TorrentState
-	err                models.ErrorReason
-	metadataLogged     bool
-	metadataWaitLogged bool
-	downloadAllStarted bool
-	lastStatsAt        time.Time
-	lastReadBytes      int64
-	lastWrittenBytes   int64
-	downloadSpeed      int64
-	uploadSpeed        int64
-	lastPeerSummary    models.PeerSummary
-	lastPeerLog        time.Time
-	trackerStatus      string
-	trackerError       string
+	t                         *torrent.Torrent
+	state                     models.TorrentState
+	err                       models.ErrorReason
+	metadataLogged            bool
+	metadataWaitLogged        bool
+	downloadAllStarted        bool
+	lastStatsAt               time.Time
+	lastReadBytes             int64
+	lastWrittenBytes          int64
+	downloadSpeed             int64
+	uploadSpeed               int64
+	lastPeerSummary           models.PeerSummary
+	lastPeerLog               time.Time
+	trackerStatus             string
+	trackerError              string
+	degraded                  bool
+	lastSwarmCheckAt          time.Time
+	lastSwarmRefreshAt        time.Time
+	lastSwarmRefreshReason    string
+	lastHealthyAt             time.Time
+	stallStartedAt            time.Time
+	boostUntil                time.Time
+	normalMaxEstablishedConns int
 }
 
 func New(cfg *config.Config) (*Engine, error) {
 	config.ApplyDefaults(cfg)
-	logging.Infof("initializing torrent engine download_dir=%s torrent_port=%d max_downloads=%d min_free_space_gb=%d bt_seed=%t bt_no_upload=%t bt_profile=%s bt_retrackers=%s dht=%t pex=%t upnp=%t tcp=%t utp=%t ipv6=%t established_conns=%d half_open=%d total_half_open=%d peers_low=%d peers_high=%d dial_rate=%d",
+	logging.Infof("initializing torrent engine download_dir=%s torrent_port=%d max_downloads=%d min_free_space_gb=%d bt_seed=%t bt_no_upload=%t bt_profile=%s bt_retrackers=%s dht=%t pex=%t upnp=%t tcp=%t utp=%t ipv6=%t established_conns=%d half_open=%d total_half_open=%d peers_low=%d peers_high=%d dial_rate=%d swarm_watchdog=%t swarm_check_sec=%d swarm_refresh_cooldown_sec=%d swarm_min_peers=%d swarm_min_seeds=%d swarm_stalled_speed=%d swarm_stalled_duration_sec=%d swarm_boost_conns=%d swarm_boost_duration_sec=%d",
 		cfg.DownloadDir,
 		cfg.TorrentPort,
 		cfg.MaxActiveDownloads,
@@ -91,6 +99,15 @@ func New(cfg *config.Config) (*Engine, error) {
 		cfg.BTPeersLowWater,
 		cfg.BTPeersHighWater,
 		cfg.BTDialRateLimit,
+		cfg.BTSwarmWatchdogEnabled,
+		cfg.BTSwarmCheckIntervalSec,
+		cfg.BTSwarmRefreshCooldownSec,
+		cfg.BTSwarmMinConnectedPeers,
+		cfg.BTSwarmMinConnectedSeeds,
+		cfg.BTSwarmStalledSpeedBps,
+		cfg.BTSwarmStalledDurationSec,
+		cfg.BTSwarmBoostConns,
+		cfg.BTSwarmBoostDurationSec,
 	)
 
 	clientConfig := buildClientConfig(cfg)
@@ -125,6 +142,9 @@ func New(cfg *config.Config) (*Engine, error) {
 	eng.streamManager = NewStreamManager(eng)
 
 	go eng.resourceMonitor()
+	if cfg.BTSwarmWatchdogEnabled {
+		go eng.swarmRefreshMonitor()
+	}
 
 	return eng, nil
 }
@@ -436,9 +456,11 @@ func (e *Engine) addTorrent(t *torrent.Torrent) (*models.Torrent, error) {
 	}
 
 	mt := &ManagedTorrent{
-		t:     t,
-		state: models.StateQueued, // initially queued, resourceMonitor will start it
-		err:   models.ErrNone,
+		t:                         t,
+		state:                     models.StateQueued, // initially queued, resourceMonitor will start it
+		err:                       models.ErrNone,
+		lastHealthyAt:             time.Now(),
+		normalMaxEstablishedConns: e.cfg.BTEstablishedConns,
 	}
 	e.managedTorrents[hash] = mt
 	logging.Infof("torrent registered hash=%s name=%q state=%s metadata_ready=%t", hash, t.Name(), mt.state, t.Info() != nil)
@@ -536,6 +558,9 @@ func (e *Engine) BTHealth() *models.BTHealth {
 		RetrackersMode:           normalizedRetrackersMode(e.cfg.BTRetrackersMode),
 		DownloadLimit:            e.cfg.DownloadLimit,
 		UploadLimit:              e.cfg.UploadLimit,
+		SwarmWatchdogEnabled:     e.cfg.BTSwarmWatchdogEnabled,
+		SwarmCheckIntervalSec:    e.cfg.BTSwarmCheckIntervalSec,
+		SwarmRefreshCooldownSec:  e.cfg.BTSwarmRefreshCooldownSec,
 		IncomingConnectivityNote: "Incoming peers may not reach this client unless TCP/UDP torrent port is forwarded or UPnP succeeds.",
 		Torrents:                 make([]models.BTTorrentHealth, 0, len(e.managedTorrents)),
 	}
@@ -543,23 +568,43 @@ func (e *Engine) BTHealth() *models.BTHealth {
 	for _, mt := range e.managedTorrents {
 		stats := mt.t.Stats()
 		e.updateSpeedsLocked(mt, stats)
+		maxEstablishedConns := mt.normalMaxEstablishedConns
+		if maxEstablishedConns == 0 {
+			maxEstablishedConns = e.cfg.BTEstablishedConns
+		}
+		if !mt.boostUntil.IsZero() && time.Now().Before(mt.boostUntil) {
+			maxEstablishedConns = e.cfg.BTSwarmBoostConns
+		}
 		health.Torrents = append(health.Torrents, models.BTTorrentHealth{
-			Hash:          mt.t.InfoHash().HexString(),
-			Name:          mt.t.Name(),
-			State:         mt.state,
-			Known:         stats.TotalPeers,
-			Connected:     stats.ActivePeers,
-			Pending:       stats.PendingPeers,
-			HalfOpen:      stats.HalfOpenPeers,
-			Seeds:         stats.ConnectedSeeders,
-			TrackerStatus: mt.trackerStatus,
-			TrackerError:  mt.trackerError,
-			DownloadSpeed: mt.downloadSpeed,
-			UploadSpeed:   mt.uploadSpeed,
+			Hash:                mt.t.InfoHash().HexString(),
+			Name:                mt.t.Name(),
+			State:               mt.state,
+			Known:               stats.TotalPeers,
+			Connected:           stats.ActivePeers,
+			Pending:             stats.PendingPeers,
+			HalfOpen:            stats.HalfOpenPeers,
+			Seeds:               stats.ConnectedSeeders,
+			TrackerStatus:       mt.trackerStatus,
+			TrackerError:        mt.trackerError,
+			DownloadSpeed:       mt.downloadSpeed,
+			UploadSpeed:         mt.uploadSpeed,
+			Degraded:            mt.degraded,
+			LastRefreshAt:       formatBTHealthTime(mt.lastSwarmRefreshAt),
+			LastRefreshReason:   mt.lastSwarmRefreshReason,
+			LastHealthyAt:       formatBTHealthTime(mt.lastHealthyAt),
+			BoostedUntil:        formatBTHealthTime(mt.boostUntil),
+			MaxEstablishedConns: maxEstablishedConns,
 		})
 	}
 
 	return health
+}
+
+func formatBTHealthTime(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	return t.UTC().Format(time.RFC3339)
 }
 
 func normalizedBTClientProfile(profile string) string {
@@ -814,6 +859,186 @@ func (e *Engine) resourceMonitor() {
 		e.mu.Lock()
 		e.manageResourcesLocked()
 		e.mu.Unlock()
+	}
+}
+
+type swarmSnapshot struct {
+	State         models.TorrentState
+	MetadataReady bool
+	Complete      bool
+	Connected     int
+	Seeds         int
+	DownloadSpeed int64
+	Now           time.Time
+}
+
+type swarmDecision struct {
+	Degraded bool
+	Reason   string
+}
+
+func decideSwarmHealth(cfg *config.Config, snap swarmSnapshot, stallStartedAt time.Time) swarmDecision {
+	if cfg == nil {
+		cfg = &config.Config{}
+	}
+	config.ApplyDefaults(cfg)
+
+	switch snap.State {
+	case models.StatePaused, models.StateError, models.StateMissingFiles, models.StateDiskFull:
+		return swarmDecision{}
+	}
+
+	if !snap.MetadataReady {
+		if snap.Connected < cfg.BTSwarmMinConnectedPeers {
+			return swarmDecision{Degraded: true, Reason: "metadata pending with low connected peers"}
+		}
+		return swarmDecision{}
+	}
+
+	if !snap.Complete && snap.Seeds < cfg.BTSwarmMinConnectedSeeds {
+		return swarmDecision{Degraded: true, Reason: "connected seeds below threshold"}
+	}
+	if snap.Connected < cfg.BTSwarmMinConnectedPeers {
+		return swarmDecision{Degraded: true, Reason: "connected peers below threshold"}
+	}
+	if !snap.Complete && snap.DownloadSpeed < int64(cfg.BTSwarmStalledSpeedBps) && !stallStartedAt.IsZero() && snap.Now.Sub(stallStartedAt) >= time.Duration(cfg.BTSwarmStalledDurationSec)*time.Second {
+		return swarmDecision{Degraded: true, Reason: "download speed stalled"}
+	}
+
+	return swarmDecision{}
+}
+
+func (e *Engine) swarmRefreshMonitor() {
+	interval := time.Duration(e.cfg.BTSwarmCheckIntervalSec) * time.Second
+	if interval <= 0 {
+		interval = time.Minute
+	}
+	logging.Infof("swarm refresh monitor started interval=%s", interval)
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		e.checkSwarms()
+	}
+}
+
+func (e *Engine) checkSwarms() {
+	now := time.Now()
+	type refreshTarget struct {
+		hash        string
+		t           *torrent.Torrent
+		reason      string
+		downloadAll bool
+	}
+	type boostExpireTarget struct {
+		hash string
+		t    *torrent.Torrent
+		max  int
+	}
+	var targets []refreshTarget
+	var expiredBoosts []boostExpireTarget
+
+	e.mu.Lock()
+	for hash, mt := range e.managedTorrents {
+		stats := mt.t.Stats()
+		e.updateSpeedsLocked(mt, stats)
+		info := mt.t.Info()
+		complete := info != nil && mt.t.BytesCompleted() == info.TotalLength()
+
+		if !complete && mt.downloadSpeed < int64(e.cfg.BTSwarmStalledSpeedBps) {
+			if mt.stallStartedAt.IsZero() {
+				mt.stallStartedAt = now
+			}
+		} else {
+			mt.stallStartedAt = time.Time{}
+		}
+
+		decision := decideSwarmHealth(e.cfg, swarmSnapshot{
+			State:         mt.state,
+			MetadataReady: info != nil,
+			Complete:      complete,
+			Connected:     stats.ActivePeers,
+			Seeds:         stats.ConnectedSeeders,
+			DownloadSpeed: mt.downloadSpeed,
+			Now:           now,
+		}, mt.stallStartedAt)
+
+		mt.lastSwarmCheckAt = now
+		if decision.Degraded {
+			if !mt.degraded || mt.lastSwarmRefreshReason != decision.Reason {
+				logging.Infof("swarm degraded hash=%s reason=%s connected=%d seeds=%d speed=%d", hash, decision.Reason, stats.ActivePeers, stats.ConnectedSeeders, mt.downloadSpeed)
+			}
+			mt.degraded = true
+			if mt.lastSwarmRefreshAt.IsZero() || now.Sub(mt.lastSwarmRefreshAt) >= time.Duration(e.cfg.BTSwarmRefreshCooldownSec)*time.Second {
+				mt.lastSwarmRefreshAt = now
+				mt.lastSwarmRefreshReason = decision.Reason
+				mt.boostUntil = now.Add(time.Duration(e.cfg.BTSwarmBoostDurationSec) * time.Second)
+				if mt.normalMaxEstablishedConns == 0 {
+					mt.normalMaxEstablishedConns = e.cfg.BTEstablishedConns
+				}
+				downloadAll := info != nil && !complete
+				if downloadAll {
+					mt.downloadAllStarted = true
+				}
+				targets = append(targets, refreshTarget{hash: hash, t: mt.t, reason: decision.Reason, downloadAll: downloadAll})
+				logging.Infof("swarm refresh scheduled hash=%s reason=%s boost_conns=%d boost_until=%s", hash, decision.Reason, e.cfg.BTSwarmBoostConns, mt.boostUntil.Format(time.RFC3339))
+			}
+			continue
+		}
+
+		mt.lastHealthyAt = now
+		if mt.degraded {
+			logging.Infof("swarm recovered hash=%s connected=%d seeds=%d speed=%d", hash, stats.ActivePeers, stats.ConnectedSeeders, mt.downloadSpeed)
+		}
+		mt.degraded = false
+		if !mt.boostUntil.IsZero() && now.After(mt.boostUntil) {
+			if mt.normalMaxEstablishedConns > 0 {
+				expiredBoosts = append(expiredBoosts, boostExpireTarget{hash: hash, t: mt.t, max: mt.normalMaxEstablishedConns})
+			}
+			logging.Debugf("swarm boost expired hash=%s", hash)
+			mt.boostUntil = time.Time{}
+		}
+	}
+	e.mu.Unlock()
+
+	for _, target := range targets {
+		target.t.SetMaxEstablishedConns(e.cfg.BTSwarmBoostConns)
+		target.t.AllowDataDownload()
+		if !e.cfg.BTNoUpload {
+			target.t.AllowDataUpload()
+		}
+		if target.downloadAll {
+			target.t.DownloadAll()
+		}
+		e.refreshDHTAsync(target.hash, target.t, target.reason)
+	}
+	for _, target := range expiredBoosts {
+		target.t.SetMaxEstablishedConns(target.max)
+	}
+}
+
+func (e *Engine) refreshDHTAsync(hash string, t *torrent.Torrent, reason string) {
+	servers := e.client.DhtServers()
+	if len(servers) == 0 {
+		logging.Debugf("swarm refresh skipped dht announce hash=%s reason=%s dht_servers=0", hash, reason)
+		return
+	}
+	for _, server := range servers {
+		server := server
+		go func() {
+			done, stop, err := t.AnnounceToDht(server)
+			if err != nil {
+				logging.Warnf("swarm dht announce failed hash=%s reason=%s: %v", hash, reason, err)
+				return
+			}
+			defer stop()
+			select {
+			case <-done:
+				logging.Debugf("swarm dht announce completed hash=%s reason=%s", hash, reason)
+			case <-time.After(30 * time.Second):
+				logging.Debugf("swarm dht announce timeboxed hash=%s reason=%s", hash, reason)
+			}
+		}()
 	}
 }
 

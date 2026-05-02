@@ -7,38 +7,48 @@ import (
 )
 
 type Config struct {
-	Port               string
-	TorrentPort        int
-	DownloadDir        string
-	DBPath             string
-	MaxActiveStreams   int
-	MaxActiveDownloads int
-	MinFreeSpaceGB     int
-	DownloadLimit      int
-	UploadLimit        int
-	StreamCacheSize    int64
-	AuthEnabled        bool
-	AuthUser           string
-	AuthPassword       string
-	LogLevel           string
-	BTSeed             bool
-	BTSeedConfigured   bool
-	BTNoUpload         bool
-	BTClientProfile    string
-	BTRetrackersMode   string
-	BTRetrackersFile   string
-	BTDisableDHT       bool
-	BTDisablePEX       bool
-	BTDisableUPNP      bool
-	BTDisableTCP       bool
-	BTDisableUTP       bool
-	BTDisableIPv6      bool
-	BTEstablishedConns int
-	BTHalfOpenConns    int
-	BTTotalHalfOpen    int
-	BTPeersLowWater    int
-	BTPeersHighWater   int
-	BTDialRateLimit    int
+	Port                      string
+	TorrentPort               int
+	DownloadDir               string
+	DBPath                    string
+	MaxActiveStreams          int
+	MaxActiveDownloads        int
+	MinFreeSpaceGB            int
+	DownloadLimit             int
+	UploadLimit               int
+	StreamCacheSize           int64
+	AuthEnabled               bool
+	AuthUser                  string
+	AuthPassword              string
+	LogLevel                  string
+	BTSeed                    bool
+	BTSeedConfigured          bool
+	BTNoUpload                bool
+	BTClientProfile           string
+	BTRetrackersMode          string
+	BTRetrackersFile          string
+	BTDisableDHT              bool
+	BTDisablePEX              bool
+	BTDisableUPNP             bool
+	BTDisableTCP              bool
+	BTDisableUTP              bool
+	BTDisableIPv6             bool
+	BTEstablishedConns        int
+	BTHalfOpenConns           int
+	BTTotalHalfOpen           int
+	BTPeersLowWater           int
+	BTPeersHighWater          int
+	BTDialRateLimit           int
+	BTSwarmWatchdogEnabled    bool
+	BTSwarmWatchdogConfigured bool
+	BTSwarmCheckIntervalSec   int
+	BTSwarmRefreshCooldownSec int
+	BTSwarmMinConnectedPeers  int
+	BTSwarmMinConnectedSeeds  int
+	BTSwarmStalledSpeedBps    int
+	BTSwarmStalledDurationSec int
+	BTSwarmBoostConns         int
+	BTSwarmBoostDurationSec   int
 }
 
 func Load() *Config {
@@ -68,15 +78,25 @@ func Load() *Config {
 	flag.BoolVar(&cfg.BTDisableTCP, "bt-disable-tcp", getEnvAsBool("HUB_BT_DISABLE_TCP", false), "Disable BitTorrent TCP")
 	flag.BoolVar(&cfg.BTDisableUTP, "bt-disable-utp", getEnvAsBool("HUB_BT_DISABLE_UTP", false), "Disable BitTorrent uTP")
 	flag.BoolVar(&cfg.BTDisableIPv6, "bt-disable-ipv6", getEnvAsBool("HUB_BT_DISABLE_IPV6", false), "Disable BitTorrent IPv6")
-	flag.IntVar(&cfg.BTEstablishedConns, "bt-established-conns", getEnvAsInt("HUB_BT_ESTABLISHED_CONNS_PER_TORRENT", 50), "Established peer connections per torrent")
-	flag.IntVar(&cfg.BTHalfOpenConns, "bt-half-open-conns", getEnvAsInt("HUB_BT_HALF_OPEN_CONNS_PER_TORRENT", 50), "Half-open peer connections per torrent")
-	flag.IntVar(&cfg.BTTotalHalfOpen, "bt-total-half-open", getEnvAsInt("HUB_BT_TOTAL_HALF_OPEN_CONNS", 500), "Total half-open peer connections")
-	flag.IntVar(&cfg.BTPeersLowWater, "bt-peers-low-water", getEnvAsInt("HUB_BT_PEERS_LOW_WATER", 100), "Minimum peer reserve before more discovery")
-	flag.IntVar(&cfg.BTPeersHighWater, "bt-peers-high-water", getEnvAsInt("HUB_BT_PEERS_HIGH_WATER", 1000), "Maximum peer reserve")
-	flag.IntVar(&cfg.BTDialRateLimit, "bt-dial-rate-limit", getEnvAsInt("HUB_BT_DIAL_RATE_LIMIT", 20), "Peer dial rate limit per second")
+	flag.IntVar(&cfg.BTEstablishedConns, "bt-established-conns", getEnvAsInt("HUB_BT_ESTABLISHED_CONNS_PER_TORRENT", 120), "Established peer connections per torrent")
+	flag.IntVar(&cfg.BTHalfOpenConns, "bt-half-open-conns", getEnvAsInt("HUB_BT_HALF_OPEN_CONNS_PER_TORRENT", 80), "Half-open peer connections per torrent")
+	flag.IntVar(&cfg.BTTotalHalfOpen, "bt-total-half-open", getEnvAsInt("HUB_BT_TOTAL_HALF_OPEN_CONNS", 1000), "Total half-open peer connections")
+	flag.IntVar(&cfg.BTPeersLowWater, "bt-peers-low-water", getEnvAsInt("HUB_BT_PEERS_LOW_WATER", 500), "Minimum peer reserve before more discovery")
+	flag.IntVar(&cfg.BTPeersHighWater, "bt-peers-high-water", getEnvAsInt("HUB_BT_PEERS_HIGH_WATER", 1200), "Maximum peer reserve")
+	flag.IntVar(&cfg.BTDialRateLimit, "bt-dial-rate-limit", getEnvAsInt("HUB_BT_DIAL_RATE_LIMIT", 60), "Peer dial rate limit per second")
+	flag.BoolVar(&cfg.BTSwarmWatchdogEnabled, "bt-swarm-watchdog-enabled", getEnvAsBool("HUB_BT_SWARM_WATCHDOG_ENABLED", true), "Enable swarm health watchdog")
+	flag.IntVar(&cfg.BTSwarmCheckIntervalSec, "bt-swarm-check-interval", getEnvAsInt("HUB_BT_SWARM_CHECK_INTERVAL_SEC", 60), "Swarm health check interval in seconds")
+	flag.IntVar(&cfg.BTSwarmRefreshCooldownSec, "bt-swarm-refresh-cooldown", getEnvAsInt("HUB_BT_SWARM_REFRESH_COOLDOWN_SEC", 180), "Minimum seconds between swarm refresh actions per torrent")
+	flag.IntVar(&cfg.BTSwarmMinConnectedPeers, "bt-swarm-min-connected-peers", getEnvAsInt("HUB_BT_SWARM_MIN_CONNECTED_PEERS", 8), "Minimum healthy connected peers")
+	flag.IntVar(&cfg.BTSwarmMinConnectedSeeds, "bt-swarm-min-connected-seeds", getEnvAsInt("HUB_BT_SWARM_MIN_CONNECTED_SEEDS", 2), "Minimum healthy connected seeds for incomplete torrents")
+	flag.IntVar(&cfg.BTSwarmStalledSpeedBps, "bt-swarm-stalled-speed", getEnvAsInt("HUB_BT_SWARM_STALLED_SPEED_BPS", 32768), "Download speed threshold for stalled torrent detection")
+	flag.IntVar(&cfg.BTSwarmStalledDurationSec, "bt-swarm-stalled-duration", getEnvAsInt("HUB_BT_SWARM_STALLED_DURATION_SEC", 180), "Seconds below stalled speed before refresh")
+	flag.IntVar(&cfg.BTSwarmBoostConns, "bt-swarm-boost-conns", getEnvAsInt("HUB_BT_SWARM_BOOST_CONNS", 120), "Temporary max established connections during swarm refresh")
+	flag.IntVar(&cfg.BTSwarmBoostDurationSec, "bt-swarm-boost-duration", getEnvAsInt("HUB_BT_SWARM_BOOST_DURATION_SEC", 300), "Seconds to keep boosted max connections")
 
 	flag.Parse()
 	cfg.BTSeedConfigured = true
+	cfg.BTSwarmWatchdogConfigured = true
 	cfg.LogLevel = getEnv("HUB_LOG_LEVEL", "debug")
 	ApplyDefaults(cfg)
 
@@ -100,25 +120,55 @@ func ApplyDefaults(cfg *Config) {
 		cfg.BTRetrackersFile = "/config/trackers.txt"
 	}
 	if cfg.BTEstablishedConns <= 0 {
-		cfg.BTEstablishedConns = 50
+		cfg.BTEstablishedConns = 120
 	}
 	if cfg.BTHalfOpenConns <= 0 {
-		cfg.BTHalfOpenConns = 50
+		cfg.BTHalfOpenConns = 80
 	}
 	if cfg.BTTotalHalfOpen <= 0 {
-		cfg.BTTotalHalfOpen = 500
+		cfg.BTTotalHalfOpen = 1000
 	}
 	if cfg.BTPeersLowWater <= 0 {
-		cfg.BTPeersLowWater = 100
+		cfg.BTPeersLowWater = 500
 	}
 	if cfg.BTPeersHighWater <= 0 {
-		cfg.BTPeersHighWater = 1000
+		cfg.BTPeersHighWater = 1200
 	}
 	if cfg.BTDialRateLimit <= 0 {
-		cfg.BTDialRateLimit = 20
+		cfg.BTDialRateLimit = 60
 	}
 	if cfg.BTPeersHighWater < cfg.BTPeersLowWater {
 		cfg.BTPeersHighWater = cfg.BTPeersLowWater
+	}
+	if !cfg.BTSwarmWatchdogConfigured {
+		cfg.BTSwarmWatchdogEnabled = true
+	}
+	if cfg.BTSwarmCheckIntervalSec <= 0 {
+		cfg.BTSwarmCheckIntervalSec = 60
+	}
+	if cfg.BTSwarmRefreshCooldownSec <= 0 {
+		cfg.BTSwarmRefreshCooldownSec = 180
+	}
+	if cfg.BTSwarmMinConnectedPeers <= 0 {
+		cfg.BTSwarmMinConnectedPeers = 8
+	}
+	if cfg.BTSwarmMinConnectedSeeds <= 0 {
+		cfg.BTSwarmMinConnectedSeeds = 2
+	}
+	if cfg.BTSwarmStalledSpeedBps <= 0 {
+		cfg.BTSwarmStalledSpeedBps = 32768
+	}
+	if cfg.BTSwarmStalledDurationSec <= 0 {
+		cfg.BTSwarmStalledDurationSec = 180
+	}
+	if cfg.BTSwarmBoostConns <= 0 {
+		cfg.BTSwarmBoostConns = 120
+	}
+	if cfg.BTSwarmBoostDurationSec <= 0 {
+		cfg.BTSwarmBoostDurationSec = 300
+	}
+	if cfg.BTSwarmBoostConns < cfg.BTEstablishedConns {
+		cfg.BTSwarmBoostConns = cfg.BTEstablishedConns
 	}
 }
 

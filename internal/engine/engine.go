@@ -1300,7 +1300,10 @@ type swarmSnapshot struct {
 	Complete          bool
 	AddedAt           time.Time
 	ActiveStreams     int
+	Known             int
 	Connected         int
+	Pending           int
+	HalfOpen          int
 	Seeds             int
 	DownloadSpeed     int64
 	PeakConnected     int
@@ -1311,8 +1314,9 @@ type swarmSnapshot struct {
 }
 
 type swarmDecision struct {
-	Degraded bool
-	Reason   string
+	Degraded     bool
+	NeedsRefresh bool
+	Reason       string
 }
 
 func decideSwarmHealth(cfg *config.Config, snap swarmSnapshot, stallStartedAt time.Time) swarmDecision {
@@ -1326,44 +1330,47 @@ func decideSwarmHealth(cfg *config.Config, snap swarmSnapshot, stallStartedAt ti
 		return swarmDecision{}
 	}
 
-	activeDownload := !snap.Complete && snap.DownloadSpeed >= int64(cfg.BTSwarmStalledSpeedBps)
-
 	if !snap.MetadataReady {
 		if !snap.AddedAt.IsZero() && snap.Now.Sub(snap.AddedAt) < time.Duration(cfg.BTSwarmRecoveryGraceSec)*time.Second {
 			return swarmDecision{}
 		}
 		if snap.Connected < cfg.BTSwarmMinConnectedPeers {
-			return swarmDecision{Degraded: true, Reason: "metadata pending with low connected peers"}
+			return swarmDecision{Degraded: true, NeedsRefresh: true, Reason: "metadata pending with low connected peers"}
 		}
 		return swarmDecision{}
 	}
 
-	if activeDownload {
-		return swarmDecision{}
-	}
-	if snap.ActiveStreams > 0 && snap.DownloadSpeed > 0 {
-		return swarmDecision{}
+	activeDownload := !snap.Complete && snap.DownloadSpeed >= int64(cfg.BTSwarmStalledSpeedBps)
+	activeStream := snap.ActiveStreams > 0 && snap.DownloadSpeed > 0
+
+	// Check severe degradation first (only if not actively downloading or streaming)
+	if !activeDownload && !activeStream {
+		if !snap.Complete && snap.Seeds < cfg.BTSwarmMinConnectedSeeds {
+			return swarmDecision{Degraded: true, NeedsRefresh: true, Reason: "connected seeds below threshold"}
+		}
+		if snap.Connected < cfg.BTSwarmMinConnectedPeers {
+			return swarmDecision{Degraded: true, NeedsRefresh: true, Reason: "connected peers below threshold"}
+		}
+		if !snap.Complete && snap.DownloadSpeed < int64(cfg.BTSwarmStalledSpeedBps) && !stallStartedAt.IsZero() && snap.Now.Sub(stallStartedAt) >= time.Duration(cfg.BTSwarmStalledDurationSec)*time.Second {
+			return swarmDecision{Degraded: true, NeedsRefresh: true, Reason: "download speed stalled"}
+		}
 	}
 
-	if !snap.Complete && snap.Seeds < cfg.BTSwarmMinConnectedSeeds {
-		return swarmDecision{Degraded: true, Reason: "connected seeds below threshold"}
-	}
-	if snap.Connected < cfg.BTSwarmMinConnectedPeers {
-		return swarmDecision{Degraded: true, Reason: "connected peers below threshold"}
-	}
-	if !snap.Complete && snap.DownloadSpeed < int64(cfg.BTSwarmStalledSpeedBps) && !stallStartedAt.IsZero() && snap.Now.Sub(stallStartedAt) >= time.Duration(cfg.BTSwarmStalledDurationSec)*time.Second {
-		return swarmDecision{Degraded: true, Reason: "download speed stalled"}
+	// Empty peer pool check (trigger performance refresh)
+	if snap.Pending == 0 && snap.HalfOpen == 0 && snap.Connected < cfg.BTEstablishedConns && snap.Known <= snap.Connected+2 {
+		return swarmDecision{Degraded: false, NeedsRefresh: true, Reason: "peer pool depleted"}
 	}
 
+	// Performance refresh checks based on trends (even if actively downloading, but keep degraded = false)
 	peakValid := !snap.PeakUpdatedAt.IsZero() && snap.Now.Sub(snap.PeakUpdatedAt) <= time.Duration(cfg.BTSwarmPeakTTLSec)*time.Second
 	if peakValid && snap.PeakConnected > cfg.BTSwarmMinConnectedPeers && snap.Connected < int(float64(snap.PeakConnected)*cfg.BTSwarmPeerDropRatio) {
-		return swarmDecision{Degraded: true, Reason: "connected peers dropped below recent peak"}
+		return swarmDecision{Degraded: false, NeedsRefresh: true, Reason: "connected peers dropped below recent peak"}
 	}
 	if peakValid && !snap.Complete && snap.PeakSeeds > cfg.BTSwarmMinConnectedSeeds && snap.Seeds < int(float64(snap.PeakSeeds)*cfg.BTSwarmSeedDropRatio) {
-		return swarmDecision{Degraded: true, Reason: "connected seeds dropped below recent peak"}
+		return swarmDecision{Degraded: false, NeedsRefresh: true, Reason: "connected seeds dropped below recent peak"}
 	}
 	if peakValid && !snap.Complete && snap.PeakDownloadSpeed > int64(cfg.BTSwarmStalledSpeedBps) && snap.DownloadSpeed < int64(float64(snap.PeakDownloadSpeed)*cfg.BTSwarmSpeedDropRatio) {
-		return swarmDecision{Degraded: true, Reason: "download speed dropped below recent peak"}
+		return swarmDecision{Degraded: false, NeedsRefresh: true, Reason: "download speed dropped below recent peak"}
 	}
 
 	return swarmDecision{}
@@ -1481,7 +1488,10 @@ func (e *Engine) checkSwarms() {
 			Complete:          complete,
 			AddedAt:           mt.addedAt,
 			ActiveStreams:     e.activeStreamsForTorrentLocked(hash),
+			Known:             stats.TotalPeers,
 			Connected:         stats.ActivePeers,
+			Pending:           stats.PendingPeers,
+			HalfOpen:          stats.HalfOpenPeers,
 			Seeds:             stats.ConnectedSeeders,
 			DownloadSpeed:     mt.downloadSpeed,
 			PeakConnected:     mt.peakConnected,
@@ -1498,6 +1508,16 @@ func (e *Engine) checkSwarms() {
 				logging.Infof("swarm degraded hash=%s reason=%s connected=%d seeds=%d speed=%d", hash, decision.Reason, stats.ActivePeers, stats.ConnectedSeeders, mt.downloadSpeed)
 			}
 			mt.degraded = true
+		} else {
+			mt.lastHealthyAt = now
+			updateDegradationEpisodeLocked(e.cfg, mt, false, now)
+			if mt.degraded {
+				logging.Infof("swarm recovered hash=%s connected=%d seeds=%d speed=%d", hash, stats.ActivePeers, stats.ConnectedSeeders, mt.downloadSpeed)
+			}
+			mt.degraded = false
+		}
+
+		if decision.NeedsRefresh {
 			if e.cfg.BTBenchmarkMode {
 				mt.lastSwarmRefreshReason = "benchmark mode: " + decision.Reason
 				if mt.lastSwarmRefreshAt.IsZero() || now.Sub(mt.lastSwarmRefreshAt) >= time.Duration(e.cfg.BTSwarmRefreshCooldownSec)*time.Second {
@@ -1508,7 +1528,7 @@ func (e *Engine) checkSwarms() {
 			}
 			activeStreams := e.activeStreamsForTorrentLocked(hash)
 			mt.nextHardRefreshAt = nextHardRefreshAt(e.cfg, hardRefreshGateSnapshot{AddedAt: mt.addedAt, LastHardRefreshAt: mt.lastHardRefreshAt, Now: now})
-			if e.cfg.BTSwarmAutoHardRefreshEnabled {
+			if e.cfg.BTSwarmAutoHardRefreshEnabled && decision.Degraded {
 				logging.Warnf("automatic hard refresh is disabled for swarm recovery hash=%s reason=%s active_streams=%d", hash, decision.Reason, activeStreams)
 			}
 
@@ -1535,12 +1555,6 @@ func (e *Engine) checkSwarms() {
 			continue
 		}
 
-		mt.lastHealthyAt = now
-		updateDegradationEpisodeLocked(e.cfg, mt, false, now)
-		if mt.degraded {
-			logging.Infof("swarm recovered hash=%s connected=%d seeds=%d speed=%d", hash, stats.ActivePeers, stats.ConnectedSeeders, mt.downloadSpeed)
-		}
-		mt.degraded = false
 		if !mt.boostUntil.IsZero() && now.After(mt.boostUntil) {
 			if mt.normalMaxEstablishedConns > 0 {
 				expiredBoosts = append(expiredBoosts, boostExpireTarget{hash: hash, t: mt.t, max: mt.normalMaxEstablishedConns})

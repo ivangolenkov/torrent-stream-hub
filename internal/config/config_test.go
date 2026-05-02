@@ -113,7 +113,7 @@ func TestApplyDefaultsSetsBTDefaults(t *testing.T) {
 	if cfg.BTSwarmMinConnectedPeers != 8 || cfg.BTSwarmMinConnectedSeeds != 2 || cfg.BTSwarmStalledSpeedBps != 32768 {
 		t.Fatalf("unexpected swarm threshold defaults: %+v", cfg)
 	}
-	if cfg.BTSwarmStalledDurationSec != 180 || cfg.BTSwarmBoostConns != 120 || cfg.BTSwarmBoostDurationSec != 300 {
+	if cfg.BTSwarmStalledDurationSec != 180 || cfg.BTSwarmBoostConns != 240 || cfg.BTSwarmBoostDurationSec != 300 {
 		t.Fatalf("unexpected swarm boost defaults: %+v", cfg)
 	}
 	if cfg.BTSwarmPeerDropRatio != 0.45 || cfg.BTSwarmSeedDropRatio != 0.45 || cfg.BTSwarmSpeedDropRatio != 0.35 {

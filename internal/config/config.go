@@ -222,8 +222,8 @@ func ApplyDefaults(cfg *Config) {
 	if cfg.BTSwarmBoostDurationSec <= 0 {
 		cfg.BTSwarmBoostDurationSec = 300
 	}
-	if cfg.BTSwarmBoostConns < cfg.BTEstablishedConns {
-		cfg.BTSwarmBoostConns = cfg.BTEstablishedConns
+	if cfg.BTSwarmBoostConns <= cfg.BTEstablishedConns {
+		cfg.BTSwarmBoostConns = cfg.BTEstablishedConns * 2
 	}
 	cfg.BTSwarmPeerDropRatio = clampRatio(cfg.BTSwarmPeerDropRatio, 0.45)
 	cfg.BTSwarmSeedDropRatio = clampRatio(cfg.BTSwarmSeedDropRatio, 0.45)

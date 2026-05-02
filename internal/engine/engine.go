@@ -41,8 +41,9 @@ func (e TorrentNotFoundError) Is(target error) bool {
 }
 
 type Engine struct {
-	client *torrent.Client
-	cfg    *config.Config
+	client  *torrent.Client
+	storage storage.ClientImplCloser
+	cfg     *config.Config
 
 	mu                      sync.RWMutex
 	managedTorrents         map[string]*ManagedTorrent
@@ -55,6 +56,9 @@ type Engine struct {
 	lastClientRecycleReason string
 	lastClientRecycleErr    string
 	recycleScheduledReason  string
+	lastRestoreSource       string
+	lastRestoreErr          string
+	invalidMetainfoCount    int
 
 	streamManager *StreamManager
 }
@@ -170,11 +174,12 @@ func New(cfg *config.Config) (*Engine, error) {
 		cfg:             cfg,
 		managedTorrents: make(map[string]*ManagedTorrent),
 	}
-	client, err := eng.newTorrentClient()
+	client, torrentStorage, err := eng.newTorrentClient()
 	if err != nil {
 		return nil, fmt.Errorf("failed to create torrent client: %w", err)
 	}
 	eng.client = client
+	eng.storage = torrentStorage
 	eng.streamManager = NewStreamManager(eng)
 
 	go eng.resourceMonitor()
@@ -185,8 +190,10 @@ func New(cfg *config.Config) (*Engine, error) {
 	return eng, nil
 }
 
-func (e *Engine) newTorrentClient() (*torrent.Client, error) {
+func (e *Engine) newTorrentClient() (*torrent.Client, storage.ClientImplCloser, error) {
+	torrentStorage := storage.NewFile(e.cfg.DownloadDir)
 	clientConfig := buildClientConfig(e.cfg)
+	clientConfig.DefaultStorage = torrentStorage
 	clientConfig.Callbacks.StatusUpdated = append(clientConfig.Callbacks.StatusUpdated, func(event torrent.StatusUpdatedEvent) {
 		e.handleStatusEvent(event)
 	})
@@ -196,7 +203,14 @@ func (e *Engine) newTorrentClient() (*torrent.Client, error) {
 	clientConfig.Callbacks.PeerConnClosed = func(conn *torrent.PeerConn) {
 		e.logPeerConnEvent("closed", conn)
 	}
-	return torrent.NewClient(clientConfig)
+	client, err := torrent.NewClient(clientConfig)
+	if err != nil {
+		if closeErr := torrentStorage.Close(); closeErr != nil {
+			logging.Warnf("failed to close torrent storage after client init error: %v", closeErr)
+		}
+		return nil, nil, err
+	}
+	return client, torrentStorage, nil
 }
 
 func buildClientConfig(cfg *config.Config) *torrent.ClientConfig {
@@ -204,7 +218,6 @@ func buildClientConfig(cfg *config.Config) *torrent.ClientConfig {
 	clientConfig := torrent.NewDefaultClientConfig()
 	clientConfig.DataDir = cfg.DownloadDir
 	clientConfig.ListenPort = cfg.TorrentPort
-	clientConfig.DefaultStorage = storage.NewFile(cfg.DownloadDir)
 	clientConfig.Seed = cfg.BTSeed
 	clientConfig.NoUpload = cfg.BTNoUpload
 	clientConfig.NoDHT = cfg.BTDisableDHT
@@ -397,7 +410,24 @@ func (e *Engine) Warmup(ctx context.Context, hash string, index int, size int64)
 
 func (e *Engine) Close() {
 	logging.Infof("closing torrent engine")
-	e.client.Close()
+	e.mu.Lock()
+	client := e.client
+	torrentStorage := e.storage
+	e.client = nil
+	e.storage = nil
+	e.mu.Unlock()
+	closeTorrentResources(client, torrentStorage)
+}
+
+func closeTorrentResources(client *torrent.Client, torrentStorage storage.ClientImplCloser) {
+	if client != nil {
+		client.Close()
+	}
+	if torrentStorage != nil {
+		if err := torrentStorage.Close(); err != nil {
+			logging.Warnf("failed to close torrent storage: %v", err)
+		}
+	}
 }
 
 func (e *Engine) AddMagnet(magnet string) (*models.Torrent, error) {
@@ -437,14 +467,17 @@ func (e *Engine) AddTorrentFile(r io.Reader) (*models.Torrent, error) {
 		return nil, fmt.Errorf("failed to read torrent file: %w", err)
 	}
 	logging.Debugf(".torrent file parsed hash=%s trackers=%d", metaInfo.HashInfoBytes().HexString(), len(metaInfo.UpvertedAnnounceList().DistinctValues()))
-	if err := e.saveMetainfo(metaInfo.HashInfoBytes().HexString(), metaInfo); err != nil {
-		logging.Warnf("failed to persist metainfo hash=%s: %v", metaInfo.HashInfoBytes().HexString(), err)
-	}
-
 	spec, err := torrent.TorrentSpecFromMetaInfoErr(metaInfo)
 	if err != nil {
 		logging.Warnf("failed to build torrent spec hash=%s: %v", metaInfo.HashInfoBytes().HexString(), err)
 		return nil, err
+	}
+	if err := validateMetainfoForReadd(metaInfo); err != nil {
+		logging.Warnf("invalid .torrent metainfo hash=%s: %v", metaInfo.HashInfoBytes().HexString(), err)
+		return nil, err
+	}
+	if err := e.saveMetainfo(metaInfo.HashInfoBytes().HexString(), metaInfo, false); err != nil {
+		logging.Warnf("failed to persist metainfo hash=%s: %v", metaInfo.HashInfoBytes().HexString(), err)
 	}
 	e.augmentTorrentSpec(spec)
 	t, _, err := e.client.AddTorrentSpec(spec)
@@ -469,6 +502,62 @@ func (e *Engine) setLastReaddSource(hash, source string) {
 	if mt, ok := e.managedTorrents[hash]; ok {
 		mt.lastReaddSource = source
 	}
+}
+
+func (e *Engine) ScheduleRecheckIfProgressBehind(hash string, persistedDownloaded int64) {
+	if persistedDownloaded <= 0 {
+		return
+	}
+	hash = strings.ToLower(strings.TrimSpace(hash))
+	e.mu.RLock()
+	mt, ok := e.managedTorrents[hash]
+	if !ok || mt == nil || mt.t == nil {
+		e.mu.RUnlock()
+		return
+	}
+	t := mt.t
+	e.mu.RUnlock()
+
+	go func() {
+		<-t.GotInfo()
+
+		e.mu.Lock()
+		mt, ok := e.managedTorrents[hash]
+		if !ok || mt.t != t {
+			e.mu.Unlock()
+			return
+		}
+		if t.BytesCompleted() >= persistedDownloaded {
+			e.mu.Unlock()
+			return
+		}
+		if t.Info() != nil {
+			for _, f := range t.Files() {
+				f.SetPriority(torrent.PiecePriorityNone)
+			}
+			mt.downloadAllStarted = false
+		}
+		e.mu.Unlock()
+
+		logging.Infof("rechecking existing torrent data hash=%s runtime_downloaded=%d persisted_downloaded=%d", hash, t.BytesCompleted(), persistedDownloaded)
+		if err := t.VerifyDataContext(context.Background()); err != nil {
+			logging.Warnf("torrent data recheck failed hash=%s: %v", hash, err)
+		} else {
+			logging.Infof("torrent data recheck completed hash=%s downloaded=%d", hash, t.BytesCompleted())
+		}
+
+		e.mu.Lock()
+		defer e.mu.Unlock()
+		mt, ok = e.managedTorrents[hash]
+		if !ok || mt.t != t {
+			return
+		}
+		if mt.state == models.StateDownloading && t.Info() != nil {
+			t.DownloadAll()
+			mt.downloadAllStarted = true
+			logging.Debugf("download all restarted after data recheck hash=%s files=%d", hash, len(t.Files()))
+		}
+	}()
 }
 
 func (e *Engine) augmentTorrentSpec(spec *torrent.TorrentSpec) {
@@ -603,9 +692,13 @@ func (e *Engine) addTorrentWithSource(t *torrent.Torrent, sourceURI string) (*mo
 	}
 	if t.Info() != nil {
 		mi := t.Metainfo()
-		mt.metainfo = &mi
-		if err := e.saveMetainfo(hash, &mi); err != nil {
-			logging.Warnf("failed to persist runtime metainfo hash=%s: %v", hash, err)
+		if err := validateMetainfoForReadd(&mi); err != nil {
+			logging.Warnf("runtime metainfo not reusable hash=%s: %v", hash, err)
+		} else {
+			mt.metainfo = &mi
+			if err := e.saveMetainfo(hash, &mi, true); err != nil {
+				logging.Warnf("failed to persist runtime metainfo hash=%s: %v", hash, err)
+			}
 		}
 	}
 	e.managedTorrents[hash] = mt
@@ -738,6 +831,9 @@ func (e *Engine) BTHealth() *models.BTHealth {
 		ClientRecycleBlockedReason:    recycleBlocked,
 		NextClientRecycleAt:           formatBTHealthTime(nextClientRecycleAt(e.cfg, e.lastClientRecycleAt, now)),
 		RecycleScheduledReason:        e.recycleScheduledReason,
+		LastRestoreSource:             e.lastRestoreSource,
+		LastRestoreError:              e.lastRestoreErr,
+		InvalidMetainfoCount:          e.invalidMetainfoCount,
 		PeerDropRatio:                 e.cfg.BTSwarmPeerDropRatio,
 		SeedDropRatio:                 e.cfg.BTSwarmSeedDropRatio,
 		SpeedDropRatio:                e.cfg.BTSwarmSpeedDropRatio,
@@ -1000,9 +1096,13 @@ func (e *Engine) watchMetadata(hash string, t *torrent.Torrent) {
 
 		fileCount := len(t.Files())
 		mi := t.Metainfo()
-		mt.metainfo = &mi
-		if err := e.saveMetainfo(hash, &mi); err != nil {
-			logging.Warnf("failed to persist runtime metainfo hash=%s: %v", hash, err)
+		if err := validateMetainfoForReadd(&mi); err != nil {
+			logging.Warnf("runtime metainfo not reusable hash=%s: %v", hash, err)
+		} else {
+			mt.metainfo = &mi
+			if err := e.saveMetainfo(hash, &mi, true); err != nil {
+				logging.Warnf("failed to persist runtime metainfo hash=%s: %v", hash, err)
+			}
 		}
 		mt.metadataLogged = true
 		mt.metadataWaitLogged = false
@@ -1533,8 +1633,8 @@ func (e *Engine) hardRefreshTorrent(hash string, reason string, manual bool) err
 		return fmt.Errorf("hard refresh blocked: %s", blocked)
 	}
 
-	spec, readdSource, err := e.torrentSpecForReadd(mt, hash)
-	if err != nil {
+	candidates, err := e.torrentSpecsForReadd(mt, hash)
+	if err != nil && len(candidates) == 0 {
 		mt.pendingHardRefresh = false
 		mt.lastHardRefreshAt = now
 		mt.lastHardRefreshReason = reason
@@ -1542,6 +1642,17 @@ func (e *Engine) hardRefreshTorrent(hash string, reason string, manual bool) err
 		e.mu.Unlock()
 		return err
 	}
+	if len(candidates) == 0 {
+		err := fmt.Errorf("no re-add sources")
+		mt.pendingHardRefresh = false
+		mt.lastHardRefreshAt = now
+		mt.lastHardRefreshReason = reason
+		mt.lastHardRefreshErr = logging.SanitizeText(err.Error())
+		e.mu.Unlock()
+		return err
+	}
+	spec := candidates[0].spec
+	readdSource := candidates[0].source
 	sourceURI := strings.TrimSpace(mt.sourceURI)
 	if sourceURI == "" {
 		sourceURI = "magnet:?xt=urn:btih:" + hash
@@ -1671,15 +1782,25 @@ func (e *Engine) torrentSpecFromSource(sourceURI string) (*torrent.TorrentSpec, 
 	return spec, nil
 }
 
-func (e *Engine) saveMetainfo(hash string, mi *metainfo.MetaInfo) error {
+func (e *Engine) saveMetainfo(hash string, mi *metainfo.MetaInfo, keepExisting bool) error {
 	if mi == nil || strings.TrimSpace(hash) == "" {
 		return nil
+	}
+	if err := validateMetainfoForReadd(mi); err != nil {
+		return err
 	}
 	dir := filepath.Join(e.ConfigDir(), "metainfo")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
 	path := filepath.Join(dir, strings.ToLower(strings.TrimSpace(hash))+".torrent")
+	if keepExisting {
+		if _, err := os.Stat(path); err == nil {
+			return nil
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
 	tmp := path + ".tmp"
 	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
 	if err != nil {
@@ -1698,48 +1819,116 @@ func (e *Engine) saveMetainfo(hash string, mi *metainfo.MetaInfo) error {
 	return os.Rename(tmp, path)
 }
 
+func validateMetainfoForReadd(mi *metainfo.MetaInfo) error {
+	if mi == nil {
+		return fmt.Errorf("missing metainfo")
+	}
+	if len(mi.InfoBytes) == 0 {
+		return fmt.Errorf("missing info bytes")
+	}
+	info, err := mi.UnmarshalInfo()
+	if err != nil {
+		return fmt.Errorf("unmarshal info: %w", err)
+	}
+	_ = mi.HashInfoBytes()
+	if len(mi.PieceLayers) > 0 && !info.HasV2() {
+		return fmt.Errorf("piece layers present without v2 info")
+	}
+	if info.HasV2() {
+		if err := metainfo.ValidatePieceLayers(mi.PieceLayers, &info.FileTree, info.PieceLength); err != nil {
+			return fmt.Errorf("validate piece layers: %w", err)
+		}
+	}
+	return nil
+}
+
+func (e *Engine) MarkInvalidMetainfo(hash, reason string) {
+	path := e.MetainfoPath(hash)
+	if path == "" {
+		return
+	}
+	if _, err := os.Stat(path); err != nil {
+		return
+	}
+	invalidPath := path + ".invalid"
+	if err := os.Rename(path, invalidPath); err != nil {
+		logging.Warnf("failed to mark invalid metainfo hash=%s: %v", hash, err)
+		return
+	}
+	e.mu.Lock()
+	e.invalidMetainfoCount++
+	e.mu.Unlock()
+	logging.Warnf("marked invalid metainfo hash=%s path=%s reason=%s", hash, invalidPath, logging.SanitizeText(reason))
+}
+
+func (e *Engine) SetRestoreDiagnostics(source, errText string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.lastRestoreSource = source
+	e.lastRestoreErr = logging.SanitizeText(errText)
+}
+
 func (e *Engine) MetainfoPath(hash string) string {
 	return filepath.Join(e.ConfigDir(), "metainfo", strings.ToLower(strings.TrimSpace(hash))+".torrent")
 }
 
-func (e *Engine) torrentSpecForReadd(mt *ManagedTorrent, hash string) (*torrent.TorrentSpec, string, error) {
+type readdSpecCandidate struct {
+	spec   *torrent.TorrentSpec
+	source string
+}
+
+func (e *Engine) torrentSpecsForReadd(mt *ManagedTorrent, hash string) ([]readdSpecCandidate, error) {
+	var candidates []readdSpecCandidate
+	var buildErr error
 	if mt != nil {
 		if mt.metainfo != nil {
-			spec, err := torrent.TorrentSpecFromMetaInfoErr(cloneMetaInfo(mt.metainfo))
-			if err != nil {
-				return nil, "", err
+			if err := validateMetainfoForReadd(mt.metainfo); err != nil {
+				buildErr = errors.Join(buildErr, fmt.Errorf("metainfo_runtime: %w", err))
+			} else {
+				spec, err := torrent.TorrentSpecFromMetaInfoErr(cloneMetaInfo(mt.metainfo))
+				if err != nil {
+					buildErr = errors.Join(buildErr, fmt.Errorf("metainfo_runtime: %w", err))
+				} else {
+					e.augmentTorrentSpec(spec)
+					candidates = append(candidates, readdSpecCandidate{spec: spec, source: "metainfo_runtime"})
+				}
 			}
-			e.augmentTorrentSpec(spec)
-			return spec, "metainfo", nil
 		}
 		if mt.t != nil && mt.t.Info() != nil {
 			mi := mt.t.Metainfo()
-			spec, err := torrent.TorrentSpecFromMetaInfoErr(&mi)
-			if err != nil {
-				return nil, "", err
+			if err := validateMetainfoForReadd(&mi); err != nil {
+				buildErr = errors.Join(buildErr, fmt.Errorf("metainfo_runtime: %w", err))
+			} else {
+				spec, err := torrent.TorrentSpecFromMetaInfoErr(&mi)
+				if err != nil {
+					buildErr = errors.Join(buildErr, fmt.Errorf("metainfo_runtime: %w", err))
+				} else {
+					e.augmentTorrentSpec(spec)
+					mt.metainfo = &mi
+					candidates = append(candidates, readdSpecCandidate{spec: spec, source: "metainfo_runtime"})
+				}
 			}
-			e.augmentTorrentSpec(spec)
-			mt.metainfo = &mi
-			return spec, "metainfo", nil
 		}
 		sourceURI := strings.TrimSpace(mt.sourceURI)
 		if sourceURI != "" {
 			spec, err := e.torrentSpecFromSource(sourceURI)
 			if err != nil {
-				return nil, "", err
+				buildErr = errors.Join(buildErr, fmt.Errorf("magnet: %w", err))
+			} else {
+				candidates = append(candidates, readdSpecCandidate{spec: spec, source: "magnet"})
 			}
-			return spec, "magnet", nil
 		}
 	}
 	if strings.TrimSpace(hash) == "" {
-		return nil, "", fmt.Errorf("missing torrent hash for re-add")
+		return candidates, errors.Join(buildErr, fmt.Errorf("missing torrent hash for re-add"))
 	}
 	spec, err := e.torrentSpecFromSource("magnet:?xt=urn:btih:" + strings.TrimSpace(hash))
 	if err != nil {
-		return nil, "", err
+		return candidates, errors.Join(buildErr, err)
 	}
 	logging.Warnf("re-add falling back to bare info hash hash=%s", strings.TrimSpace(hash))
-	return spec, "infohash", nil
+	candidates = append(candidates, readdSpecCandidate{spec: spec, source: "infohash"})
+	return candidates, buildErr
 }
 
 func cloneMetaInfo(mi *metainfo.MetaInfo) *metainfo.MetaInfo {
@@ -1791,6 +1980,7 @@ func (e *Engine) recycleClient(reason string, manual bool) error {
 	}
 	e.recyclingClient = true
 	oldClient := e.client
+	oldStorage := e.storage
 	snapshots := make([]recycleTorrentSnapshot, 0, len(e.managedTorrents))
 	for hash, mt := range e.managedTorrents {
 		sourceURI := strings.TrimSpace(mt.sourceURI)
@@ -1827,12 +2017,10 @@ func (e *Engine) recycleClient(reason string, manual bool) error {
 	}
 	e.mu.Unlock()
 
-	if oldClient != nil {
-		logging.Infof("closing old bt client before recycle rebind reason=%s torrents=%d", reason, len(snapshots))
-		oldClient.Close()
-	}
+	logging.Infof("closing old bt client/storage before recycle rebind reason=%s torrents=%d", reason, len(snapshots))
+	closeTorrentResources(oldClient, oldStorage)
 
-	newClient, err := e.newTorrentClientWithRetry(10, 250*time.Millisecond)
+	newClient, newStorage, err := e.newTorrentClientWithRetry(10, 250*time.Millisecond)
 	if err != nil {
 		e.mu.Lock()
 		e.recyclingClient = false
@@ -1850,14 +2038,28 @@ func (e *Engine) recycleClient(reason string, manual bool) error {
 	}
 	var recycleErr error
 	for _, snap := range snapshots {
-		spec, readdSource, err := e.torrentSpecForReadd(&ManagedTorrent{sourceURI: snap.sourceURI, metainfo: cloneMetaInfo(snap.metainfo)}, snap.hash)
-		if err != nil {
+		candidates, err := e.torrentSpecsForReadd(&ManagedTorrent{sourceURI: snap.sourceURI, metainfo: cloneMetaInfo(snap.metainfo)}, snap.hash)
+		if err != nil && len(candidates) == 0 {
 			recycleErr = errors.Join(recycleErr, fmt.Errorf("build spec %s: %w", snap.hash, err))
+		}
+		if len(candidates) == 0 {
+			recycleErr = errors.Join(recycleErr, fmt.Errorf("build spec %s: no re-add sources", snap.hash))
 			continue
 		}
-		newTorrent, _, err := newClient.AddTorrentSpec(spec)
-		if err != nil {
-			recycleErr = errors.Join(recycleErr, fmt.Errorf("add torrent %s: %w", snap.hash, err))
+
+		var newTorrent *torrent.Torrent
+		var readdSource string
+		var addErr error
+		for _, candidate := range candidates {
+			newTorrent, _, addErr = newClient.AddTorrentSpec(candidate.spec)
+			if addErr == nil {
+				readdSource = candidate.source
+				break
+			}
+			recycleErr = errors.Join(recycleErr, fmt.Errorf("add torrent %s source=%s: %w", snap.hash, candidate.source, addErr))
+			logging.Warnf("re-add source failed hash=%s source=%s: %v", snap.hash, candidate.source, addErr)
+		}
+		if newTorrent == nil {
 			continue
 		}
 		mt := &ManagedTorrent{
@@ -1903,6 +2105,7 @@ func (e *Engine) recycleClient(reason string, manual bool) error {
 
 	e.mu.Lock()
 	e.client = newClient
+	e.storage = newStorage
 	e.managedTorrents = newManaged
 	e.recyclingClient = false
 	e.clientRecycleCount++
@@ -1923,15 +2126,15 @@ func (e *Engine) recycleClient(reason string, manual bool) error {
 	return recycleErr
 }
 
-func (e *Engine) newTorrentClientWithRetry(attempts int, delay time.Duration) (*torrent.Client, error) {
+func (e *Engine) newTorrentClientWithRetry(attempts int, delay time.Duration) (*torrent.Client, storage.ClientImplCloser, error) {
 	if attempts <= 0 {
 		attempts = 1
 	}
 	var lastErr error
 	for i := 0; i < attempts; i++ {
-		client, err := e.newTorrentClient()
+		client, torrentStorage, err := e.newTorrentClient()
 		if err == nil {
-			return client, nil
+			return client, torrentStorage, nil
 		}
 		lastErr = err
 		if i+1 < attempts {
@@ -1939,7 +2142,7 @@ func (e *Engine) newTorrentClientWithRetry(attempts int, delay time.Duration) (*
 			time.Sleep(delay)
 		}
 	}
-	return nil, lastErr
+	return nil, nil, lastErr
 }
 
 func (e *Engine) clientRecycleBlockedReasonLocked(now time.Time) string {

@@ -118,6 +118,9 @@ type BTHealth struct {
 	ClientRecycleBlockedReason    string            `json:"client_recycle_blocked_reason,omitempty"`
 	NextClientRecycleAt           string            `json:"next_client_recycle_at,omitempty"`
 	RecycleScheduledReason        string            `json:"recycle_scheduled_reason,omitempty"`
+	LastRestoreSource             string            `json:"last_restore_source,omitempty"`
+	LastRestoreError              string            `json:"last_restore_error,omitempty"`
+	InvalidMetainfoCount          int               `json:"invalid_metainfo_count"`
 	PeerDropRatio                 float64           `json:"peer_drop_ratio"`
 	SeedDropRatio                 float64           `json:"seed_drop_ratio"`
 	SpeedDropRatio                float64           `json:"speed_drop_ratio"`

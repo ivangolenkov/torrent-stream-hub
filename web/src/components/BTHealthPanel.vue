@@ -194,6 +194,11 @@ onUnmounted(() => {
           <div class="text-xs text-gray-500">{{ health.client_recycle_allowed ? 'allowed' : health.client_recycle_blocked_reason }}</div>
         </div>
         <div>
+          <div class="text-gray-500 text-xs uppercase tracking-wider">Restore</div>
+          <div class="mt-1 font-medium text-gray-900">{{ health.last_restore_source || 'none' }}</div>
+          <div class="text-xs text-gray-500">invalid metainfo {{ health.invalid_metainfo_count }}</div>
+        </div>
+        <div>
           <div class="text-gray-500 text-xs uppercase tracking-wider">Trend Ratios</div>
           <div class="mt-1 font-medium text-gray-900">P {{ health.peer_drop_ratio }} · S {{ health.seed_drop_ratio }} · V {{ health.speed_drop_ratio }}</div>
         </div>

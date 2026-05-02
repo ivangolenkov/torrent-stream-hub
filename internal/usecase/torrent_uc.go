@@ -226,6 +226,7 @@ func (uc *TorrentUseCase) Resume(hash string) error {
 		if t.SourceURI == "" {
 			t.SourceURI = restored.SourceURI
 		}
+		uc.engine.ScheduleRecheckIfProgressBehind(restored.Hash, t.Downloaded)
 	}
 
 	t.State = models.StateQueued
@@ -393,6 +394,7 @@ func (uc *TorrentUseCase) RestoreTorrents() error {
 		restored, err := uc.restoreTorrentToEngine(t)
 		if err == nil {
 			mergePersistedMetadata(restored, t)
+			uc.engine.ScheduleRecheckIfProgressBehind(restored.Hash, t.Downloaded)
 			if err := uc.repo.SaveTorrent(restored); err != nil {
 				logging.Warnf("failed to save restored torrent hash=%s: %v", t.Hash, err)
 				restoreErr = errors.Join(restoreErr, fmt.Errorf("save restored torrent %s: %w", t.Hash, err))
@@ -409,24 +411,49 @@ func (uc *TorrentUseCase) RestoreTorrents() error {
 }
 
 func (uc *TorrentUseCase) restoreTorrentToEngine(t *models.Torrent) (*models.Torrent, error) {
+	var restoreErr error
 	if path := uc.engine.MetainfoPath(t.Hash); path != "" {
 		f, err := os.Open(path)
 		if err == nil {
-			defer f.Close()
 			logging.Debugf("restore uses persisted metainfo hash=%s", t.Hash)
-			return uc.engine.AddTorrentFile(f)
+			restored, addErr := uc.engine.AddTorrentFile(f)
+			closeErr := f.Close()
+			if addErr == nil && closeErr == nil {
+				uc.engine.SetRestoreDiagnostics("metainfo_file", "")
+				return restored, nil
+			}
+			if addErr == nil {
+				addErr = closeErr
+			}
+			restoreErr = errors.Join(restoreErr, fmt.Errorf("metainfo_file: %w", addErr))
+			uc.engine.MarkInvalidMetainfo(t.Hash, addErr.Error())
+			logging.Warnf("restore metainfo failed hash=%s, trying fallback: %v", t.Hash, addErr)
 		}
-		if !errors.Is(err, os.ErrNotExist) {
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
 			logging.Warnf("restore failed to open persisted metainfo hash=%s: %v", t.Hash, err)
+			restoreErr = errors.Join(restoreErr, fmt.Errorf("open metainfo_file: %w", err))
 		}
 	}
 	if t.SourceURI != "" {
 		logging.Debugf("restore uses persisted source URI hash=%s", t.Hash)
-		return uc.engine.AddMagnet(t.SourceURI)
+		restored, err := uc.engine.AddMagnet(t.SourceURI)
+		if err == nil {
+			uc.engine.SetRestoreDiagnostics("magnet", "")
+			return restored, nil
+		}
+		restoreErr = errors.Join(restoreErr, fmt.Errorf("magnet: %w", err))
+		logging.Warnf("restore magnet failed hash=%s, trying infohash fallback: %v", t.Hash, err)
 	}
 
 	logging.Warnf("restore falling back to bare info hash hash=%s", t.Hash)
-	return uc.engine.AddInfoHash(t.Hash)
+	restored, err := uc.engine.AddInfoHash(t.Hash)
+	if err == nil {
+		uc.engine.SetRestoreDiagnostics("infohash", "")
+		return restored, nil
+	}
+	restoreErr = errors.Join(restoreErr, fmt.Errorf("infohash: %w", err))
+	uc.engine.SetRestoreDiagnostics("", restoreErr.Error())
+	return nil, restoreErr
 }
 
 func (uc *TorrentUseCase) GetCacheStatus(hash string, index int, offset int64) (*engine.CacheStatus, error) {

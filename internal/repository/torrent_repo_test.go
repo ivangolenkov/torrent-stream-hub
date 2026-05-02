@@ -134,6 +134,9 @@ func TestSaveAndGetTorrent(t *testing.T) {
 	if len(all) != 1 {
 		t.Fatalf("Expected 1 torrent in GetAll, got %d", len(all))
 	}
+	if len(all[0].Files) != 2 {
+		t.Fatalf("Expected GetAll to include 2 files, got %d", len(all[0].Files))
+	}
 
 	// 5. Delete
 	if err := repo.DeleteTorrent("dummyhash123"); err != nil {
@@ -143,6 +146,49 @@ func TestSaveAndGetTorrent(t *testing.T) {
 	deleted, _ := repo.GetTorrent("dummyhash123")
 	if deleted != nil {
 		t.Fatalf("Expected torrent to be nil after deletion")
+	}
+}
+
+func TestSaveTorrentDoesNotDecreaseProgress(t *testing.T) {
+	db, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	repo := NewTorrentRepo(db)
+	if err := repo.SaveTorrent(&models.Torrent{
+		Hash:       "progresshash",
+		Name:       "Progress Torrent",
+		Size:       1000,
+		Downloaded: 700,
+		State:      models.StateDownloading,
+		Files: []*models.File{
+			{Index: 0, Path: "a.mkv", Size: 1000, Downloaded: 700, Priority: models.PriorityNormal, IsMedia: true},
+		},
+	}); err != nil {
+		t.Fatalf("failed to save initial torrent: %v", err)
+	}
+
+	if err := repo.SaveTorrent(&models.Torrent{
+		Hash:       "progresshash",
+		Name:       "Progress Torrent",
+		Size:       1000,
+		Downloaded: 0,
+		State:      models.StateDownloading,
+		Files: []*models.File{
+			{Index: 0, Path: "a.mkv", Size: 1000, Downloaded: 0, Priority: models.PriorityNormal, IsMedia: true},
+		},
+	}); err != nil {
+		t.Fatalf("failed to save lower progress: %v", err)
+	}
+
+	fetched, err := repo.GetTorrent("progresshash")
+	if err != nil {
+		t.Fatalf("failed to fetch torrent: %v", err)
+	}
+	if fetched.Downloaded != 700 {
+		t.Fatalf("expected torrent progress to stay 700, got %d", fetched.Downloaded)
+	}
+	if len(fetched.Files) != 1 || fetched.Files[0].Downloaded != 700 {
+		t.Fatalf("expected file progress to stay 700, got %+v", fetched.Files)
 	}
 }
 

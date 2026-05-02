@@ -168,6 +168,9 @@ export interface BTHealth {
   client_recycle_blocked_reason?: string;
   next_client_recycle_at?: string;
   recycle_scheduled_reason?: string;
+  last_restore_source?: string;
+  last_restore_error?: string;
+  invalid_metainfo_count: number;
   peer_drop_ratio: number;
   seed_drop_ratio: number;
   speed_drop_ratio: number;

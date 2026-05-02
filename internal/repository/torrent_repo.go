@@ -33,7 +33,7 @@ func (r *TorrentRepo) SaveTorrent(t *models.Torrent) error {
 			poster=CASE WHEN excluded.poster != '' THEN excluded.poster ELSE torrents.poster END,
 			category=CASE WHEN excluded.category != '' THEN excluded.category ELSE torrents.category END,
 			size=excluded.size, 
-			downloaded=excluded.downloaded, 
+			downloaded=MAX(torrents.downloaded, excluded.downloaded), 
 			state=excluded.state, 
 			error=excluded.error,
 			source_uri=CASE WHEN excluded.source_uri != '' THEN excluded.source_uri ELSE torrents.source_uri END,
@@ -57,7 +57,7 @@ func (r *TorrentRepo) SaveTorrent(t *models.Torrent) error {
 			INSERT INTO files (hash, "index", path, size, downloaded, priority, is_media)
 			VALUES %s
 			ON CONFLICT(hash, "index") DO UPDATE SET 
-				downloaded=excluded.downloaded,
+				downloaded=MAX(files.downloaded, excluded.downloaded),
 				priority=excluded.priority
 		`, strings.Join(placeholders, ", "))
 
@@ -85,19 +85,8 @@ func (r *TorrentRepo) GetTorrent(hash string) (*models.Torrent, error) {
 	t.State = models.TorrentState(stateStr)
 	t.Error = models.ErrorReason(errorStr)
 
-	// Get files
-	rows, err := r.db.DB().Query(`SELECT "index", path, size, downloaded, priority, is_media FROM files WHERE hash = ? ORDER BY "index" ASC`, hash)
-	if err != nil {
+	if err := r.loadFiles(t); err != nil {
 		return nil, err
-	}
-	defer rows.Close()
-
-	for rows.Next() {
-		f := &models.File{}
-		if err := rows.Scan(&f.Index, &f.Path, &f.Size, &f.Downloaded, &f.Priority, &f.IsMedia); err != nil {
-			return nil, err
-		}
-		t.Files = append(t.Files, f)
 	}
 
 	return t, nil
@@ -119,10 +108,31 @@ func (r *TorrentRepo) GetAllTorrents() ([]*models.Torrent, error) {
 		}
 		t.State = models.TorrentState(stateStr)
 		t.Error = models.ErrorReason(errorStr)
+		if err := r.loadFiles(t); err != nil {
+			return nil, err
+		}
 		torrents = append(torrents, t)
 	}
 
 	return torrents, nil
+}
+
+func (r *TorrentRepo) loadFiles(t *models.Torrent) error {
+	rows, err := r.db.DB().Query(`SELECT "index", path, size, downloaded, priority, is_media FROM files WHERE hash = ? ORDER BY "index" ASC`, t.Hash)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	t.Files = nil
+	for rows.Next() {
+		f := &models.File{}
+		if err := rows.Scan(&f.Index, &f.Path, &f.Size, &f.Downloaded, &f.Priority, &f.IsMedia); err != nil {
+			return err
+		}
+		t.Files = append(t.Files, f)
+	}
+	return rows.Err()
 }
 
 func (r *TorrentRepo) DeleteTorrent(hash string) error {

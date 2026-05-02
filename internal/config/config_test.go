@@ -101,10 +101,10 @@ func TestApplyDefaultsSetsBTDefaults(t *testing.T) {
 	if cfg.BTDownloadProfile != "balanced" {
 		t.Fatalf("expected balanced download profile, got %q", cfg.BTDownloadProfile)
 	}
-	if cfg.BTEstablishedConns != 120 || cfg.BTHalfOpenConns != 120 || cfg.BTTotalHalfOpen != 1000 {
+	if cfg.BTEstablishedConns != 200 || cfg.BTHalfOpenConns != 200 || cfg.BTTotalHalfOpen != 2000 {
 		t.Fatalf("unexpected connection defaults: %+v", cfg)
 	}
-	if cfg.BTPeersLowWater != 400 || cfg.BTPeersHighWater != 1500 || cfg.BTDialRateLimit != 100 {
+	if cfg.BTPeersLowWater != 700 || cfg.BTPeersHighWater != 2500 || cfg.BTDialRateLimit != 200 {
 		t.Fatalf("unexpected peer discovery defaults: %+v", cfg)
 	}
 	if !cfg.BTSwarmWatchdogEnabled || cfg.BTSwarmCheckIntervalSec != 60 || cfg.BTSwarmRefreshCooldownSec != 180 {
@@ -113,7 +113,7 @@ func TestApplyDefaultsSetsBTDefaults(t *testing.T) {
 	if cfg.BTSwarmMinConnectedPeers != 8 || cfg.BTSwarmMinConnectedSeeds != 2 || cfg.BTSwarmStalledSpeedBps != 32768 {
 		t.Fatalf("unexpected swarm threshold defaults: %+v", cfg)
 	}
-	if cfg.BTSwarmStalledDurationSec != 180 || cfg.BTSwarmBoostConns != 240 || cfg.BTSwarmBoostDurationSec != 300 {
+	if cfg.BTSwarmStalledDurationSec != 180 || cfg.BTSwarmBoostConns != 400 || cfg.BTSwarmBoostDurationSec != 300 {
 		t.Fatalf("unexpected swarm boost defaults: %+v", cfg)
 	}
 	if cfg.BTSwarmPeerDropRatio != 0.45 || cfg.BTSwarmSeedDropRatio != 0.45 || cfg.BTSwarmSpeedDropRatio != 0.35 {
@@ -140,7 +140,7 @@ func TestApplyDefaultsDownloadProfiles(t *testing.T) {
 		high, dial                    int
 	}{
 		{profile: "torrserver", established: 100, half: 80, total: 800, low: 300, high: 1000, dial: 60},
-		{profile: "balanced", established: 120, half: 120, total: 1000, low: 400, high: 1500, dial: 100},
+		{profile: "balanced", established: 200, half: 200, total: 2000, low: 700, high: 2500, dial: 200},
 		{profile: "aggressive", established: 200, half: 200, total: 2000, low: 700, high: 2500, dial: 200},
 	}
 	for _, tc := range cases {

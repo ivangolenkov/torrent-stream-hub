@@ -110,7 +110,7 @@ func Load() *Config {
 	flag.BoolVar(&cfg.BTDisablePEX, "bt-disable-pex", getEnvAsBool("HUB_BT_DISABLE_PEX", false), "Disable BitTorrent PEX")
 	flag.BoolVar(&cfg.BTDisableUPNP, "bt-disable-upnp", getEnvAsBool("HUB_BT_DISABLE_UPNP", false), "Disable UPnP port forwarding")
 	flag.BoolVar(&cfg.BTDisableTCP, "bt-disable-tcp", getEnvAsBool("HUB_BT_DISABLE_TCP", false), "Disable BitTorrent TCP")
-	flag.BoolVar(&cfg.BTDisableUTP, "bt-disable-utp", getEnvAsBool("HUB_BT_DISABLE_UTP", false), "Disable BitTorrent uTP")
+	flag.BoolVar(&cfg.BTDisableUTP, "bt-disable-utp", getEnvAsBool("HUB_BT_DISABLE_UTP", true), "Disable BitTorrent uTP")
 	flag.BoolVar(&cfg.BTDisableIPv6, "bt-disable-ipv6", getEnvAsBool("HUB_BT_DISABLE_IPV6", false), "Disable BitTorrent IPv6")
 	flag.IntVar(&cfg.BTEstablishedConns, "bt-established-conns", getEnvAsInt("HUB_BT_ESTABLISHED_CONNS_PER_TORRENT", 0), "Established peer connections per torrent")
 	flag.IntVar(&cfg.BTHalfOpenConns, "bt-half-open-conns", getEnvAsInt("HUB_BT_HALF_OPEN_CONNS_PER_TORRENT", 0), "Half-open peer connections per torrent")
@@ -287,7 +287,7 @@ func applyDownloadProfileDefaults(cfg *Config) {
 		highWater   int
 		dialRate    int
 	}
-	values := defaults{established: 120, halfOpen: 120, totalHalf: 1000, lowWater: 400, highWater: 1500, dialRate: 100}
+	values := defaults{established: 200, halfOpen: 200, totalHalf: 2000, lowWater: 700, highWater: 2500, dialRate: 200}
 	switch profile {
 	case "torrserver":
 		values = defaults{established: 100, halfOpen: 80, totalHalf: 800, lowWater: 300, highWater: 1000, dialRate: 60}

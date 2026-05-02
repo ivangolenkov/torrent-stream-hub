@@ -13,7 +13,7 @@ import (
 )
 
 func TestBuildClientConfigAppliesBTDefaults(t *testing.T) {
-	cfg := &config.Config{DownloadDir: t.TempDir(), TorrentPort: 0}
+	cfg := &config.Config{DownloadDir: t.TempDir(), TorrentPort: 0, BTDisableUTP: true}
 
 	clientConfig := buildClientConfig(cfg)
 
@@ -23,17 +23,23 @@ func TestBuildClientConfigAppliesBTDefaults(t *testing.T) {
 	if clientConfig.NoUpload {
 		t.Fatalf("expected upload to be enabled by default")
 	}
-	if clientConfig.NoDHT || clientConfig.DisablePEX || clientConfig.DisableTCP || clientConfig.DisableUTP || clientConfig.NoDefaultPortForwarding {
-		t.Fatalf("expected DHT/PEX/TCP/UTP/UPnP to be enabled by default")
+	if clientConfig.NoDHT || clientConfig.DisablePEX || clientConfig.DisableTCP || clientConfig.NoDefaultPortForwarding {
+		t.Fatalf("expected DHT/PEX/TCP/UPnP to be enabled by default")
 	}
-	if clientConfig.EstablishedConnsPerTorrent != 120 || clientConfig.HalfOpenConnsPerTorrent != 120 || clientConfig.TotalHalfOpenConns != 1000 {
+	if !clientConfig.DisableUTP {
+		t.Fatalf("expected UTP to be disabled by default")
+	}
+	if clientConfig.EstablishedConnsPerTorrent != 200 || clientConfig.HalfOpenConnsPerTorrent != 200 || clientConfig.TotalHalfOpenConns != 2000 {
 		t.Fatalf("unexpected connection defaults: %+v", clientConfig)
 	}
-	if clientConfig.TorrentPeersLowWater != 400 || clientConfig.TorrentPeersHighWater != 1500 {
+	if clientConfig.TorrentPeersLowWater != 700 || clientConfig.TorrentPeersHighWater != 2500 {
 		t.Fatalf("unexpected peer watermarks: low=%d high=%d", clientConfig.TorrentPeersLowWater, clientConfig.TorrentPeersHighWater)
 	}
-	if clientConfig.NominalDialTimeout != 5*time.Second || clientConfig.MinDialTimeout != 2*time.Second || clientConfig.HandshakesTimeout != 10*time.Second {
+	if clientConfig.NominalDialTimeout != 5*time.Second || clientConfig.MinDialTimeout != 2*time.Second || clientConfig.HandshakesTimeout != 20*time.Second {
 		t.Fatalf("unexpected timeouts: dial=%v min_dial=%v handshake=%v", clientConfig.NominalDialTimeout, clientConfig.MinDialTimeout, clientConfig.HandshakesTimeout)
+	}
+	if clientConfig.PieceHashersPerTorrent != 4 {
+		t.Fatalf("unexpected piece hashers: %d", clientConfig.PieceHashersPerTorrent)
 	}
 }
 

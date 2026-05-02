@@ -259,7 +259,9 @@ func buildClientConfig(cfg *config.Config) *torrent.ClientConfig {
 	// and free up half-open slots for potentially good peers.
 	clientConfig.NominalDialTimeout = 5 * time.Second
 	clientConfig.MinDialTimeout = 2 * time.Second
-	clientConfig.HandshakesTimeout = 10 * time.Second
+	clientConfig.HandshakesTimeout = 20 * time.Second // Give TCP peers more time to send the initial handshake
+
+	clientConfig.PieceHashersPerTorrent = 4 // Increase hasher workers to prevent CPU bottleneck on fast connections
 
 	applyPublicIPConfig(clientConfig, cfg)
 

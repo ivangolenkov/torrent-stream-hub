@@ -152,7 +152,7 @@ onUnmounted(() => {
       </div>
 
       <div class="rounded-md border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-800">
-        Without router port-forward the service relies mostly on outgoing peers. Reload diagnostics only rereads this page; it does not change torrent state. The watchdog checks every {{ health.swarm_check_interval_sec }}s, soft-refreshes every {{ health.swarm_refresh_cooldown_sec }}s, then can recycle the BT client after {{ health.client_recycle_after_soft_fails }} soft failure(s).
+        Without router port-forward the service relies mostly on outgoing peers. Reload diagnostics only rereads this page; it does not change torrent state. The watchdog checks every {{ health.swarm_check_interval_sec }}s and performs non-destructive DHT/tracker peer refresh every {{ health.swarm_refresh_cooldown_sec }}s when needed.
       </div>
 
       <div v-if="health.benchmark_mode" class="rounded-md border border-purple-200 bg-purple-50 px-4 py-3 text-sm text-purple-800">
@@ -160,7 +160,7 @@ onUnmounted(() => {
       </div>
 
       <div class="rounded-md border border-gray-200 bg-gray-50 px-4 py-3 text-sm text-gray-700">
-        Client recycle is the primary recovery action and recreates the BitTorrent client runtime. Hard refresh is an advanced diagnostic action for one torrent. Neither action deletes downloaded files or SQLite metadata.
+        Automatic recycle/drop/re-add is not used for normal swarm recovery. Client recycle and hard refresh are advanced manual diagnostics. Neither action deletes downloaded files or SQLite metadata.
         <span v-if="!health.auto_hard_refresh_enabled"> Automatic hard refresh is off.</span>
         <span v-if="health.recycle_scheduled_reason"> {{ health.recycle_scheduled_reason }}.</span>
       </div>
@@ -199,6 +199,12 @@ onUnmounted(() => {
           <div class="text-xs text-gray-500">invalid metainfo {{ health.invalid_metainfo_count }}</div>
         </div>
         <div>
+          <div class="text-gray-500 text-xs uppercase tracking-wider">Piece Completion</div>
+          <div class="mt-1 font-medium text-gray-900">{{ health.piece_completion_backend || 'unknown' }}</div>
+          <div class="text-xs text-gray-500">{{ health.piece_completion_persistent ? 'persistent' : 'not persistent' }}</div>
+          <div v-if="health.piece_completion_error" class="max-w-xs truncate text-xs text-amber-700" :title="health.piece_completion_error">{{ health.piece_completion_error }}</div>
+        </div>
+        <div>
           <div class="text-gray-500 text-xs uppercase tracking-wider">Trend Ratios</div>
           <div class="mt-1 font-medium text-gray-900">P {{ health.peer_drop_ratio }} · S {{ health.seed_drop_ratio }} · V {{ health.speed_drop_ratio }}</div>
         </div>
@@ -235,10 +241,10 @@ onUnmounted(() => {
                   {{ statusLabel(torrent) }}
                 </span>
                 <div class="mt-1 text-xs text-gray-400">
-                  refresh {{ formatTime(torrent.last_refresh_at) }}
+                  peer refresh {{ formatTime(torrent.last_peer_refresh_at || torrent.last_refresh_at) }}
                 </div>
-                <div v-if="torrent.last_refresh_reason" class="mt-1 max-w-xs truncate text-xs text-gray-500" :title="torrent.last_refresh_reason">
-                  {{ torrent.last_refresh_reason }}
+                <div v-if="torrent.last_peer_refresh_reason || torrent.last_refresh_reason" class="mt-1 max-w-xs truncate text-xs text-gray-500" :title="torrent.last_peer_refresh_reason || torrent.last_refresh_reason">
+                  {{ torrent.last_peer_refresh_reason || torrent.last_refresh_reason }}
                 </div>
                 <div v-if="torrent.active_streams" class="mt-1 text-xs text-blue-600">streams {{ torrent.active_streams }}</div>
                 <div v-if="torrent.degradation_episode_started_at" class="mt-1 text-xs text-gray-400">episode {{ formatTime(torrent.degradation_episode_started_at) }}</div>

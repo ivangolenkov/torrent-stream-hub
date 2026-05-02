@@ -121,6 +121,9 @@ type BTHealth struct {
 	LastRestoreSource             string            `json:"last_restore_source,omitempty"`
 	LastRestoreError              string            `json:"last_restore_error,omitempty"`
 	InvalidMetainfoCount          int               `json:"invalid_metainfo_count"`
+	PieceCompletionBackend        string            `json:"piece_completion_backend"`
+	PieceCompletionPersistent     bool              `json:"piece_completion_persistent"`
+	PieceCompletionError          string            `json:"piece_completion_error,omitempty"`
 	PeerDropRatio                 float64           `json:"peer_drop_ratio"`
 	SeedDropRatio                 float64           `json:"seed_drop_ratio"`
 	SpeedDropRatio                float64           `json:"speed_drop_ratio"`
@@ -166,6 +169,8 @@ type BTTorrentHealth struct {
 	Degraded                        bool         `json:"degraded"`
 	LastRefreshAt                   string       `json:"last_refresh_at,omitempty"`
 	LastRefreshReason               string       `json:"last_refresh_reason,omitempty"`
+	LastPeerRefreshAt               string       `json:"last_peer_refresh_at,omitempty"`
+	LastPeerRefreshReason           string       `json:"last_peer_refresh_reason,omitempty"`
 	LastHealthyAt                   string       `json:"last_healthy_at,omitempty"`
 	BoostedUntil                    string       `json:"boosted_until,omitempty"`
 	MaxEstablishedConns             int          `json:"max_established_conns"`

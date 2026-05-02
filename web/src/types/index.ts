@@ -95,6 +95,8 @@ export interface BTTorrentHealth {
   degraded: boolean;
   last_refresh_at?: string;
   last_refresh_reason?: string;
+  last_peer_refresh_at?: string;
+  last_peer_refresh_reason?: string;
   last_healthy_at?: string;
   boosted_until?: string;
   max_established_conns: number;
@@ -171,6 +173,9 @@ export interface BTHealth {
   last_restore_source?: string;
   last_restore_error?: string;
   invalid_metainfo_count: number;
+  piece_completion_backend: string;
+  piece_completion_persistent: boolean;
+  piece_completion_error?: string;
   peer_drop_ratio: number;
   seed_drop_ratio: number;
   speed_drop_ratio: number;

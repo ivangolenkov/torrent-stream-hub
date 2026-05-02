@@ -14,7 +14,7 @@ func testSwarmConfig() *config.Config {
 	return cfg
 }
 
-func TestDecideSwarmHealthLowConnectedPeers(t *testing.T) {
+func TestDecideSwarmHealthLowConnectedPeersWithActiveSpeedIsHealthy(t *testing.T) {
 	cfg := testSwarmConfig()
 	now := time.Now()
 
@@ -27,12 +27,12 @@ func TestDecideSwarmHealthLowConnectedPeers(t *testing.T) {
 		Now:           now,
 	}, time.Time{})
 
-	if !decision.Degraded || decision.Reason != "connected peers below threshold" {
-		t.Fatalf("expected low peers degradation, got %+v", decision)
+	if decision.Degraded {
+		t.Fatalf("expected active download to stay healthy despite low peers, got %+v", decision)
 	}
 }
 
-func TestDecideSwarmHealthLowConnectedSeeds(t *testing.T) {
+func TestDecideSwarmHealthLowConnectedSeedsWithActiveSpeedIsHealthy(t *testing.T) {
 	cfg := testSwarmConfig()
 	now := time.Now()
 
@@ -45,8 +45,26 @@ func TestDecideSwarmHealthLowConnectedSeeds(t *testing.T) {
 		Now:           now,
 	}, time.Time{})
 
-	if !decision.Degraded || decision.Reason != "connected seeds below threshold" {
-		t.Fatalf("expected low seeds degradation, got %+v", decision)
+	if decision.Degraded {
+		t.Fatalf("expected active download to stay healthy despite low seeds, got %+v", decision)
+	}
+}
+
+func TestDecideSwarmHealthLowConnectedPeersWhenStalled(t *testing.T) {
+	cfg := testSwarmConfig()
+	now := time.Now()
+
+	decision := decideSwarmHealth(cfg, swarmSnapshot{
+		State:         models.StateDownloading,
+		MetadataReady: true,
+		Connected:     cfg.BTSwarmMinConnectedPeers - 1,
+		Seeds:         cfg.BTSwarmMinConnectedSeeds,
+		DownloadSpeed: int64(cfg.BTSwarmStalledSpeedBps - 1),
+		Now:           now,
+	}, time.Time{})
+
+	if !decision.Degraded || decision.Reason != "connected peers below threshold" {
+		t.Fatalf("expected low peers degradation when not actively downloading, got %+v", decision)
 	}
 }
 
@@ -115,7 +133,7 @@ func TestDecideSwarmHealthPeerDropBelowRecentPeak(t *testing.T) {
 		MetadataReady: true,
 		Connected:     30,
 		Seeds:         cfg.BTSwarmMinConnectedSeeds,
-		DownloadSpeed: int64(cfg.BTSwarmStalledSpeedBps * 2),
+		DownloadSpeed: int64(cfg.BTSwarmStalledSpeedBps - 1),
 		PeakConnected: 100,
 		PeakUpdatedAt: now.Add(-time.Minute),
 		Now:           now,
@@ -123,6 +141,43 @@ func TestDecideSwarmHealthPeerDropBelowRecentPeak(t *testing.T) {
 
 	if !decision.Degraded || decision.Reason != "connected peers dropped below recent peak" {
 		t.Fatalf("expected peer trend degradation, got %+v", decision)
+	}
+}
+
+func TestDecideSwarmHealthPeerDropWithActiveSpeedIsHealthy(t *testing.T) {
+	cfg := testSwarmConfig()
+	now := time.Now()
+
+	decision := decideSwarmHealth(cfg, swarmSnapshot{
+		State:         models.StateDownloading,
+		MetadataReady: true,
+		Connected:     30,
+		Seeds:         cfg.BTSwarmMinConnectedSeeds,
+		DownloadSpeed: int64(cfg.BTSwarmStalledSpeedBps * 2),
+		PeakConnected: 100,
+		PeakUpdatedAt: now.Add(-time.Minute),
+		Now:           now,
+	}, time.Time{})
+
+	if decision.Degraded {
+		t.Fatalf("expected active download to ignore peer trend drop, got %+v", decision)
+	}
+}
+
+func TestDecideSwarmHealthMetadataPendingGrace(t *testing.T) {
+	cfg := testSwarmConfig()
+	now := time.Now()
+
+	decision := decideSwarmHealth(cfg, swarmSnapshot{
+		State:         models.StateDownloading,
+		MetadataReady: false,
+		AddedAt:       now.Add(-time.Duration(cfg.BTSwarmRecoveryGraceSec-1) * time.Second),
+		Connected:     0,
+		Now:           now,
+	}, time.Time{})
+
+	if decision.Degraded {
+		t.Fatalf("expected metadata pending grace to avoid degradation, got %+v", decision)
 	}
 }
 

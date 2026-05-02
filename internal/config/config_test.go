@@ -116,7 +116,7 @@ func TestApplyDefaultsSetsBTDefaults(t *testing.T) {
 	if cfg.BTSwarmPeerDropRatio != 0.45 || cfg.BTSwarmSeedDropRatio != 0.45 || cfg.BTSwarmSpeedDropRatio != 0.35 {
 		t.Fatalf("unexpected swarm trend defaults: %+v", cfg)
 	}
-	if cfg.BTSwarmPeakTTLSec != 1800 || !cfg.BTSwarmHardRefreshEnabled || cfg.BTSwarmHardRefreshCooldownSec != 900 {
+	if cfg.BTSwarmPeakTTLSec != 1800 || !cfg.BTSwarmHardRefreshEnabled || cfg.BTSwarmAutoHardRefreshEnabled || cfg.BTSwarmHardRefreshCooldownSec != 900 {
 		t.Fatalf("unexpected hard refresh defaults: %+v", cfg)
 	}
 	if cfg.BTSwarmHardRefreshAfterSoftFails != 1 || cfg.BTSwarmHardRefreshMinTorrentAgeSec != 60 {
@@ -125,7 +125,7 @@ func TestApplyDefaultsSetsBTDefaults(t *testing.T) {
 	if cfg.BTSwarmDegradationEpisodeTTLSec != 900 || cfg.BTSwarmRecoveryGraceSec != 180 {
 		t.Fatalf("unexpected episode defaults: %+v", cfg)
 	}
-	if !cfg.BTClientRecycleEnabled || cfg.BTClientRecycleCooldownSec != 900 || cfg.BTClientRecycleAfterHardFails != 1 || cfg.BTClientRecycleMinTorrents != 1 || cfg.BTClientRecycleMaxPerHour != 2 {
+	if !cfg.BTClientRecycleEnabled || cfg.BTClientRecycleCooldownSec != 900 || cfg.BTClientRecycleAfterHardFails != 1 || cfg.BTClientRecycleAfterSoftFails != 1 || cfg.BTClientRecycleMinTorrentAgeSec != 60 || cfg.BTClientRecycleMinTorrents != 1 || cfg.BTClientRecycleMaxPerHour != 2 {
 		t.Fatalf("unexpected client recycle defaults: %+v", cfg)
 	}
 }
@@ -163,5 +163,15 @@ func TestApplyDefaultsHardRefreshCooldownAtLeastSoftCooldown(t *testing.T) {
 
 	if cfg.BTSwarmHardRefreshCooldownSec != cfg.BTSwarmRefreshCooldownSec {
 		t.Fatalf("expected hard cooldown to clamp to soft cooldown, got hard=%d soft=%d", cfg.BTSwarmHardRefreshCooldownSec, cfg.BTSwarmRefreshCooldownSec)
+	}
+}
+
+func TestApplyDefaultsClientRecycleCooldownIndependent(t *testing.T) {
+	cfg := &Config{BTSwarmHardRefreshCooldownSec: 900, BTClientRecycleCooldownSec: 300}
+
+	ApplyDefaults(cfg)
+
+	if cfg.BTClientRecycleCooldownSec != 300 {
+		t.Fatalf("expected client recycle cooldown to remain independent, got %d", cfg.BTClientRecycleCooldownSec)
 	}
 }

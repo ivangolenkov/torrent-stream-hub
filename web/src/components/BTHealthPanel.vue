@@ -106,21 +106,23 @@ onUnmounted(() => {
         <h2 class="text-lg font-semibold text-gray-900">Engine Diagnostics</h2>
         <p class="text-sm text-gray-500">Swarm status without exposing peer addresses</p>
       </div>
-      <button
-        class="inline-flex items-center px-3 py-2 border border-gray-300 text-sm font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
-        @click="loadHealth"
-      >
-        Refresh
-      </button>
-      <button
-        v-if="health"
-        class="inline-flex items-center px-3 py-2 border border-blue-300 text-sm font-medium rounded-md text-blue-700 bg-blue-50 hover:bg-blue-100 disabled:cursor-not-allowed disabled:opacity-50"
-        :disabled="!health.client_recycle_allowed"
-        :title="health.client_recycle_blocked_reason"
-        @click="recycleClient"
-      >
-        Recycle client
-      </button>
+      <div class="flex flex-col gap-2 sm:flex-row sm:items-center">
+        <button
+          class="inline-flex items-center justify-center px-3 py-2 border border-gray-300 text-sm font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
+          @click="loadHealth"
+        >
+          Reload diagnostics
+        </button>
+        <button
+          v-if="health"
+          class="inline-flex items-center justify-center px-3 py-2 border border-blue-600 text-sm font-medium rounded-md text-white bg-blue-600 hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
+          :disabled="!health.client_recycle_allowed"
+          :title="health.client_recycle_blocked_reason"
+          @click="recycleClient"
+        >
+          Recycle BT client
+        </button>
+      </div>
     </div>
 
     <div v-if="error" class="px-5 py-4 text-sm text-red-700 bg-red-50 border-b border-red-100">
@@ -150,11 +152,13 @@ onUnmounted(() => {
       </div>
 
       <div class="rounded-md border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-800">
-        Without router port-forward the service relies mostly on outgoing peers. The watchdog checks every {{ health.swarm_check_interval_sec }}s, soft-refreshes every {{ health.swarm_refresh_cooldown_sec }}s, then can hard-refresh after {{ health.hard_refresh_after_soft_fails }} soft failures with a {{ health.hard_refresh_cooldown_sec }}s cooldown.
+        Without router port-forward the service relies mostly on outgoing peers. Reload diagnostics only rereads this page; it does not change torrent state. The watchdog checks every {{ health.swarm_check_interval_sec }}s, soft-refreshes every {{ health.swarm_refresh_cooldown_sec }}s, then can recycle the BT client after {{ health.client_recycle_after_soft_fails }} soft failure(s).
       </div>
 
       <div class="rounded-md border border-gray-200 bg-gray-50 px-4 py-3 text-sm text-gray-700">
-        Hard refresh recreates torrent runtime state. Client recycle recreates the BitTorrent client runtime. Neither action deletes downloaded files or SQLite metadata.
+        Client recycle is the primary recovery action and recreates the BitTorrent client runtime. Hard refresh is an advanced diagnostic action for one torrent. Neither action deletes downloaded files or SQLite metadata.
+        <span v-if="!health.auto_hard_refresh_enabled"> Automatic hard refresh is off.</span>
+        <span v-if="health.recycle_scheduled_reason"> {{ health.recycle_scheduled_reason }}.</span>
       </div>
 
       <div class="grid grid-cols-2 gap-4 text-sm md:grid-cols-6">
@@ -232,8 +236,13 @@ onUnmounted(() => {
               <td class="px-4 py-3 text-gray-500">
                 <div>soft {{ torrent.soft_refresh_count || 0 }} · hard {{ torrent.hard_refresh_count || 0 }}</div>
                 <div class="text-xs text-gray-500">episode soft {{ torrent.soft_refresh_attempts_in_episode || 0 }} · hard {{ torrent.hard_refresh_attempts_in_episode || 0 }}</div>
+                <div class="text-xs text-gray-400">metadata {{ torrent.metadata_ready ? 'ready' : 'pending' }}</div>
+                <div class="text-xs text-gray-400">re-add {{ torrent.last_readd_source || 'n/a' }}</div>
                 <div class="text-xs text-gray-400">hard {{ formatTime(torrent.last_hard_refresh_at) }}</div>
                 <div class="text-xs text-gray-400">next {{ formatTime(torrent.next_hard_refresh_at) }}</div>
+                <div v-if="torrent.last_readd_source === 'magnet'" class="mt-1 max-w-xs text-xs text-amber-700">
+                  Magnet re-add may need metadata from swarm again.
+                </div>
                 <div v-if="torrent.last_hard_refresh_reason" class="mt-1 max-w-xs truncate text-xs text-gray-500" :title="torrent.last_hard_refresh_reason">
                   {{ torrent.last_hard_refresh_reason }}
                 </div>
@@ -255,7 +264,7 @@ onUnmounted(() => {
                   :title="torrent.hard_refresh_blocked_reason"
                   @click="hardRefresh(torrent.hash)"
                 >
-                  Hard refresh
+                  Hard refresh (advanced)
                 </button>
               </td>
             </tr>

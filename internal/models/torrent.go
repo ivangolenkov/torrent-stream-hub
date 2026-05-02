@@ -73,41 +73,45 @@ type PeerSummary struct {
 }
 
 type BTHealth struct {
-	SeedEnabled                 bool              `json:"seed_enabled"`
-	UploadEnabled               bool              `json:"upload_enabled"`
-	DHTEnabled                  bool              `json:"dht_enabled"`
-	PEXEnabled                  bool              `json:"pex_enabled"`
-	UPNPEnabled                 bool              `json:"upnp_enabled"`
-	TCPEnabled                  bool              `json:"tcp_enabled"`
-	UTPEnabled                  bool              `json:"utp_enabled"`
-	IPv6Enabled                 bool              `json:"ipv6_enabled"`
-	ListenPort                  int               `json:"listen_port"`
-	ClientProfile               string            `json:"client_profile"`
-	RetrackersMode              string            `json:"retrackers_mode"`
-	DownloadLimit               int               `json:"download_limit"`
-	UploadLimit                 int               `json:"upload_limit"`
-	SwarmWatchdogEnabled        bool              `json:"swarm_watchdog_enabled"`
-	SwarmCheckIntervalSec       int               `json:"swarm_check_interval_sec"`
-	SwarmRefreshCooldownSec     int               `json:"swarm_refresh_cooldown_sec"`
-	HardRefreshEnabled          bool              `json:"hard_refresh_enabled"`
-	HardRefreshCooldownSec      int               `json:"hard_refresh_cooldown_sec"`
-	HardRefreshAfterSoftFails   int               `json:"hard_refresh_after_soft_fails"`
-	ClientRecycleEnabled        bool              `json:"client_recycle_enabled"`
-	ClientRecycleCooldownSec    int               `json:"client_recycle_cooldown_sec"`
-	ClientRecycleAfterHardFails int               `json:"client_recycle_after_hard_fails"`
-	ClientRecycleCount          int               `json:"client_recycle_count"`
-	ClientRecycleCountLastHour  int               `json:"client_recycle_count_last_hour"`
-	LastClientRecycleAt         string            `json:"last_client_recycle_at,omitempty"`
-	LastClientRecycleReason     string            `json:"last_client_recycle_reason,omitempty"`
-	LastClientRecycleError      string            `json:"last_client_recycle_error,omitempty"`
-	ClientRecycleAllowed        bool              `json:"client_recycle_allowed"`
-	ClientRecycleBlockedReason  string            `json:"client_recycle_blocked_reason,omitempty"`
-	NextClientRecycleAt         string            `json:"next_client_recycle_at,omitempty"`
-	PeerDropRatio               float64           `json:"peer_drop_ratio"`
-	SeedDropRatio               float64           `json:"seed_drop_ratio"`
-	SpeedDropRatio              float64           `json:"speed_drop_ratio"`
-	IncomingConnectivityNote    string            `json:"incoming_connectivity_note"`
-	Torrents                    []BTTorrentHealth `json:"torrents"`
+	SeedEnabled                   bool              `json:"seed_enabled"`
+	UploadEnabled                 bool              `json:"upload_enabled"`
+	DHTEnabled                    bool              `json:"dht_enabled"`
+	PEXEnabled                    bool              `json:"pex_enabled"`
+	UPNPEnabled                   bool              `json:"upnp_enabled"`
+	TCPEnabled                    bool              `json:"tcp_enabled"`
+	UTPEnabled                    bool              `json:"utp_enabled"`
+	IPv6Enabled                   bool              `json:"ipv6_enabled"`
+	ListenPort                    int               `json:"listen_port"`
+	ClientProfile                 string            `json:"client_profile"`
+	RetrackersMode                string            `json:"retrackers_mode"`
+	DownloadLimit                 int               `json:"download_limit"`
+	UploadLimit                   int               `json:"upload_limit"`
+	SwarmWatchdogEnabled          bool              `json:"swarm_watchdog_enabled"`
+	SwarmCheckIntervalSec         int               `json:"swarm_check_interval_sec"`
+	SwarmRefreshCooldownSec       int               `json:"swarm_refresh_cooldown_sec"`
+	HardRefreshEnabled            bool              `json:"hard_refresh_enabled"`
+	AutoHardRefreshEnabled        bool              `json:"auto_hard_refresh_enabled"`
+	HardRefreshCooldownSec        int               `json:"hard_refresh_cooldown_sec"`
+	HardRefreshAfterSoftFails     int               `json:"hard_refresh_after_soft_fails"`
+	ClientRecycleEnabled          bool              `json:"client_recycle_enabled"`
+	ClientRecycleCooldownSec      int               `json:"client_recycle_cooldown_sec"`
+	ClientRecycleAfterHardFails   int               `json:"client_recycle_after_hard_fails"`
+	ClientRecycleAfterSoftFails   int               `json:"client_recycle_after_soft_fails"`
+	ClientRecycleMinTorrentAgeSec int               `json:"client_recycle_min_torrent_age_sec"`
+	ClientRecycleCount            int               `json:"client_recycle_count"`
+	ClientRecycleCountLastHour    int               `json:"client_recycle_count_last_hour"`
+	LastClientRecycleAt           string            `json:"last_client_recycle_at,omitempty"`
+	LastClientRecycleReason       string            `json:"last_client_recycle_reason,omitempty"`
+	LastClientRecycleError        string            `json:"last_client_recycle_error,omitempty"`
+	ClientRecycleAllowed          bool              `json:"client_recycle_allowed"`
+	ClientRecycleBlockedReason    string            `json:"client_recycle_blocked_reason,omitempty"`
+	NextClientRecycleAt           string            `json:"next_client_recycle_at,omitempty"`
+	RecycleScheduledReason        string            `json:"recycle_scheduled_reason,omitempty"`
+	PeerDropRatio                 float64           `json:"peer_drop_ratio"`
+	SeedDropRatio                 float64           `json:"seed_drop_ratio"`
+	SpeedDropRatio                float64           `json:"speed_drop_ratio"`
+	IncomingConnectivityNote      string            `json:"incoming_connectivity_note"`
+	Torrents                      []BTTorrentHealth `json:"torrents"`
 }
 
 type BTTorrentHealth struct {
@@ -119,6 +123,12 @@ type BTTorrentHealth struct {
 	Pending                         int          `json:"pending"`
 	HalfOpen                        int          `json:"half_open"`
 	Seeds                           int          `json:"seeds"`
+	MetadataReady                   bool         `json:"metadata_ready"`
+	LastReaddSource                 string       `json:"last_readd_source,omitempty"`
+	AutoHardRefreshEnabled          bool         `json:"auto_hard_refresh_enabled"`
+	ClientRecycleAfterSoftFails     int          `json:"client_recycle_after_soft_fails"`
+	ClientRecycleMinTorrentAgeSec   int          `json:"client_recycle_min_torrent_age_sec"`
+	RecycleScheduledReason          string       `json:"recycle_scheduled_reason,omitempty"`
 	TrackerStatus                   string       `json:"tracker_status,omitempty"`
 	TrackerError                    string       `json:"tracker_error,omitempty"`
 	DownloadSpeed                   int64        `json:"download_speed"`

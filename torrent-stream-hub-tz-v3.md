@@ -411,14 +411,17 @@ services:
       - HUB_BT_SWARM_SPEED_DROP_RATIO=0.35
       - HUB_BT_SWARM_PEAK_TTL_SEC=1800
       - HUB_BT_SWARM_HARD_REFRESH_ENABLED=true
+      - HUB_BT_SWARM_AUTO_HARD_REFRESH_ENABLED=false
       - HUB_BT_SWARM_HARD_REFRESH_COOLDOWN_SEC=900
       - HUB_BT_SWARM_HARD_REFRESH_AFTER_SOFT_FAILS=1
       - HUB_BT_SWARM_HARD_REFRESH_MIN_TORRENT_AGE_SEC=60
       - HUB_BT_SWARM_DEGRADATION_EPISODE_TTL_SEC=900
       - HUB_BT_SWARM_RECOVERY_GRACE_SEC=180
       - HUB_BT_CLIENT_RECYCLE_ENABLED=true
-      - HUB_BT_CLIENT_RECYCLE_COOLDOWN_SEC=900
+      - HUB_BT_CLIENT_RECYCLE_COOLDOWN_SEC=300
       - HUB_BT_CLIENT_RECYCLE_AFTER_HARD_FAILS=1
+      - HUB_BT_CLIENT_RECYCLE_AFTER_SOFT_FAILS=1
+      - HUB_BT_CLIENT_RECYCLE_MIN_TORRENT_AGE_SEC=60
       - HUB_BT_CLIENT_RECYCLE_MIN_TORRENTS=1
       - HUB_BT_CLIENT_RECYCLE_MAX_PER_HOUR=2
       # Безопасность (опционально)
@@ -429,6 +432,8 @@ services:
       - PUID=1000
       - PGID=1000
 ```
+
+Для стабильного production-окружения рекомендуется `HUB_BT_CLIENT_RECYCLE_COOLDOWN_SEC=900`. Для домашней диагностики и ускоренной проверки recovery допустимо `300`.
 
 ## 11. Развитие проекта (Post-MVP)
 1. **Multi-stream Priority:** Интеллектуальное распределение пропускной способности канала при нескольких одновременно запущенных стримах.

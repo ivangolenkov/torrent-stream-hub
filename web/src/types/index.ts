@@ -66,6 +66,12 @@ export interface BTTorrentHealth {
   pending: number;
   half_open: number;
   seeds: number;
+  metadata_ready: boolean;
+  last_readd_source?: string;
+  auto_hard_refresh_enabled: boolean;
+  client_recycle_after_soft_fails: number;
+  client_recycle_min_torrent_age_sec: number;
+  recycle_scheduled_reason?: string;
   tracker_status?: string;
   tracker_error?: string;
   download_speed: number;
@@ -118,11 +124,14 @@ export interface BTHealth {
   swarm_check_interval_sec: number;
   swarm_refresh_cooldown_sec: number;
   hard_refresh_enabled: boolean;
+  auto_hard_refresh_enabled: boolean;
   hard_refresh_cooldown_sec: number;
   hard_refresh_after_soft_fails: number;
   client_recycle_enabled: boolean;
   client_recycle_cooldown_sec: number;
   client_recycle_after_hard_fails: number;
+  client_recycle_after_soft_fails: number;
+  client_recycle_min_torrent_age_sec: number;
   client_recycle_count: number;
   client_recycle_count_last_hour: number;
   last_client_recycle_at?: string;
@@ -131,6 +140,7 @@ export interface BTHealth {
   client_recycle_allowed: boolean;
   client_recycle_blocked_reason?: string;
   next_client_recycle_at?: string;
+  recycle_scheduled_reason?: string;
   peer_drop_ratio: number;
   seed_drop_ratio: number;
   speed_drop_ratio: number;

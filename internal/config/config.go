@@ -55,6 +55,7 @@ type Config struct {
 	BTSwarmPeakTTLSec                  int
 	BTSwarmHardRefreshEnabled          bool
 	BTSwarmHardRefreshConfigured       bool
+	BTSwarmAutoHardRefreshEnabled      bool
 	BTSwarmHardRefreshCooldownSec      int
 	BTSwarmHardRefreshAfterSoftFails   int
 	BTSwarmHardRefreshMinTorrentAgeSec int
@@ -64,6 +65,8 @@ type Config struct {
 	BTClientRecycleConfigured          bool
 	BTClientRecycleCooldownSec         int
 	BTClientRecycleAfterHardFails      int
+	BTClientRecycleAfterSoftFails      int
+	BTClientRecycleMinTorrentAgeSec    int
 	BTClientRecycleMinTorrents         int
 	BTClientRecycleMaxPerHour          int
 }
@@ -115,6 +118,7 @@ func Load() *Config {
 	flag.Float64Var(&cfg.BTSwarmSpeedDropRatio, "bt-swarm-speed-drop-ratio", getEnvAsFloat("HUB_BT_SWARM_SPEED_DROP_RATIO", 0.35), "Download speed ratio below recent peak that marks an incomplete torrent degraded")
 	flag.IntVar(&cfg.BTSwarmPeakTTLSec, "bt-swarm-peak-ttl", getEnvAsInt("HUB_BT_SWARM_PEAK_TTL_SEC", 1800), "Seconds to keep swarm peak metrics for trend detection")
 	flag.BoolVar(&cfg.BTSwarmHardRefreshEnabled, "bt-swarm-hard-refresh-enabled", getEnvAsBool("HUB_BT_SWARM_HARD_REFRESH_ENABLED", true), "Enable per-torrent runtime drop and re-add after repeated soft refresh failures")
+	flag.BoolVar(&cfg.BTSwarmAutoHardRefreshEnabled, "bt-swarm-auto-hard-refresh-enabled", getEnvAsBool("HUB_BT_SWARM_AUTO_HARD_REFRESH_ENABLED", false), "Enable automatic per-torrent runtime drop and re-add; disabled by default")
 	flag.IntVar(&cfg.BTSwarmHardRefreshCooldownSec, "bt-swarm-hard-refresh-cooldown", getEnvAsInt("HUB_BT_SWARM_HARD_REFRESH_COOLDOWN_SEC", 900), "Minimum seconds between hard refresh attempts per torrent")
 	flag.IntVar(&cfg.BTSwarmHardRefreshAfterSoftFails, "bt-swarm-hard-refresh-after-soft-fails", getEnvAsInt("HUB_BT_SWARM_HARD_REFRESH_AFTER_SOFT_FAILS", 1), "Soft refresh attempts before hard refresh is allowed")
 	flag.IntVar(&cfg.BTSwarmHardRefreshMinTorrentAgeSec, "bt-swarm-hard-refresh-min-torrent-age", getEnvAsInt("HUB_BT_SWARM_HARD_REFRESH_MIN_TORRENT_AGE_SEC", 60), "Minimum torrent runtime age before hard refresh is allowed")
@@ -123,6 +127,8 @@ func Load() *Config {
 	flag.BoolVar(&cfg.BTClientRecycleEnabled, "bt-client-recycle-enabled", getEnvAsBool("HUB_BT_CLIENT_RECYCLE_ENABLED", true), "Enable in-process BitTorrent client recycle fallback")
 	flag.IntVar(&cfg.BTClientRecycleCooldownSec, "bt-client-recycle-cooldown", getEnvAsInt("HUB_BT_CLIENT_RECYCLE_COOLDOWN_SEC", 900), "Minimum seconds between BitTorrent client recycle attempts")
 	flag.IntVar(&cfg.BTClientRecycleAfterHardFails, "bt-client-recycle-after-hard-fails", getEnvAsInt("HUB_BT_CLIENT_RECYCLE_AFTER_HARD_FAILS", 1), "Hard refresh attempts within an episode before client recycle is allowed")
+	flag.IntVar(&cfg.BTClientRecycleAfterSoftFails, "bt-client-recycle-after-soft-fails", getEnvAsInt("HUB_BT_CLIENT_RECYCLE_AFTER_SOFT_FAILS", 1), "Soft refresh attempts within an episode before automatic client recycle is allowed")
+	flag.IntVar(&cfg.BTClientRecycleMinTorrentAgeSec, "bt-client-recycle-min-torrent-age", getEnvAsInt("HUB_BT_CLIENT_RECYCLE_MIN_TORRENT_AGE_SEC", 60), "Minimum torrent runtime age before automatic client recycle is allowed")
 	flag.IntVar(&cfg.BTClientRecycleMinTorrents, "bt-client-recycle-min-torrents", getEnvAsInt("HUB_BT_CLIENT_RECYCLE_MIN_TORRENTS", 1), "Minimum managed torrents before client recycle is allowed")
 	flag.IntVar(&cfg.BTClientRecycleMaxPerHour, "bt-client-recycle-max-per-hour", getEnvAsInt("HUB_BT_CLIENT_RECYCLE_MAX_PER_HOUR", 2), "Maximum BitTorrent client recycle attempts per hour")
 
@@ -237,11 +243,14 @@ func ApplyDefaults(cfg *Config) {
 	if cfg.BTClientRecycleCooldownSec <= 0 {
 		cfg.BTClientRecycleCooldownSec = 900
 	}
-	if cfg.BTClientRecycleCooldownSec < cfg.BTSwarmHardRefreshCooldownSec {
-		cfg.BTClientRecycleCooldownSec = cfg.BTSwarmHardRefreshCooldownSec
-	}
 	if cfg.BTClientRecycleAfterHardFails <= 0 {
 		cfg.BTClientRecycleAfterHardFails = 1
+	}
+	if cfg.BTClientRecycleAfterSoftFails <= 0 {
+		cfg.BTClientRecycleAfterSoftFails = 1
+	}
+	if cfg.BTClientRecycleMinTorrentAgeSec <= 0 {
+		cfg.BTClientRecycleMinTorrentAgeSec = 60
 	}
 	if cfg.BTClientRecycleMinTorrents <= 0 {
 		cfg.BTClientRecycleMinTorrents = 1

@@ -2,8 +2,10 @@ package config
 
 import (
 	"flag"
+	"net"
 	"os"
 	"strconv"
+	"strings"
 )
 
 type Config struct {
@@ -25,6 +27,13 @@ type Config struct {
 	BTSeedConfigured                   bool
 	BTNoUpload                         bool
 	BTClientProfile                    string
+	BTDownloadProfile                  string
+	BTBenchmarkMode                    bool
+	BTPublicIPDiscoveryEnabled         bool
+	BTPublicIPv4                       string
+	BTPublicIPv6                       string
+	BTPublicIPv4Status                 string
+	BTPublicIPv6Status                 string
 	BTRetrackersMode                   string
 	BTRetrackersFile                   string
 	BTDisableDHT                       bool
@@ -90,6 +99,11 @@ func Load() *Config {
 	flag.BoolVar(&cfg.BTSeed, "bt-seed", getEnvAsBool("HUB_BT_SEED", true), "Enable altruistic seeding after download completion")
 	flag.BoolVar(&cfg.BTNoUpload, "bt-no-upload", getEnvAsBool("HUB_BT_NO_UPLOAD", false), "Disable BitTorrent uploads")
 	flag.StringVar(&cfg.BTClientProfile, "bt-client-profile", getEnv("HUB_BT_CLIENT_PROFILE", "qbittorrent"), "BitTorrent client profile: qbittorrent or default")
+	flag.StringVar(&cfg.BTDownloadProfile, "bt-download-profile", getEnv("HUB_BT_DOWNLOAD_PROFILE", "balanced"), "BitTorrent download profile: torrserver, balanced, aggressive")
+	flag.BoolVar(&cfg.BTBenchmarkMode, "bt-benchmark-mode", getEnvAsBool("HUB_BT_BENCHMARK_MODE", false), "Suppress automatic recovery mutations for download benchmarking")
+	flag.BoolVar(&cfg.BTPublicIPDiscoveryEnabled, "bt-public-ip-discovery-enabled", getEnvAsBool("HUB_BT_PUBLIC_IP_DISCOVERY_ENABLED", false), "Enable best-effort public IP discovery for BitTorrent announces")
+	flag.StringVar(&cfg.BTPublicIPv4, "bt-public-ipv4", getEnv("HUB_BT_PUBLIC_IPV4", ""), "Public IPv4 to advertise to BitTorrent peers")
+	flag.StringVar(&cfg.BTPublicIPv6, "bt-public-ipv6", getEnv("HUB_BT_PUBLIC_IPV6", ""), "Public IPv6 to advertise to BitTorrent peers")
 	flag.StringVar(&cfg.BTRetrackersMode, "bt-retrackers-mode", getEnv("HUB_BT_RETRACKERS_MODE", "append"), "Retrackers mode: append, replace, off")
 	flag.StringVar(&cfg.BTRetrackersFile, "bt-retrackers-file", getEnv("HUB_BT_RETRACKERS_FILE", "/config/trackers.txt"), "Path to additional retrackers list")
 	flag.BoolVar(&cfg.BTDisableDHT, "bt-disable-dht", getEnvAsBool("HUB_BT_DISABLE_DHT", false), "Disable BitTorrent DHT")
@@ -98,12 +112,12 @@ func Load() *Config {
 	flag.BoolVar(&cfg.BTDisableTCP, "bt-disable-tcp", getEnvAsBool("HUB_BT_DISABLE_TCP", false), "Disable BitTorrent TCP")
 	flag.BoolVar(&cfg.BTDisableUTP, "bt-disable-utp", getEnvAsBool("HUB_BT_DISABLE_UTP", false), "Disable BitTorrent uTP")
 	flag.BoolVar(&cfg.BTDisableIPv6, "bt-disable-ipv6", getEnvAsBool("HUB_BT_DISABLE_IPV6", false), "Disable BitTorrent IPv6")
-	flag.IntVar(&cfg.BTEstablishedConns, "bt-established-conns", getEnvAsInt("HUB_BT_ESTABLISHED_CONNS_PER_TORRENT", 120), "Established peer connections per torrent")
-	flag.IntVar(&cfg.BTHalfOpenConns, "bt-half-open-conns", getEnvAsInt("HUB_BT_HALF_OPEN_CONNS_PER_TORRENT", 80), "Half-open peer connections per torrent")
-	flag.IntVar(&cfg.BTTotalHalfOpen, "bt-total-half-open", getEnvAsInt("HUB_BT_TOTAL_HALF_OPEN_CONNS", 1000), "Total half-open peer connections")
-	flag.IntVar(&cfg.BTPeersLowWater, "bt-peers-low-water", getEnvAsInt("HUB_BT_PEERS_LOW_WATER", 500), "Minimum peer reserve before more discovery")
-	flag.IntVar(&cfg.BTPeersHighWater, "bt-peers-high-water", getEnvAsInt("HUB_BT_PEERS_HIGH_WATER", 1200), "Maximum peer reserve")
-	flag.IntVar(&cfg.BTDialRateLimit, "bt-dial-rate-limit", getEnvAsInt("HUB_BT_DIAL_RATE_LIMIT", 60), "Peer dial rate limit per second")
+	flag.IntVar(&cfg.BTEstablishedConns, "bt-established-conns", getEnvAsInt("HUB_BT_ESTABLISHED_CONNS_PER_TORRENT", 0), "Established peer connections per torrent")
+	flag.IntVar(&cfg.BTHalfOpenConns, "bt-half-open-conns", getEnvAsInt("HUB_BT_HALF_OPEN_CONNS_PER_TORRENT", 0), "Half-open peer connections per torrent")
+	flag.IntVar(&cfg.BTTotalHalfOpen, "bt-total-half-open", getEnvAsInt("HUB_BT_TOTAL_HALF_OPEN_CONNS", 0), "Total half-open peer connections")
+	flag.IntVar(&cfg.BTPeersLowWater, "bt-peers-low-water", getEnvAsInt("HUB_BT_PEERS_LOW_WATER", 0), "Minimum peer reserve before more discovery")
+	flag.IntVar(&cfg.BTPeersHighWater, "bt-peers-high-water", getEnvAsInt("HUB_BT_PEERS_HIGH_WATER", 0), "Maximum peer reserve")
+	flag.IntVar(&cfg.BTDialRateLimit, "bt-dial-rate-limit", getEnvAsInt("HUB_BT_DIAL_RATE_LIMIT", 0), "Peer dial rate limit per second")
 	flag.BoolVar(&cfg.BTSwarmWatchdogEnabled, "bt-swarm-watchdog-enabled", getEnvAsBool("HUB_BT_SWARM_WATCHDOG_ENABLED", true), "Enable swarm health watchdog")
 	flag.IntVar(&cfg.BTSwarmCheckIntervalSec, "bt-swarm-check-interval", getEnvAsInt("HUB_BT_SWARM_CHECK_INTERVAL_SEC", 60), "Swarm health check interval in seconds")
 	flag.IntVar(&cfg.BTSwarmRefreshCooldownSec, "bt-swarm-refresh-cooldown", getEnvAsInt("HUB_BT_SWARM_REFRESH_COOLDOWN_SEC", 180), "Minimum seconds between swarm refresh actions per torrent")
@@ -153,6 +167,7 @@ func ApplyDefaults(cfg *Config) {
 	if cfg.BTClientProfile == "" {
 		cfg.BTClientProfile = "qbittorrent"
 	}
+	applyDownloadProfileDefaults(cfg)
 	if cfg.BTRetrackersMode == "" {
 		cfg.BTRetrackersMode = "append"
 	}
@@ -258,6 +273,74 @@ func ApplyDefaults(cfg *Config) {
 	if cfg.BTClientRecycleMaxPerHour <= 0 {
 		cfg.BTClientRecycleMaxPerHour = 2
 	}
+}
+
+func applyDownloadProfileDefaults(cfg *Config) {
+	profile := normalizedDownloadProfile(cfg.BTDownloadProfile)
+	cfg.BTDownloadProfile = profile
+
+	type defaults struct {
+		established int
+		halfOpen    int
+		totalHalf   int
+		lowWater    int
+		highWater   int
+		dialRate    int
+	}
+	values := defaults{established: 120, halfOpen: 60, totalHalf: 700, lowWater: 400, highWater: 1000, dialRate: 60}
+	switch profile {
+	case "torrserver":
+		values = defaults{established: 100, halfOpen: 40, totalHalf: 500, lowWater: 300, highWater: 800, dialRate: 40}
+	case "aggressive":
+		values = defaults{established: 200, halfOpen: 100, totalHalf: 1200, lowWater: 700, highWater: 1600, dialRate: 120}
+	}
+	if cfg.BTEstablishedConns <= 0 {
+		cfg.BTEstablishedConns = values.established
+	}
+	if cfg.BTHalfOpenConns <= 0 {
+		cfg.BTHalfOpenConns = values.halfOpen
+	}
+	if cfg.BTTotalHalfOpen <= 0 {
+		cfg.BTTotalHalfOpen = values.totalHalf
+	}
+	if cfg.BTPeersLowWater <= 0 {
+		cfg.BTPeersLowWater = values.lowWater
+	}
+	if cfg.BTPeersHighWater <= 0 {
+		cfg.BTPeersHighWater = values.highWater
+	}
+	if cfg.BTDialRateLimit <= 0 {
+		cfg.BTDialRateLimit = values.dialRate
+	}
+}
+
+func normalizedDownloadProfile(profile string) string {
+	switch strings.ToLower(strings.TrimSpace(profile)) {
+	case "torrserver", "aggressive":
+		return strings.ToLower(strings.TrimSpace(profile))
+	default:
+		return "balanced"
+	}
+}
+
+func PublicIPStatus(value string, ipv6 bool) string {
+	if strings.TrimSpace(value) == "" {
+		return "disabled"
+	}
+	ip := net.ParseIP(strings.TrimSpace(value))
+	if ip == nil || ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsUnspecified() {
+		return "invalid"
+	}
+	if ipv6 {
+		if ip.To4() != nil || ip.To16() == nil {
+			return "invalid"
+		}
+		return "configured"
+	}
+	if ip.To4() == nil {
+		return "invalid"
+	}
+	return "configured"
 }
 
 func clampRatio(value, fallback float64) float64 {

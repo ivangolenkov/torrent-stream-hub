@@ -98,10 +98,13 @@ func TestApplyDefaultsSetsBTDefaults(t *testing.T) {
 	if cfg.BTRetrackersFile != "/config/trackers.txt" {
 		t.Fatalf("expected default retrackers file, got %q", cfg.BTRetrackersFile)
 	}
-	if cfg.BTEstablishedConns != 120 || cfg.BTHalfOpenConns != 80 || cfg.BTTotalHalfOpen != 1000 {
+	if cfg.BTDownloadProfile != "balanced" {
+		t.Fatalf("expected balanced download profile, got %q", cfg.BTDownloadProfile)
+	}
+	if cfg.BTEstablishedConns != 120 || cfg.BTHalfOpenConns != 60 || cfg.BTTotalHalfOpen != 700 {
 		t.Fatalf("unexpected connection defaults: %+v", cfg)
 	}
-	if cfg.BTPeersLowWater != 500 || cfg.BTPeersHighWater != 1200 || cfg.BTDialRateLimit != 60 {
+	if cfg.BTPeersLowWater != 400 || cfg.BTPeersHighWater != 1000 || cfg.BTDialRateLimit != 60 {
 		t.Fatalf("unexpected peer discovery defaults: %+v", cfg)
 	}
 	if !cfg.BTSwarmWatchdogEnabled || cfg.BTSwarmCheckIntervalSec != 60 || cfg.BTSwarmRefreshCooldownSec != 180 {
@@ -127,6 +130,46 @@ func TestApplyDefaultsSetsBTDefaults(t *testing.T) {
 	}
 	if !cfg.BTClientRecycleEnabled || cfg.BTClientRecycleCooldownSec != 900 || cfg.BTClientRecycleAfterHardFails != 1 || cfg.BTClientRecycleAfterSoftFails != 1 || cfg.BTClientRecycleMinTorrentAgeSec != 60 || cfg.BTClientRecycleMinTorrents != 1 || cfg.BTClientRecycleMaxPerHour != 2 {
 		t.Fatalf("unexpected client recycle defaults: %+v", cfg)
+	}
+}
+
+func TestApplyDefaultsDownloadProfiles(t *testing.T) {
+	cases := []struct {
+		profile                       string
+		established, half, total, low int
+		high, dial                    int
+	}{
+		{profile: "torrserver", established: 100, half: 40, total: 500, low: 300, high: 800, dial: 40},
+		{profile: "balanced", established: 120, half: 60, total: 700, low: 400, high: 1000, dial: 60},
+		{profile: "aggressive", established: 200, half: 100, total: 1200, low: 700, high: 1600, dial: 120},
+	}
+	for _, tc := range cases {
+		t.Run(tc.profile, func(t *testing.T) {
+			cfg := &Config{BTDownloadProfile: tc.profile}
+			ApplyDefaults(cfg)
+			if cfg.BTEstablishedConns != tc.established || cfg.BTHalfOpenConns != tc.half || cfg.BTTotalHalfOpen != tc.total || cfg.BTPeersLowWater != tc.low || cfg.BTPeersHighWater != tc.high || cfg.BTDialRateLimit != tc.dial {
+				t.Fatalf("unexpected profile defaults: %+v", cfg)
+			}
+		})
+	}
+}
+
+func TestApplyDefaultsDownloadProfileOverrides(t *testing.T) {
+	cfg := &Config{BTDownloadProfile: "torrserver", BTEstablishedConns: 321}
+
+	ApplyDefaults(cfg)
+
+	if cfg.BTEstablishedConns != 321 || cfg.BTHalfOpenConns != 40 {
+		t.Fatalf("expected explicit value to override profile defaults: %+v", cfg)
+	}
+}
+
+func TestPublicIPStatusRejectsPrivateIP(t *testing.T) {
+	if got := PublicIPStatus("192.168.1.10", false); got != "invalid" {
+		t.Fatalf("expected private IPv4 invalid, got %q", got)
+	}
+	if got := PublicIPStatus("8.8.8.8", false); got != "configured" {
+		t.Fatalf("expected public IPv4 configured, got %q", got)
 	}
 }
 

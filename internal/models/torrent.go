@@ -83,6 +83,17 @@ type BTHealth struct {
 	IPv6Enabled                   bool              `json:"ipv6_enabled"`
 	ListenPort                    int               `json:"listen_port"`
 	ClientProfile                 string            `json:"client_profile"`
+	DownloadProfile               string            `json:"download_profile"`
+	BenchmarkMode                 bool              `json:"benchmark_mode"`
+	EstablishedConnsPerTorrent    int               `json:"established_conns_per_torrent"`
+	HalfOpenConnsPerTorrent       int               `json:"half_open_conns_per_torrent"`
+	TotalHalfOpenConns            int               `json:"total_half_open_conns"`
+	PeersLowWater                 int               `json:"peers_low_water"`
+	PeersHighWater                int               `json:"peers_high_water"`
+	DialRateLimit                 int               `json:"dial_rate_limit"`
+	PublicIPDiscoveryEnabled      bool              `json:"public_ip_discovery_enabled"`
+	PublicIPv4Status              string            `json:"public_ipv4_status"`
+	PublicIPv6Status              string            `json:"public_ipv6_status"`
 	RetrackersMode                string            `json:"retrackers_mode"`
 	DownloadLimit                 int               `json:"download_limit"`
 	UploadLimit                   int               `json:"upload_limit"`
@@ -123,6 +134,22 @@ type BTTorrentHealth struct {
 	Pending                         int          `json:"pending"`
 	HalfOpen                        int          `json:"half_open"`
 	Seeds                           int          `json:"seeds"`
+	BytesRead                       int64        `json:"bytes_read"`
+	BytesReadData                   int64        `json:"bytes_read_data"`
+	BytesReadUsefulData             int64        `json:"bytes_read_useful_data"`
+	BytesWritten                    int64        `json:"bytes_written"`
+	BytesWrittenData                int64        `json:"bytes_written_data"`
+	ChunksRead                      int64        `json:"chunks_read"`
+	ChunksReadUseful                int64        `json:"chunks_read_useful"`
+	ChunksReadWasted                int64        `json:"chunks_read_wasted"`
+	PiecesDirtiedGood               int64        `json:"pieces_dirtied_good"`
+	PiecesDirtiedBad                int64        `json:"pieces_dirtied_bad"`
+	RawDownloadSpeed                int64        `json:"raw_download_speed"`
+	DataDownloadSpeed               int64        `json:"data_download_speed"`
+	UsefulDownloadSpeed             int64        `json:"useful_download_speed"`
+	WasteRatio                      float64      `json:"waste_ratio"`
+	TrackerTiersCount               int          `json:"tracker_tiers_count"`
+	TrackerURLsCount                int          `json:"tracker_urls_count"`
 	MetadataReady                   bool         `json:"metadata_ready"`
 	LastReaddSource                 string       `json:"last_readd_source,omitempty"`
 	AutoHardRefreshEnabled          bool         `json:"auto_hard_refresh_enabled"`

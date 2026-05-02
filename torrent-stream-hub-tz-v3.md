@@ -383,6 +383,11 @@ services:
       - HUB_BT_SEED=true
       - HUB_BT_NO_UPLOAD=false
       - HUB_BT_CLIENT_PROFILE=qbittorrent
+      - HUB_BT_DOWNLOAD_PROFILE=balanced # torrserver|balanced|aggressive
+      - HUB_BT_BENCHMARK_MODE=false
+      - HUB_BT_PUBLIC_IP_DISCOVERY_ENABLED=false
+      - HUB_BT_PUBLIC_IPV4=
+      - HUB_BT_PUBLIC_IPV6=
       - HUB_BT_RETRACKERS_MODE=append
       - HUB_BT_RETRACKERS_FILE=/config/trackers.txt
       - HUB_BT_DISABLE_DHT=false
@@ -391,12 +396,6 @@ services:
       - HUB_BT_DISABLE_TCP=false
       - HUB_BT_DISABLE_UTP=false
       - HUB_BT_DISABLE_IPV6=false
-      - HUB_BT_ESTABLISHED_CONNS_PER_TORRENT=120
-      - HUB_BT_HALF_OPEN_CONNS_PER_TORRENT=80
-      - HUB_BT_TOTAL_HALF_OPEN_CONNS=1000
-      - HUB_BT_PEERS_LOW_WATER=500
-      - HUB_BT_PEERS_HIGH_WATER=1200
-      - HUB_BT_DIAL_RATE_LIMIT=60
       - HUB_BT_SWARM_WATCHDOG_ENABLED=true
       - HUB_BT_SWARM_CHECK_INTERVAL_SEC=60
       - HUB_BT_SWARM_REFRESH_COOLDOWN_SEC=180
@@ -434,6 +433,8 @@ services:
 ```
 
 Для стабильного production-окружения рекомендуется `HUB_BT_CLIENT_RECYCLE_COOLDOWN_SEC=900`. Для домашней диагностики и ускоренной проверки recovery допустимо `300`.
+
+Download profile управляет effective connection limits, если конкретные `HUB_BT_ESTABLISHED_CONNS_PER_TORRENT`, `HUB_BT_HALF_OPEN_CONNS_PER_TORRENT`, `HUB_BT_TOTAL_HALF_OPEN_CONNS`, `HUB_BT_PEERS_LOW_WATER`, `HUB_BT_PEERS_HIGH_WATER`, `HUB_BT_DIAL_RATE_LIMIT` не заданы явно. Для честного сравнения скорости с qBittorrent/TorrServer включайте `HUB_BT_BENCHMARK_MODE=true`: automatic recovery не будет вмешиваться в benchmark. Полученный metainfo сохраняется в `/config/metainfo/<hash>.torrent` и используется при restore до magnet/infohash fallback.
 
 ## 11. Развитие проекта (Post-MVP)
 1. **Multi-stream Priority:** Интеллектуальное распределение пропускной способности канала при нескольких одновременно запущенных стримах.

@@ -155,6 +155,10 @@ onUnmounted(() => {
         Without router port-forward the service relies mostly on outgoing peers. Reload diagnostics only rereads this page; it does not change torrent state. The watchdog checks every {{ health.swarm_check_interval_sec }}s, soft-refreshes every {{ health.swarm_refresh_cooldown_sec }}s, then can recycle the BT client after {{ health.client_recycle_after_soft_fails }} soft failure(s).
       </div>
 
+      <div v-if="health.benchmark_mode" class="rounded-md border border-purple-200 bg-purple-50 px-4 py-3 text-sm text-purple-800">
+        Benchmark mode is enabled. Automatic recovery mutations are suppressed so download speed can be compared fairly.
+      </div>
+
       <div class="rounded-md border border-gray-200 bg-gray-50 px-4 py-3 text-sm text-gray-700">
         Client recycle is the primary recovery action and recreates the BitTorrent client runtime. Hard refresh is an advanced diagnostic action for one torrent. Neither action deletes downloaded files or SQLite metadata.
         <span v-if="!health.auto_hard_refresh_enabled"> Automatic hard refresh is off.</span>
@@ -164,7 +168,8 @@ onUnmounted(() => {
       <div class="grid grid-cols-2 gap-4 text-sm md:grid-cols-6">
         <div>
           <div class="text-gray-500 text-xs uppercase tracking-wider">Profile</div>
-          <div class="mt-1 font-medium text-gray-900">{{ health.client_profile }}</div>
+          <div class="mt-1 font-medium text-gray-900">{{ health.client_profile }} · {{ health.download_profile }}</div>
+          <div class="text-xs text-gray-500">conns {{ health.established_conns_per_torrent }} · half {{ health.half_open_conns_per_torrent }}/{{ health.total_half_open_conns }}</div>
         </div>
         <div>
           <div class="text-gray-500 text-xs uppercase tracking-wider">Retrackers</div>
@@ -181,6 +186,7 @@ onUnmounted(() => {
         <div>
           <div class="text-gray-500 text-xs uppercase tracking-wider">Watchdog</div>
           <div class="mt-1 font-medium text-gray-900">{{ health.swarm_watchdog_enabled ? 'enabled' : 'disabled' }}</div>
+          <div class="text-xs text-gray-500">dial {{ health.dial_rate_limit }}/s · water {{ health.peers_low_water }}/{{ health.peers_high_water }}</div>
         </div>
         <div>
           <div class="text-gray-500 text-xs uppercase tracking-wider">Client Recycle</div>
@@ -190,6 +196,11 @@ onUnmounted(() => {
         <div>
           <div class="text-gray-500 text-xs uppercase tracking-wider">Trend Ratios</div>
           <div class="mt-1 font-medium text-gray-900">P {{ health.peer_drop_ratio }} · S {{ health.seed_drop_ratio }} · V {{ health.speed_drop_ratio }}</div>
+        </div>
+        <div>
+          <div class="text-gray-500 text-xs uppercase tracking-wider">Public IP</div>
+          <div class="mt-1 font-medium text-gray-900">v4 {{ health.public_ipv4_status }}</div>
+          <div class="text-xs text-gray-500">v6 {{ health.public_ipv6_status }}</div>
         </div>
       </div>
 
@@ -255,8 +266,14 @@ onUnmounted(() => {
               </td>
               <td class="px-4 py-3 max-w-xs truncate" :title="torrent.tracker_error || torrent.tracker_status">
                 <span :class="torrent.tracker_error ? 'text-amber-700' : 'text-gray-500'">{{ torrent.tracker_error || torrent.tracker_status || 'n/a' }}</span>
+                <div class="text-xs text-gray-400">{{ torrent.tracker_tiers_count || 0 }} tiers · {{ torrent.tracker_urls_count || 0 }} urls</div>
               </td>
-              <td class="px-4 py-3 text-gray-500">↓ {{ formatSpeed(torrent.download_speed) }} · ↑ {{ formatSpeed(torrent.upload_speed) }}</td>
+              <td class="px-4 py-3 text-gray-500">
+                <div>useful ↓ {{ formatSpeed(torrent.useful_download_speed || torrent.download_speed) }}</div>
+                <div>data ↓ {{ formatSpeed(torrent.data_download_speed || 0) }}</div>
+                <div>raw ↓ {{ formatSpeed(torrent.raw_download_speed || 0) }}</div>
+                <div>↑ {{ formatSpeed(torrent.upload_speed) }} · waste {{ ((torrent.waste_ratio || 0) * 100).toFixed(1) }}%</div>
+              </td>
               <td class="px-4 py-3">
                 <button
                   class="rounded-md border border-gray-300 bg-white px-2 py-1 text-xs font-medium text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"

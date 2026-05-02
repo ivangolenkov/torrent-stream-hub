@@ -7,6 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
+	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -65,8 +67,12 @@ type ManagedTorrent struct {
 	metadataWaitLogged              bool
 	downloadAllStarted              bool
 	lastStatsAt                     time.Time
+	lastRawReadBytes                int64
+	lastDataReadBytes               int64
 	lastReadBytes                   int64
 	lastWrittenBytes                int64
+	rawDownloadSpeed                int64
+	dataDownloadSpeed               int64
 	downloadSpeed                   int64
 	uploadSpeed                     int64
 	lastPeerSummary                 models.PeerSummary
@@ -109,7 +115,7 @@ type ManagedTorrent struct {
 
 func New(cfg *config.Config) (*Engine, error) {
 	config.ApplyDefaults(cfg)
-	logging.Infof("initializing torrent engine download_dir=%s torrent_port=%d max_downloads=%d min_free_space_gb=%d bt_seed=%t bt_no_upload=%t bt_profile=%s bt_retrackers=%s dht=%t pex=%t upnp=%t tcp=%t utp=%t ipv6=%t established_conns=%d half_open=%d total_half_open=%d peers_low=%d peers_high=%d dial_rate=%d swarm_watchdog=%t swarm_check_sec=%d swarm_refresh_cooldown_sec=%d swarm_min_peers=%d swarm_min_seeds=%d swarm_stalled_speed=%d swarm_stalled_duration_sec=%d swarm_boost_conns=%d swarm_boost_duration_sec=%d peer_drop_ratio=%.2f seed_drop_ratio=%.2f speed_drop_ratio=%.2f peak_ttl_sec=%d hard_refresh=%t auto_hard_refresh=%t hard_refresh_cooldown_sec=%d hard_refresh_after_soft_fails=%d hard_refresh_min_age_sec=%d episode_ttl_sec=%d recovery_grace_sec=%d client_recycle=%t client_recycle_cooldown_sec=%d client_recycle_after_soft_fails=%d client_recycle_min_age_sec=%d client_recycle_after_hard_fails=%d client_recycle_max_per_hour=%d",
+	logging.Infof("initializing torrent engine download_dir=%s torrent_port=%d max_downloads=%d min_free_space_gb=%d bt_seed=%t bt_no_upload=%t bt_profile=%s bt_download_profile=%s bt_benchmark=%t bt_retrackers=%s dht=%t pex=%t upnp=%t tcp=%t utp=%t ipv6=%t established_conns=%d half_open=%d total_half_open=%d peers_low=%d peers_high=%d dial_rate=%d swarm_watchdog=%t swarm_check_sec=%d swarm_refresh_cooldown_sec=%d swarm_min_peers=%d swarm_min_seeds=%d swarm_stalled_speed=%d swarm_stalled_duration_sec=%d swarm_boost_conns=%d swarm_boost_duration_sec=%d peer_drop_ratio=%.2f seed_drop_ratio=%.2f speed_drop_ratio=%.2f peak_ttl_sec=%d hard_refresh=%t auto_hard_refresh=%t hard_refresh_cooldown_sec=%d hard_refresh_after_soft_fails=%d hard_refresh_min_age_sec=%d episode_ttl_sec=%d recovery_grace_sec=%d client_recycle=%t client_recycle_cooldown_sec=%d client_recycle_after_soft_fails=%d client_recycle_min_age_sec=%d client_recycle_after_hard_fails=%d client_recycle_max_per_hour=%d",
 		cfg.DownloadDir,
 		cfg.TorrentPort,
 		cfg.MaxActiveDownloads,
@@ -117,6 +123,8 @@ func New(cfg *config.Config) (*Engine, error) {
 		cfg.BTSeed,
 		cfg.BTNoUpload,
 		cfg.BTClientProfile,
+		cfg.BTDownloadProfile,
+		cfg.BTBenchmarkMode,
 		cfg.BTRetrackersMode,
 		!cfg.BTDisableDHT,
 		!cfg.BTDisablePEX,
@@ -211,6 +219,8 @@ func buildClientConfig(cfg *config.Config) *torrent.ClientConfig {
 	clientConfig.TorrentPeersLowWater = cfg.BTPeersLowWater
 	clientConfig.TorrentPeersHighWater = cfg.BTPeersHighWater
 	clientConfig.DialRateLimiter = rate.NewLimiter(rate.Limit(cfg.BTDialRateLimit), cfg.BTDialRateLimit)
+	clientConfig.UpnpID = "Torrent-Stream-Hub"
+	applyPublicIPConfig(clientConfig, cfg)
 
 	if strings.EqualFold(cfg.BTClientProfile, "qbittorrent") || cfg.BTClientProfile == "" {
 		applyQBittorrentProfile(clientConfig)
@@ -240,6 +250,65 @@ func applyQBittorrentProfile(clientConfig *torrent.ClientConfig) {
 	clientConfig.PeerID = randomPeerID(peerID)
 }
 
+func applyPublicIPConfig(clientConfig *torrent.ClientConfig, cfg *config.Config) {
+	cfg.BTPublicIPv4Status = config.PublicIPStatus(cfg.BTPublicIPv4, false)
+	cfg.BTPublicIPv6Status = config.PublicIPStatus(cfg.BTPublicIPv6, true)
+	if status := config.PublicIPStatus(cfg.BTPublicIPv4, false); status == "configured" {
+		clientConfig.PublicIp4 = net.ParseIP(strings.TrimSpace(cfg.BTPublicIPv4)).To4()
+	}
+	if status := config.PublicIPStatus(cfg.BTPublicIPv6, true); status == "configured" {
+		clientConfig.PublicIp6 = net.ParseIP(strings.TrimSpace(cfg.BTPublicIPv6)).To16()
+	}
+	if !cfg.BTPublicIPDiscoveryEnabled {
+		return
+	}
+	if clientConfig.PublicIp4 == nil {
+		if ip := discoverPublicIP("https://api.ipify.org", false); ip != nil {
+			clientConfig.PublicIp4 = ip
+			cfg.BTPublicIPv4Status = "discovered"
+		} else if cfg.BTPublicIPv4Status == "disabled" {
+			cfg.BTPublicIPv4Status = "failed"
+		}
+	}
+	if clientConfig.PublicIp6 == nil && !cfg.BTDisableIPv6 {
+		if ip := discoverPublicIP("https://api64.ipify.org", true); ip != nil {
+			clientConfig.PublicIp6 = ip
+			cfg.BTPublicIPv6Status = "discovered"
+		} else if cfg.BTPublicIPv6Status == "disabled" {
+			cfg.BTPublicIPv6Status = "failed"
+		}
+	}
+}
+
+func discoverPublicIP(endpoint string, ipv6 bool) net.IP {
+	client := http.Client{Timeout: 2 * time.Second}
+	resp, err := client.Get(endpoint)
+	if err != nil {
+		logging.Debugf("public ip discovery failed endpoint=%s: %v", logging.SafeURLSummary(endpoint), err)
+		return nil
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		logging.Debugf("public ip discovery failed endpoint=%s status=%d", logging.SafeURLSummary(endpoint), resp.StatusCode)
+		return nil
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 128))
+	if err != nil {
+		return nil
+	}
+	ip := net.ParseIP(strings.TrimSpace(string(body)))
+	if ip == nil || ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsUnspecified() {
+		return nil
+	}
+	if ipv6 {
+		if ip.To4() != nil || ip.To16() == nil {
+			return nil
+		}
+		return ip.To16()
+	}
+	return ip.To4()
+}
+
 func randomPeerID(prefix string) string {
 	randomBytes := make([]byte, 32)
 	if _, err := rand.Read(randomBytes); err != nil {
@@ -256,6 +325,13 @@ func (e *Engine) StreamManager() *StreamManager {
 
 func (e *Engine) DownloadDir() string {
 	return e.cfg.DownloadDir
+}
+
+func (e *Engine) ConfigDir() string {
+	if strings.TrimSpace(e.cfg.DBPath) == "" {
+		return e.cfg.DownloadDir
+	}
+	return filepath.Dir(e.cfg.DBPath)
 }
 
 func (e *Engine) GetTorrentFile(hash string, index int) (*torrent.File, error) {
@@ -361,6 +437,9 @@ func (e *Engine) AddTorrentFile(r io.Reader) (*models.Torrent, error) {
 		return nil, fmt.Errorf("failed to read torrent file: %w", err)
 	}
 	logging.Debugf(".torrent file parsed hash=%s trackers=%d", metaInfo.HashInfoBytes().HexString(), len(metaInfo.UpvertedAnnounceList().DistinctValues()))
+	if err := e.saveMetainfo(metaInfo.HashInfoBytes().HexString(), metaInfo); err != nil {
+		logging.Warnf("failed to persist metainfo hash=%s: %v", metaInfo.HashInfoBytes().HexString(), err)
+	}
 
 	spec, err := torrent.TorrentSpecFromMetaInfoErr(metaInfo)
 	if err != nil {
@@ -378,9 +457,18 @@ func (e *Engine) AddTorrentFile(r io.Reader) (*models.Torrent, error) {
 	if err != nil {
 		return nil, err
 	}
+	e.setLastReaddSource(model.Hash, "metainfo_file")
 	model.SourceURI = metaInfo.Magnet(nil, nil).String()
 	logging.Infof("torrent added hash=%s source=file state=%s", model.Hash, model.State)
 	return model, nil
+}
+
+func (e *Engine) setLastReaddSource(hash, source string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if mt, ok := e.managedTorrents[hash]; ok {
+		mt.lastReaddSource = source
+	}
 }
 
 func (e *Engine) augmentTorrentSpec(spec *torrent.TorrentSpec) {
@@ -481,7 +569,6 @@ func defaultRetrackers() []string {
 		"udp://tracker.opentrackr.org:1337/announce",
 		"http://bt.svao-ix.ru/announce",
 		"udp://explodie.org:6969",
-		"wss://tracker.btorrent.xyz",
 		"wss://tracker.openwebtorrent.com",
 	}
 }
@@ -517,6 +604,9 @@ func (e *Engine) addTorrentWithSource(t *torrent.Torrent, sourceURI string) (*mo
 	if t.Info() != nil {
 		mi := t.Metainfo()
 		mt.metainfo = &mi
+		if err := e.saveMetainfo(hash, &mi); err != nil {
+			logging.Warnf("failed to persist runtime metainfo hash=%s: %v", hash, err)
+		}
 	}
 	e.managedTorrents[hash] = mt
 	logging.Infof("torrent registered hash=%s name=%q state=%s metadata_ready=%t", hash, t.Name(), mt.state, t.Info() != nil)
@@ -613,6 +703,17 @@ func (e *Engine) BTHealth() *models.BTHealth {
 		IPv6Enabled:                   !e.cfg.BTDisableIPv6,
 		ListenPort:                    e.cfg.TorrentPort,
 		ClientProfile:                 normalizedBTClientProfile(e.cfg.BTClientProfile),
+		DownloadProfile:               e.cfg.BTDownloadProfile,
+		BenchmarkMode:                 e.cfg.BTBenchmarkMode,
+		EstablishedConnsPerTorrent:    e.cfg.BTEstablishedConns,
+		HalfOpenConnsPerTorrent:       e.cfg.BTHalfOpenConns,
+		TotalHalfOpenConns:            e.cfg.BTTotalHalfOpen,
+		PeersLowWater:                 e.cfg.BTPeersLowWater,
+		PeersHighWater:                e.cfg.BTPeersHighWater,
+		DialRateLimit:                 e.cfg.BTDialRateLimit,
+		PublicIPDiscoveryEnabled:      e.cfg.BTPublicIPDiscoveryEnabled,
+		PublicIPv4Status:              firstNonEmptyString(e.cfg.BTPublicIPv4Status, config.PublicIPStatus(e.cfg.BTPublicIPv4, false)),
+		PublicIPv6Status:              firstNonEmptyString(e.cfg.BTPublicIPv6Status, config.PublicIPStatus(e.cfg.BTPublicIPv6, true)),
 		RetrackersMode:                normalizedRetrackersMode(e.cfg.BTRetrackersMode),
 		DownloadLimit:                 e.cfg.DownloadLimit,
 		UploadLimit:                   e.cfg.UploadLimit,
@@ -655,6 +756,7 @@ func (e *Engine) BTHealth() *models.BTHealth {
 			maxEstablishedConns = e.cfg.BTSwarmBoostConns
 		}
 		info := mt.t.Info()
+		trackerTiers, trackerURLs := trackerCounts(mt)
 		activeStreams := e.streamManager.ActiveStreamsForTorrent(mt.t.InfoHash().HexString())
 		blockedReason := decideHardRefreshBlockedReason(e.cfg, hardRefreshGateSnapshot{
 			State:             mt.state,
@@ -676,6 +778,22 @@ func (e *Engine) BTHealth() *models.BTHealth {
 			Pending:                         stats.PendingPeers,
 			HalfOpen:                        stats.HalfOpenPeers,
 			Seeds:                           stats.ConnectedSeeders,
+			BytesRead:                       stats.BytesRead.Int64(),
+			BytesReadData:                   stats.BytesReadData.Int64(),
+			BytesReadUsefulData:             stats.BytesReadUsefulData.Int64(),
+			BytesWritten:                    stats.BytesWritten.Int64(),
+			BytesWrittenData:                stats.BytesWrittenData.Int64(),
+			ChunksRead:                      stats.ChunksRead.Int64(),
+			ChunksReadUseful:                stats.ChunksReadUseful.Int64(),
+			ChunksReadWasted:                stats.ChunksReadWasted.Int64(),
+			PiecesDirtiedGood:               stats.PiecesDirtiedGood.Int64(),
+			PiecesDirtiedBad:                stats.PiecesDirtiedBad.Int64(),
+			RawDownloadSpeed:                mt.rawDownloadSpeed,
+			DataDownloadSpeed:               mt.dataDownloadSpeed,
+			UsefulDownloadSpeed:             mt.downloadSpeed,
+			WasteRatio:                      wasteRatio(stats.ChunksReadUseful.Int64(), stats.ChunksReadWasted.Int64()),
+			TrackerTiersCount:               trackerTiers,
+			TrackerURLsCount:                trackerURLs,
 			MetadataReady:                   info != nil,
 			LastReaddSource:                 mt.lastReaddSource,
 			AutoHardRefreshEnabled:          e.cfg.BTSwarmAutoHardRefreshEnabled,
@@ -743,6 +861,36 @@ func normalizedRetrackersMode(mode string) string {
 	default:
 		return "append"
 	}
+}
+
+func firstNonEmptyString(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func wasteRatio(useful, wasted int64) float64 {
+	total := useful + wasted
+	if total <= 0 {
+		return 0
+	}
+	return float64(wasted) / float64(total)
+}
+
+func trackerCounts(mt *ManagedTorrent) (int, int) {
+	if mt == nil || mt.t == nil {
+		return 0, 0
+	}
+	mi := mt.t.Metainfo()
+	list := mi.UpvertedAnnounceList()
+	urls := 0
+	for _, tier := range list {
+		urls += len(tier)
+	}
+	return len(list), urls
 }
 
 func (e *Engine) mapManagedTorrent(mt *ManagedTorrent) *models.Torrent {
@@ -853,6 +1001,9 @@ func (e *Engine) watchMetadata(hash string, t *torrent.Torrent) {
 		fileCount := len(t.Files())
 		mi := t.Metainfo()
 		mt.metainfo = &mi
+		if err := e.saveMetainfo(hash, &mi); err != nil {
+			logging.Warnf("failed to persist runtime metainfo hash=%s: %v", hash, err)
+		}
 		mt.metadataLogged = true
 		mt.metadataWaitLogged = false
 		logging.Infof("torrent metadata ready hash=%s name=%q size=%d files=%d", hash, t.Name(), info.TotalLength(), fileCount)
@@ -866,26 +1017,40 @@ func (e *Engine) watchMetadata(hash string, t *torrent.Torrent) {
 
 func (e *Engine) updateSpeedsLocked(mt *ManagedTorrent, stats torrent.TorrentStats) {
 	now := time.Now()
-	readBytes := stats.PeerConns.BytesReadUsefulData.Int64() + stats.WebSeeds.BytesReadUsefulData.Int64()
+	rawReadBytes := stats.BytesRead.Int64()
+	dataReadBytes := stats.BytesReadData.Int64()
+	readBytes := stats.BytesReadUsefulData.Int64()
 	writtenBytes := stats.PeerConns.BytesWrittenData.Int64() + stats.WebSeeds.BytesWrittenData.Int64()
 
 	if !mt.lastStatsAt.IsZero() {
 		elapsed := now.Sub(mt.lastStatsAt).Seconds()
 		if elapsed > 0 {
+			rawReadDelta := rawReadBytes - mt.lastRawReadBytes
+			dataReadDelta := dataReadBytes - mt.lastDataReadBytes
 			readDelta := readBytes - mt.lastReadBytes
 			writtenDelta := writtenBytes - mt.lastWrittenBytes
+			if rawReadDelta < 0 {
+				rawReadDelta = 0
+			}
+			if dataReadDelta < 0 {
+				dataReadDelta = 0
+			}
 			if readDelta < 0 {
 				readDelta = 0
 			}
 			if writtenDelta < 0 {
 				writtenDelta = 0
 			}
+			mt.rawDownloadSpeed = int64(float64(rawReadDelta) / elapsed)
+			mt.dataDownloadSpeed = int64(float64(dataReadDelta) / elapsed)
 			mt.downloadSpeed = int64(float64(readDelta) / elapsed)
 			mt.uploadSpeed = int64(float64(writtenDelta) / elapsed)
 		}
 	}
 
 	mt.lastStatsAt = now
+	mt.lastRawReadBytes = rawReadBytes
+	mt.lastDataReadBytes = dataReadBytes
 	mt.lastReadBytes = readBytes
 	mt.lastWrittenBytes = writtenBytes
 }
@@ -920,6 +1085,9 @@ func (e *Engine) logPeerSummaryLocked(hash string, summary models.PeerSummary, m
 }
 
 func (e *Engine) dhtStatus() string {
+	if e.client == nil {
+		return "disabled"
+	}
 	if len(e.client.DhtServers()) == 0 {
 		return "disabled"
 	}
@@ -1175,6 +1343,14 @@ func (e *Engine) checkSwarms() {
 				logging.Infof("swarm degraded hash=%s reason=%s connected=%d seeds=%d speed=%d", hash, decision.Reason, stats.ActivePeers, stats.ConnectedSeeders, mt.downloadSpeed)
 			}
 			mt.degraded = true
+			if e.cfg.BTBenchmarkMode {
+				mt.lastSwarmRefreshReason = "benchmark mode: " + decision.Reason
+				if mt.lastSwarmRefreshAt.IsZero() || now.Sub(mt.lastSwarmRefreshAt) >= time.Duration(e.cfg.BTSwarmRefreshCooldownSec)*time.Second {
+					mt.lastSwarmRefreshAt = now
+					logging.Infof("swarm recovery suppressed by benchmark mode hash=%s reason=%s", hash, decision.Reason)
+				}
+				continue
+			}
 			if mt.softRefreshAttemptsInEpisode >= e.cfg.BTClientRecycleAfterSoftFails && recycleReason == "" {
 				if !mt.addedAt.IsZero() && now.Sub(mt.addedAt) < time.Duration(e.cfg.BTClientRecycleMinTorrentAgeSec)*time.Second {
 					mt.nextClientRecycleAt = mt.addedAt.Add(time.Duration(e.cfg.BTClientRecycleMinTorrentAgeSec) * time.Second)
@@ -1495,6 +1671,37 @@ func (e *Engine) torrentSpecFromSource(sourceURI string) (*torrent.TorrentSpec, 
 	return spec, nil
 }
 
+func (e *Engine) saveMetainfo(hash string, mi *metainfo.MetaInfo) error {
+	if mi == nil || strings.TrimSpace(hash) == "" {
+		return nil
+	}
+	dir := filepath.Join(e.ConfigDir(), "metainfo")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	path := filepath.Join(dir, strings.ToLower(strings.TrimSpace(hash))+".torrent")
+	tmp := path + ".tmp"
+	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	if err != nil {
+		return err
+	}
+	writeErr := mi.Write(f)
+	closeErr := f.Close()
+	if writeErr != nil {
+		_ = os.Remove(tmp)
+		return writeErr
+	}
+	if closeErr != nil {
+		_ = os.Remove(tmp)
+		return closeErr
+	}
+	return os.Rename(tmp, path)
+}
+
+func (e *Engine) MetainfoPath(hash string) string {
+	return filepath.Join(e.ConfigDir(), "metainfo", strings.ToLower(strings.TrimSpace(hash))+".torrent")
+}
+
 func (e *Engine) torrentSpecForReadd(mt *ManagedTorrent, hash string) (*torrent.TorrentSpec, string, error) {
 	if mt != nil {
 		if mt.metainfo != nil {
@@ -1620,7 +1827,12 @@ func (e *Engine) recycleClient(reason string, manual bool) error {
 	}
 	e.mu.Unlock()
 
-	newClient, err := e.newTorrentClient()
+	if oldClient != nil {
+		logging.Infof("closing old bt client before recycle rebind reason=%s torrents=%d", reason, len(snapshots))
+		oldClient.Close()
+	}
+
+	newClient, err := e.newTorrentClientWithRetry(10, 250*time.Millisecond)
 	if err != nil {
 		e.mu.Lock()
 		e.recyclingClient = false
@@ -1704,14 +1916,30 @@ func (e *Engine) recycleClient(reason string, manual bool) error {
 	e.manageResourcesLocked()
 	e.mu.Unlock()
 
-	if oldClient != nil {
-		oldClient.Close()
-	}
 	for _, item := range watchList {
 		e.watchMetadata(item.hash, item.t)
 	}
 	logging.Infof("bt client recycled reason=%s torrents=%d manual=%t partial_error=%t", reason, len(watchList), manual, recycleErr != nil)
 	return recycleErr
+}
+
+func (e *Engine) newTorrentClientWithRetry(attempts int, delay time.Duration) (*torrent.Client, error) {
+	if attempts <= 0 {
+		attempts = 1
+	}
+	var lastErr error
+	for i := 0; i < attempts; i++ {
+		client, err := e.newTorrentClient()
+		if err == nil {
+			return client, nil
+		}
+		lastErr = err
+		if i+1 < attempts {
+			logging.Warnf("bt client recycle rebind attempt failed attempt=%d/%d: %v", i+1, attempts, err)
+			time.Sleep(delay)
+		}
+	}
+	return nil, lastErr
 }
 
 func (e *Engine) clientRecycleBlockedReasonLocked(now time.Time) string {

@@ -409,6 +409,17 @@ func (uc *TorrentUseCase) RestoreTorrents() error {
 }
 
 func (uc *TorrentUseCase) restoreTorrentToEngine(t *models.Torrent) (*models.Torrent, error) {
+	if path := uc.engine.MetainfoPath(t.Hash); path != "" {
+		f, err := os.Open(path)
+		if err == nil {
+			defer f.Close()
+			logging.Debugf("restore uses persisted metainfo hash=%s", t.Hash)
+			return uc.engine.AddTorrentFile(f)
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			logging.Warnf("restore failed to open persisted metainfo hash=%s: %v", t.Hash, err)
+		}
+	}
 	if t.SourceURI != "" {
 		logging.Debugf("restore uses persisted source URI hash=%s", t.Hash)
 		return uc.engine.AddMagnet(t.SourceURI)

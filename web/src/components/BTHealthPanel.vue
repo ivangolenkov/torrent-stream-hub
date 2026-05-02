@@ -104,6 +104,7 @@ onUnmounted(() => {
         <span :class="['rounded-full px-2.5 py-1 text-xs font-semibold', flagClass(health.utp_enabled)]">uTP {{ health.utp_enabled ? 'on' : 'off' }}</span>
         <span :class="['rounded-full px-2.5 py-1 text-xs font-semibold', flagClass(health.ipv6_enabled)]">IPv6 {{ health.ipv6_enabled ? 'on' : 'off' }}</span>
         <span :class="['rounded-full px-2.5 py-1 text-xs font-semibold', flagClass(health.swarm_watchdog_enabled)]">Watchdog {{ health.swarm_watchdog_enabled ? 'on' : 'off' }}</span>
+        <span :class="['rounded-full px-2.5 py-1 text-xs font-semibold', flagClass(health.hard_refresh_enabled)]">Hard refresh {{ health.hard_refresh_enabled ? 'on' : 'off' }}</span>
       </div>
 
       <div class="rounded-md border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
@@ -111,10 +112,14 @@ onUnmounted(() => {
       </div>
 
       <div class="rounded-md border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-800">
-        Without router port-forward the service relies mostly on outgoing peers. The swarm watchdog refreshes degraded torrents every {{ health.swarm_refresh_cooldown_sec }}s and checks health every {{ health.swarm_check_interval_sec }}s.
+        Without router port-forward the service relies mostly on outgoing peers. The watchdog checks every {{ health.swarm_check_interval_sec }}s, soft-refreshes every {{ health.swarm_refresh_cooldown_sec }}s, then can hard-refresh after {{ health.hard_refresh_after_soft_fails }} soft failures with a {{ health.hard_refresh_cooldown_sec }}s cooldown.
       </div>
 
-      <div class="grid grid-cols-2 gap-4 text-sm md:grid-cols-5">
+      <div class="rounded-md border border-gray-200 bg-gray-50 px-4 py-3 text-sm text-gray-700">
+        Hard refresh recreates torrent runtime state to restart tracker/DHT peer acquisition. It does not delete downloaded files or SQLite metadata.
+      </div>
+
+      <div class="grid grid-cols-2 gap-4 text-sm md:grid-cols-6">
         <div>
           <div class="text-gray-500 text-xs uppercase tracking-wider">Profile</div>
           <div class="mt-1 font-medium text-gray-900">{{ health.client_profile }}</div>
@@ -135,6 +140,10 @@ onUnmounted(() => {
           <div class="text-gray-500 text-xs uppercase tracking-wider">Watchdog</div>
           <div class="mt-1 font-medium text-gray-900">{{ health.swarm_watchdog_enabled ? 'enabled' : 'disabled' }}</div>
         </div>
+        <div>
+          <div class="text-gray-500 text-xs uppercase tracking-wider">Trend Ratios</div>
+          <div class="mt-1 font-medium text-gray-900">P {{ health.peer_drop_ratio }} · S {{ health.seed_drop_ratio }} · V {{ health.speed_drop_ratio }}</div>
+        </div>
       </div>
 
       <div v-if="health.torrents.length" class="overflow-x-auto">
@@ -144,6 +153,8 @@ onUnmounted(() => {
               <th class="px-4 py-3 text-left font-medium">Torrent</th>
               <th class="px-4 py-3 text-left font-medium">Peers</th>
               <th class="px-4 py-3 text-left font-medium">Swarm</th>
+              <th class="px-4 py-3 text-left font-medium">Peak</th>
+              <th class="px-4 py-3 text-left font-medium">Refresh</th>
               <th class="px-4 py-3 text-left font-medium">Tracker</th>
               <th class="px-4 py-3 text-left font-medium">Speed</th>
             </tr>
@@ -165,6 +176,26 @@ onUnmounted(() => {
                 <div v-if="torrent.last_refresh_reason" class="mt-1 max-w-xs truncate text-xs text-gray-500" :title="torrent.last_refresh_reason">
                   {{ torrent.last_refresh_reason }}
                 </div>
+                <div v-if="torrent.active_streams" class="mt-1 text-xs text-blue-600">streams {{ torrent.active_streams }}</div>
+              </td>
+              <td class="px-4 py-3 text-gray-500">
+                <div>{{ torrent.connected }} / {{ torrent.peak_connected || 0 }} peers</div>
+                <div>{{ torrent.seeds }} / {{ torrent.peak_seeds || 0 }} seeds</div>
+                <div>peak ↓ {{ formatSpeed(torrent.peak_download_speed || 0) }}</div>
+                <div class="text-xs text-gray-400">{{ formatTime(torrent.peak_updated_at) }}</div>
+              </td>
+              <td class="px-4 py-3 text-gray-500">
+                <div>soft {{ torrent.soft_refresh_count || 0 }} · hard {{ torrent.hard_refresh_count || 0 }}</div>
+                <div class="text-xs text-gray-400">hard {{ formatTime(torrent.last_hard_refresh_at) }}</div>
+                <div v-if="torrent.last_hard_refresh_reason" class="mt-1 max-w-xs truncate text-xs text-gray-500" :title="torrent.last_hard_refresh_reason">
+                  {{ torrent.last_hard_refresh_reason }}
+                </div>
+                <div v-if="torrent.last_hard_refresh_error" class="mt-1 max-w-xs truncate text-xs text-red-600" :title="torrent.last_hard_refresh_error">
+                  {{ torrent.last_hard_refresh_error }}
+                </div>
+                <span v-if="!torrent.hard_refresh_allowed" class="mt-1 inline-flex rounded-full bg-gray-100 px-2 py-0.5 text-xs font-semibold text-gray-700" :title="torrent.hard_refresh_blocked_reason">
+                  blocked: {{ torrent.hard_refresh_blocked_reason }}
+                </span>
               </td>
               <td class="px-4 py-3 max-w-xs truncate" :title="torrent.tracker_error || torrent.tracker_status">
                 <span :class="torrent.tracker_error ? 'text-amber-700' : 'text-gray-500'">{{ torrent.tracker_error || torrent.tracker_status || 'n/a' }}</span>

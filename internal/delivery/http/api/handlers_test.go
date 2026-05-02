@@ -174,6 +174,12 @@ func TestBTHealthReturnsDiagnostics(t *testing.T) {
 	if body["swarm_check_interval_sec"] == nil || body["swarm_refresh_cooldown_sec"] == nil {
 		t.Fatalf("expected swarm watchdog timings in response: %#v", body)
 	}
+	if body["hard_refresh_enabled"] != true || body["hard_refresh_cooldown_sec"] == nil || body["hard_refresh_after_soft_fails"] == nil {
+		t.Fatalf("expected hard refresh diagnostics in response: %#v", body)
+	}
+	if body["peer_drop_ratio"] == nil || body["seed_drop_ratio"] == nil || body["speed_drop_ratio"] == nil {
+		t.Fatalf("expected trend ratios in response: %#v", body)
+	}
 	encoded := rr.Body.String()
 	if strings.Contains(encoded, "peer_ip") || strings.Contains(encoded, "peer_port") {
 		t.Fatalf("health response must not expose peer IP/ports: %s", encoded)

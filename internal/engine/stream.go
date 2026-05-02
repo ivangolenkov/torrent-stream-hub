@@ -39,10 +39,29 @@ func NewStreamManager(e *Engine) *StreamManager {
 	}
 }
 
+func (sm *StreamManager) ActiveStreamsForTorrent(hash string) int {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	active := 0
+	for key, state := range sm.states {
+		if key.Hash != hash || state == nil {
+			continue
+		}
+		if state.ActiveStreams > 0 {
+			active += state.ActiveStreams
+			continue
+		}
+		if state.DebounceTimer != nil {
+			active++
+		}
+	}
+	return active
+}
+
 // AddStream increments the reference count for a file and enables sequential mode if it's the first stream.
 func (sm *StreamManager) AddStream(ctx context.Context, hash string, fileIndex int) error {
 	sm.mu.Lock()
-	defer sm.mu.Unlock()
 
 	key := FileKey{Hash: hash, Index: fileIndex}
 	state, exists := sm.states[key]
@@ -66,9 +85,19 @@ func (sm *StreamManager) AddStream(ctx context.Context, hash string, fileIndex i
 	logging.Debugf("stream reference incremented hash=%s file_index=%d active=%d", hash, fileIndex, state.ActiveStreams)
 
 	// If this is the first stream, enable sequential mode
-	if state.ActiveStreams == 1 {
+	enableSequential := state.ActiveStreams == 1
+	sm.mu.Unlock()
+
+	if enableSequential {
 		if err := sm.setSequentialMode(hash, fileIndex, true); err != nil {
-			state.ActiveStreams--
+			sm.mu.Lock()
+			if st, ok := sm.states[key]; ok {
+				st.ActiveStreams--
+				if st.ActiveStreams <= 0 {
+					delete(sm.states, key)
+				}
+			}
+			sm.mu.Unlock()
 			logging.Warnf("failed to enable sequential mode hash=%s file_index=%d: %v", hash, fileIndex, err)
 			return err
 		}
@@ -106,17 +135,19 @@ func (sm *StreamManager) RemoveStream(hash string, fileIndex int) {
 
 		state.DebounceTimer = time.AfterFunc(DebounceDelay, func() {
 			sm.mu.Lock()
-			defer sm.mu.Unlock()
 
 			// Verify if it's still 0 after delay
 			st, ok := sm.states[key]
 			if ok && st.ActiveStreams == 0 {
+				delete(sm.states, key)
+				sm.mu.Unlock()
 				if err := sm.setSequentialMode(hash, fileIndex, false); err != nil {
 					logging.Warnf("failed to disable sequential mode hash=%s file_index=%d: %v", hash, fileIndex, err)
 				}
 				logging.Infof("stream debounce elapsed hash=%s file_index=%d sequential_disabled=%t", hash, fileIndex, true)
-				delete(sm.states, key)
+				return
 			}
+			sm.mu.Unlock()
 		})
 		logging.Debugf("stream debounce scheduled hash=%s file_index=%d delay=%s", hash, fileIndex, DebounceDelay)
 	}

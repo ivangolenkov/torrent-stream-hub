@@ -113,6 +113,15 @@ func TestApplyDefaultsSetsBTDefaults(t *testing.T) {
 	if cfg.BTSwarmStalledDurationSec != 180 || cfg.BTSwarmBoostConns != 120 || cfg.BTSwarmBoostDurationSec != 300 {
 		t.Fatalf("unexpected swarm boost defaults: %+v", cfg)
 	}
+	if cfg.BTSwarmPeerDropRatio != 0.45 || cfg.BTSwarmSeedDropRatio != 0.45 || cfg.BTSwarmSpeedDropRatio != 0.35 {
+		t.Fatalf("unexpected swarm trend defaults: %+v", cfg)
+	}
+	if cfg.BTSwarmPeakTTLSec != 1800 || !cfg.BTSwarmHardRefreshEnabled || cfg.BTSwarmHardRefreshCooldownSec != 900 {
+		t.Fatalf("unexpected hard refresh defaults: %+v", cfg)
+	}
+	if cfg.BTSwarmHardRefreshAfterSoftFails != 2 || cfg.BTSwarmHardRefreshMinTorrentAgeSec != 300 {
+		t.Fatalf("unexpected hard refresh thresholds: %+v", cfg)
+	}
 }
 
 func TestApplyDefaultsClampsPeerWatermarks(t *testing.T) {
@@ -122,5 +131,31 @@ func TestApplyDefaultsClampsPeerWatermarks(t *testing.T) {
 
 	if cfg.BTPeersHighWater != cfg.BTPeersLowWater {
 		t.Fatalf("expected high water to be clamped to low water, got low=%d high=%d", cfg.BTPeersLowWater, cfg.BTPeersHighWater)
+	}
+}
+
+func TestApplyDefaultsClampsSwarmRatios(t *testing.T) {
+	cfg := &Config{BTSwarmPeerDropRatio: 2, BTSwarmSeedDropRatio: 0.001, BTSwarmSpeedDropRatio: -1}
+
+	ApplyDefaults(cfg)
+
+	if cfg.BTSwarmPeerDropRatio != 0.95 {
+		t.Fatalf("expected peer ratio to clamp high, got %f", cfg.BTSwarmPeerDropRatio)
+	}
+	if cfg.BTSwarmSeedDropRatio != 0.05 {
+		t.Fatalf("expected seed ratio to clamp low, got %f", cfg.BTSwarmSeedDropRatio)
+	}
+	if cfg.BTSwarmSpeedDropRatio != 0.35 {
+		t.Fatalf("expected invalid speed ratio to fallback, got %f", cfg.BTSwarmSpeedDropRatio)
+	}
+}
+
+func TestApplyDefaultsHardRefreshCooldownAtLeastSoftCooldown(t *testing.T) {
+	cfg := &Config{BTSwarmRefreshCooldownSec: 600, BTSwarmHardRefreshCooldownSec: 300}
+
+	ApplyDefaults(cfg)
+
+	if cfg.BTSwarmHardRefreshCooldownSec != cfg.BTSwarmRefreshCooldownSec {
+		t.Fatalf("expected hard cooldown to clamp to soft cooldown, got hard=%d soft=%d", cfg.BTSwarmHardRefreshCooldownSec, cfg.BTSwarmRefreshCooldownSec)
 	}
 }

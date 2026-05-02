@@ -76,6 +76,18 @@ export interface BTTorrentHealth {
   last_healthy_at?: string;
   boosted_until?: string;
   max_established_conns: number;
+  peak_connected: number;
+  peak_seeds: number;
+  peak_download_speed: number;
+  peak_updated_at?: string;
+  soft_refresh_count: number;
+  hard_refresh_count: number;
+  last_hard_refresh_at?: string;
+  last_hard_refresh_reason?: string;
+  last_hard_refresh_error?: string;
+  hard_refresh_allowed: boolean;
+  hard_refresh_blocked_reason?: string;
+  active_streams: number;
 }
 
 export interface BTHealth {
@@ -95,6 +107,12 @@ export interface BTHealth {
   swarm_watchdog_enabled: boolean;
   swarm_check_interval_sec: number;
   swarm_refresh_cooldown_sec: number;
+  hard_refresh_enabled: boolean;
+  hard_refresh_cooldown_sec: number;
+  hard_refresh_after_soft_fails: number;
+  peer_drop_ratio: number;
+  seed_drop_ratio: number;
+  speed_drop_ratio: number;
   incoming_connectivity_note: string;
   torrents: BTTorrentHealth[];
 }

@@ -7,48 +7,57 @@ import (
 )
 
 type Config struct {
-	Port                      string
-	TorrentPort               int
-	DownloadDir               string
-	DBPath                    string
-	MaxActiveStreams          int
-	MaxActiveDownloads        int
-	MinFreeSpaceGB            int
-	DownloadLimit             int
-	UploadLimit               int
-	StreamCacheSize           int64
-	AuthEnabled               bool
-	AuthUser                  string
-	AuthPassword              string
-	LogLevel                  string
-	BTSeed                    bool
-	BTSeedConfigured          bool
-	BTNoUpload                bool
-	BTClientProfile           string
-	BTRetrackersMode          string
-	BTRetrackersFile          string
-	BTDisableDHT              bool
-	BTDisablePEX              bool
-	BTDisableUPNP             bool
-	BTDisableTCP              bool
-	BTDisableUTP              bool
-	BTDisableIPv6             bool
-	BTEstablishedConns        int
-	BTHalfOpenConns           int
-	BTTotalHalfOpen           int
-	BTPeersLowWater           int
-	BTPeersHighWater          int
-	BTDialRateLimit           int
-	BTSwarmWatchdogEnabled    bool
-	BTSwarmWatchdogConfigured bool
-	BTSwarmCheckIntervalSec   int
-	BTSwarmRefreshCooldownSec int
-	BTSwarmMinConnectedPeers  int
-	BTSwarmMinConnectedSeeds  int
-	BTSwarmStalledSpeedBps    int
-	BTSwarmStalledDurationSec int
-	BTSwarmBoostConns         int
-	BTSwarmBoostDurationSec   int
+	Port                               string
+	TorrentPort                        int
+	DownloadDir                        string
+	DBPath                             string
+	MaxActiveStreams                   int
+	MaxActiveDownloads                 int
+	MinFreeSpaceGB                     int
+	DownloadLimit                      int
+	UploadLimit                        int
+	StreamCacheSize                    int64
+	AuthEnabled                        bool
+	AuthUser                           string
+	AuthPassword                       string
+	LogLevel                           string
+	BTSeed                             bool
+	BTSeedConfigured                   bool
+	BTNoUpload                         bool
+	BTClientProfile                    string
+	BTRetrackersMode                   string
+	BTRetrackersFile                   string
+	BTDisableDHT                       bool
+	BTDisablePEX                       bool
+	BTDisableUPNP                      bool
+	BTDisableTCP                       bool
+	BTDisableUTP                       bool
+	BTDisableIPv6                      bool
+	BTEstablishedConns                 int
+	BTHalfOpenConns                    int
+	BTTotalHalfOpen                    int
+	BTPeersLowWater                    int
+	BTPeersHighWater                   int
+	BTDialRateLimit                    int
+	BTSwarmWatchdogEnabled             bool
+	BTSwarmWatchdogConfigured          bool
+	BTSwarmCheckIntervalSec            int
+	BTSwarmRefreshCooldownSec          int
+	BTSwarmMinConnectedPeers           int
+	BTSwarmMinConnectedSeeds           int
+	BTSwarmStalledSpeedBps             int
+	BTSwarmStalledDurationSec          int
+	BTSwarmBoostConns                  int
+	BTSwarmBoostDurationSec            int
+	BTSwarmPeerDropRatio               float64
+	BTSwarmSeedDropRatio               float64
+	BTSwarmSpeedDropRatio              float64
+	BTSwarmPeakTTLSec                  int
+	BTSwarmHardRefreshEnabled          bool
+	BTSwarmHardRefreshConfigured       bool
+	BTSwarmHardRefreshCooldownSec      int
+	BTSwarmHardRefreshAfterSoftFails   int
+	BTSwarmHardRefreshMinTorrentAgeSec int
 }
 
 func Load() *Config {
@@ -93,10 +102,19 @@ func Load() *Config {
 	flag.IntVar(&cfg.BTSwarmStalledDurationSec, "bt-swarm-stalled-duration", getEnvAsInt("HUB_BT_SWARM_STALLED_DURATION_SEC", 180), "Seconds below stalled speed before refresh")
 	flag.IntVar(&cfg.BTSwarmBoostConns, "bt-swarm-boost-conns", getEnvAsInt("HUB_BT_SWARM_BOOST_CONNS", 120), "Temporary max established connections during swarm refresh")
 	flag.IntVar(&cfg.BTSwarmBoostDurationSec, "bt-swarm-boost-duration", getEnvAsInt("HUB_BT_SWARM_BOOST_DURATION_SEC", 300), "Seconds to keep boosted max connections")
+	flag.Float64Var(&cfg.BTSwarmPeerDropRatio, "bt-swarm-peer-drop-ratio", getEnvAsFloat("HUB_BT_SWARM_PEER_DROP_RATIO", 0.45), "Connected peer ratio below recent peak that marks a torrent degraded")
+	flag.Float64Var(&cfg.BTSwarmSeedDropRatio, "bt-swarm-seed-drop-ratio", getEnvAsFloat("HUB_BT_SWARM_SEED_DROP_RATIO", 0.45), "Connected seed ratio below recent peak that marks an incomplete torrent degraded")
+	flag.Float64Var(&cfg.BTSwarmSpeedDropRatio, "bt-swarm-speed-drop-ratio", getEnvAsFloat("HUB_BT_SWARM_SPEED_DROP_RATIO", 0.35), "Download speed ratio below recent peak that marks an incomplete torrent degraded")
+	flag.IntVar(&cfg.BTSwarmPeakTTLSec, "bt-swarm-peak-ttl", getEnvAsInt("HUB_BT_SWARM_PEAK_TTL_SEC", 1800), "Seconds to keep swarm peak metrics for trend detection")
+	flag.BoolVar(&cfg.BTSwarmHardRefreshEnabled, "bt-swarm-hard-refresh-enabled", getEnvAsBool("HUB_BT_SWARM_HARD_REFRESH_ENABLED", true), "Enable per-torrent runtime drop and re-add after repeated soft refresh failures")
+	flag.IntVar(&cfg.BTSwarmHardRefreshCooldownSec, "bt-swarm-hard-refresh-cooldown", getEnvAsInt("HUB_BT_SWARM_HARD_REFRESH_COOLDOWN_SEC", 900), "Minimum seconds between hard refresh attempts per torrent")
+	flag.IntVar(&cfg.BTSwarmHardRefreshAfterSoftFails, "bt-swarm-hard-refresh-after-soft-fails", getEnvAsInt("HUB_BT_SWARM_HARD_REFRESH_AFTER_SOFT_FAILS", 2), "Soft refresh attempts before hard refresh is allowed")
+	flag.IntVar(&cfg.BTSwarmHardRefreshMinTorrentAgeSec, "bt-swarm-hard-refresh-min-torrent-age", getEnvAsInt("HUB_BT_SWARM_HARD_REFRESH_MIN_TORRENT_AGE_SEC", 300), "Minimum torrent runtime age before hard refresh is allowed")
 
 	flag.Parse()
 	cfg.BTSeedConfigured = true
 	cfg.BTSwarmWatchdogConfigured = true
+	cfg.BTSwarmHardRefreshConfigured = true
 	cfg.LogLevel = getEnv("HUB_LOG_LEVEL", "debug")
 	ApplyDefaults(cfg)
 
@@ -170,6 +188,40 @@ func ApplyDefaults(cfg *Config) {
 	if cfg.BTSwarmBoostConns < cfg.BTEstablishedConns {
 		cfg.BTSwarmBoostConns = cfg.BTEstablishedConns
 	}
+	cfg.BTSwarmPeerDropRatio = clampRatio(cfg.BTSwarmPeerDropRatio, 0.45)
+	cfg.BTSwarmSeedDropRatio = clampRatio(cfg.BTSwarmSeedDropRatio, 0.45)
+	cfg.BTSwarmSpeedDropRatio = clampRatio(cfg.BTSwarmSpeedDropRatio, 0.35)
+	if cfg.BTSwarmPeakTTLSec <= 0 {
+		cfg.BTSwarmPeakTTLSec = 1800
+	}
+	if !cfg.BTSwarmHardRefreshConfigured {
+		cfg.BTSwarmHardRefreshEnabled = true
+	}
+	if cfg.BTSwarmHardRefreshCooldownSec <= 0 {
+		cfg.BTSwarmHardRefreshCooldownSec = 900
+	}
+	if cfg.BTSwarmHardRefreshCooldownSec < cfg.BTSwarmRefreshCooldownSec {
+		cfg.BTSwarmHardRefreshCooldownSec = cfg.BTSwarmRefreshCooldownSec
+	}
+	if cfg.BTSwarmHardRefreshAfterSoftFails <= 0 {
+		cfg.BTSwarmHardRefreshAfterSoftFails = 2
+	}
+	if cfg.BTSwarmHardRefreshMinTorrentAgeSec <= 0 {
+		cfg.BTSwarmHardRefreshMinTorrentAgeSec = 300
+	}
+}
+
+func clampRatio(value, fallback float64) float64 {
+	if value <= 0 {
+		value = fallback
+	}
+	if value < 0.05 {
+		return 0.05
+	}
+	if value > 0.95 {
+		return 0.95
+	}
+	return value
 }
 
 func getEnv(key, fallback string) string {
@@ -191,6 +243,15 @@ func getEnvAsInt(key string, fallback int) int {
 func getEnvAsInt64(key string, fallback int64) int64 {
 	if valueStr, exists := os.LookupEnv(key); exists {
 		if value, err := strconv.ParseInt(valueStr, 10, 64); err == nil {
+			return value
+		}
+	}
+	return fallback
+}
+
+func getEnvAsFloat(key string, fallback float64) float64 {
+	if valueStr, exists := os.LookupEnv(key); exists {
+		if value, err := strconv.ParseFloat(valueStr, 64); err == nil {
 			return value
 		}
 	}

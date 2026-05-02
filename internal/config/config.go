@@ -287,12 +287,12 @@ func applyDownloadProfileDefaults(cfg *Config) {
 		highWater   int
 		dialRate    int
 	}
-	values := defaults{established: 120, halfOpen: 60, totalHalf: 700, lowWater: 400, highWater: 1000, dialRate: 60}
+	values := defaults{established: 120, halfOpen: 120, totalHalf: 1000, lowWater: 400, highWater: 1500, dialRate: 100}
 	switch profile {
 	case "torrserver":
-		values = defaults{established: 100, halfOpen: 40, totalHalf: 500, lowWater: 300, highWater: 800, dialRate: 40}
+		values = defaults{established: 100, halfOpen: 80, totalHalf: 800, lowWater: 300, highWater: 1000, dialRate: 60}
 	case "aggressive":
-		values = defaults{established: 200, halfOpen: 100, totalHalf: 1200, lowWater: 700, highWater: 1600, dialRate: 120}
+		values = defaults{established: 200, halfOpen: 200, totalHalf: 2000, lowWater: 700, highWater: 2500, dialRate: 200}
 	}
 	if cfg.BTEstablishedConns <= 0 {
 		cfg.BTEstablishedConns = values.established

@@ -254,6 +254,13 @@ func buildClientConfig(cfg *config.Config) *torrent.ClientConfig {
 	clientConfig.TorrentPeersHighWater = cfg.BTPeersHighWater
 	clientConfig.DialRateLimiter = rate.NewLimiter(rate.Limit(cfg.BTDialRateLimit), cfg.BTDialRateLimit)
 	clientConfig.UpnpID = "Torrent-Stream-Hub"
+
+	// Use aggressive dial timeouts to quickly cycle through unresponsive/NAT-blocked peers
+	// and free up half-open slots for potentially good peers.
+	clientConfig.NominalDialTimeout = 5 * time.Second
+	clientConfig.MinDialTimeout = 2 * time.Second
+	clientConfig.HandshakesTimeout = 10 * time.Second
+
 	applyPublicIPConfig(clientConfig, cfg)
 
 	if strings.EqualFold(cfg.BTClientProfile, "qbittorrent") || cfg.BTClientProfile == "" {

@@ -101,10 +101,10 @@ func TestApplyDefaultsSetsBTDefaults(t *testing.T) {
 	if cfg.BTDownloadProfile != "balanced" {
 		t.Fatalf("expected balanced download profile, got %q", cfg.BTDownloadProfile)
 	}
-	if cfg.BTEstablishedConns != 120 || cfg.BTHalfOpenConns != 60 || cfg.BTTotalHalfOpen != 700 {
+	if cfg.BTEstablishedConns != 120 || cfg.BTHalfOpenConns != 120 || cfg.BTTotalHalfOpen != 1000 {
 		t.Fatalf("unexpected connection defaults: %+v", cfg)
 	}
-	if cfg.BTPeersLowWater != 400 || cfg.BTPeersHighWater != 1000 || cfg.BTDialRateLimit != 60 {
+	if cfg.BTPeersLowWater != 400 || cfg.BTPeersHighWater != 1500 || cfg.BTDialRateLimit != 100 {
 		t.Fatalf("unexpected peer discovery defaults: %+v", cfg)
 	}
 	if !cfg.BTSwarmWatchdogEnabled || cfg.BTSwarmCheckIntervalSec != 60 || cfg.BTSwarmRefreshCooldownSec != 180 {
@@ -139,9 +139,9 @@ func TestApplyDefaultsDownloadProfiles(t *testing.T) {
 		established, half, total, low int
 		high, dial                    int
 	}{
-		{profile: "torrserver", established: 100, half: 40, total: 500, low: 300, high: 800, dial: 40},
-		{profile: "balanced", established: 120, half: 60, total: 700, low: 400, high: 1000, dial: 60},
-		{profile: "aggressive", established: 200, half: 100, total: 1200, low: 700, high: 1600, dial: 120},
+		{profile: "torrserver", established: 100, half: 80, total: 800, low: 300, high: 1000, dial: 60},
+		{profile: "balanced", established: 120, half: 120, total: 1000, low: 400, high: 1500, dial: 100},
+		{profile: "aggressive", established: 200, half: 200, total: 2000, low: 700, high: 2500, dial: 200},
 	}
 	for _, tc := range cases {
 		t.Run(tc.profile, func(t *testing.T) {
@@ -159,7 +159,7 @@ func TestApplyDefaultsDownloadProfileOverrides(t *testing.T) {
 
 	ApplyDefaults(cfg)
 
-	if cfg.BTEstablishedConns != 321 || cfg.BTHalfOpenConns != 40 {
+	if cfg.BTEstablishedConns != 321 || cfg.BTHalfOpenConns != 80 {
 		t.Fatalf("expected explicit value to override profile defaults: %+v", cfg)
 	}
 }

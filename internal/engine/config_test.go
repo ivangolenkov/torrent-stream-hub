@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"torrent-stream-hub/internal/config"
 
@@ -25,11 +26,14 @@ func TestBuildClientConfigAppliesBTDefaults(t *testing.T) {
 	if clientConfig.NoDHT || clientConfig.DisablePEX || clientConfig.DisableTCP || clientConfig.DisableUTP || clientConfig.NoDefaultPortForwarding {
 		t.Fatalf("expected DHT/PEX/TCP/UTP/UPnP to be enabled by default")
 	}
-	if clientConfig.EstablishedConnsPerTorrent != 120 || clientConfig.HalfOpenConnsPerTorrent != 60 || clientConfig.TotalHalfOpenConns != 700 {
+	if clientConfig.EstablishedConnsPerTorrent != 120 || clientConfig.HalfOpenConnsPerTorrent != 120 || clientConfig.TotalHalfOpenConns != 1000 {
 		t.Fatalf("unexpected connection defaults: %+v", clientConfig)
 	}
-	if clientConfig.TorrentPeersLowWater != 400 || clientConfig.TorrentPeersHighWater != 1000 {
+	if clientConfig.TorrentPeersLowWater != 400 || clientConfig.TorrentPeersHighWater != 1500 {
 		t.Fatalf("unexpected peer watermarks: low=%d high=%d", clientConfig.TorrentPeersLowWater, clientConfig.TorrentPeersHighWater)
+	}
+	if clientConfig.NominalDialTimeout != 5*time.Second || clientConfig.MinDialTimeout != 2*time.Second || clientConfig.HandshakesTimeout != 10*time.Second {
+		t.Fatalf("unexpected timeouts: dial=%v min_dial=%v handshake=%v", clientConfig.NominalDialTimeout, clientConfig.MinDialTimeout, clientConfig.HandshakesTimeout)
 	}
 }
 

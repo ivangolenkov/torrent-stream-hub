@@ -42,55 +42,71 @@ type Engine struct {
 	client *torrent.Client
 	cfg    *config.Config
 
-	mu              sync.RWMutex
-	managedTorrents map[string]*ManagedTorrent
-	lastResourceLog time.Time
-	lastResourceKey string
+	mu                      sync.RWMutex
+	managedTorrents         map[string]*ManagedTorrent
+	lastResourceLog         time.Time
+	lastResourceKey         string
+	recyclingClient         bool
+	clientRecycleCount      int
+	clientRecycleTimes      []time.Time
+	lastClientRecycleAt     time.Time
+	lastClientRecycleReason string
+	lastClientRecycleErr    string
 
 	streamManager *StreamManager
 }
 
 type ManagedTorrent struct {
-	t                         *torrent.Torrent
-	state                     models.TorrentState
-	err                       models.ErrorReason
-	metadataLogged            bool
-	metadataWaitLogged        bool
-	downloadAllStarted        bool
-	lastStatsAt               time.Time
-	lastReadBytes             int64
-	lastWrittenBytes          int64
-	downloadSpeed             int64
-	uploadSpeed               int64
-	lastPeerSummary           models.PeerSummary
-	lastPeerLog               time.Time
-	trackerStatus             string
-	trackerError              string
-	sourceURI                 string
-	addedAt                   time.Time
-	peakConnected             int
-	peakSeeds                 int
-	peakDownloadSpeed         int64
-	peakUpdatedAt             time.Time
-	softRefreshCount          int
-	hardRefreshCount          int
-	lastHardRefreshAt         time.Time
-	lastHardRefreshReason     string
-	lastHardRefreshErr        string
-	pendingHardRefresh        bool
-	degraded                  bool
-	lastSwarmCheckAt          time.Time
-	lastSwarmRefreshAt        time.Time
-	lastSwarmRefreshReason    string
-	lastHealthyAt             time.Time
-	stallStartedAt            time.Time
-	boostUntil                time.Time
-	normalMaxEstablishedConns int
+	t                               *torrent.Torrent
+	state                           models.TorrentState
+	err                             models.ErrorReason
+	metadataLogged                  bool
+	metadataWaitLogged              bool
+	downloadAllStarted              bool
+	lastStatsAt                     time.Time
+	lastReadBytes                   int64
+	lastWrittenBytes                int64
+	downloadSpeed                   int64
+	uploadSpeed                     int64
+	lastPeerSummary                 models.PeerSummary
+	lastPeerLog                     time.Time
+	trackerStatus                   string
+	trackerError                    string
+	sourceURI                       string
+	addedAt                         time.Time
+	peakConnected                   int
+	peakSeeds                       int
+	peakDownloadSpeed               int64
+	peakUpdatedAt                   time.Time
+	softRefreshCount                int
+	hardRefreshCount                int
+	lastHardRefreshAt               time.Time
+	lastHardRefreshReason           string
+	lastHardRefreshErr              string
+	pendingHardRefresh              bool
+	degradationEpisodeStartedAt     time.Time
+	lastDegradedAt                  time.Time
+	lastRecoveredAt                 time.Time
+	lastSoftRefreshAt               time.Time
+	lastSoftRefreshReason           string
+	softRefreshAttemptsInEpisode    int
+	hardRefreshAttemptsInEpisode    int
+	lastSoftRefreshCountResetReason string
+	nextHardRefreshAt               time.Time
+	nextClientRecycleAt             time.Time
+	degraded                        bool
+	lastSwarmCheckAt                time.Time
+	lastSwarmRefreshAt              time.Time
+	lastSwarmRefreshReason          string
+	lastHealthyAt                   time.Time
+	stallStartedAt                  time.Time
+	boostUntil                      time.Time
+	normalMaxEstablishedConns       int
 }
 
 func New(cfg *config.Config) (*Engine, error) {
 	config.ApplyDefaults(cfg)
-	logging.Infof("initializing torrent engine download_dir=%s torrent_port=%d max_downloads=%d min_free_space_gb=%d bt_seed=%t bt_no_upload=%t bt_profile=%s bt_retrackers=%s dht=%t pex=%t upnp=%t tcp=%t utp=%t ipv6=%t established_conns=%d half_open=%d total_half_open=%d peers_low=%d peers_high=%d dial_rate=%d swarm_watchdog=%t swarm_check_sec=%d swarm_refresh_cooldown_sec=%d swarm_min_peers=%d swarm_min_seeds=%d swarm_stalled_speed=%d swarm_stalled_duration_sec=%d swarm_boost_conns=%d swarm_boost_duration_sec=%d peer_drop_ratio=%.2f seed_drop_ratio=%.2f speed_drop_ratio=%.2f peak_ttl_sec=%d hard_refresh=%t hard_refresh_cooldown_sec=%d hard_refresh_after_soft_fails=%d hard_refresh_min_age_sec=%d",
+	logging.Infof("initializing torrent engine download_dir=%s torrent_port=%d max_downloads=%d min_free_space_gb=%d bt_seed=%t bt_no_upload=%t bt_profile=%s bt_retrackers=%s dht=%t pex=%t upnp=%t tcp=%t utp=%t ipv6=%t established_conns=%d half_open=%d total_half_open=%d peers_low=%d peers_high=%d dial_rate=%d swarm_watchdog=%t swarm_check_sec=%d swarm_refresh_cooldown_sec=%d swarm_min_peers=%d swarm_min_seeds=%d swarm_stalled_speed=%d swarm_stalled_duration_sec=%d swarm_boost_conns=%d swarm_boost_duration_sec=%d peer_drop_ratio=%.2f seed_drop_ratio=%.2f speed_drop_ratio=%.2f peak_ttl_sec=%d hard_refresh=%t hard_refresh_cooldown_sec=%d hard_refresh_after_soft_fails=%d hard_refresh_min_age_sec=%d episode_ttl_sec=%d recovery_grace_sec=%d client_recycle=%t client_recycle_cooldown_sec=%d client_recycle_after_hard_fails=%d client_recycle_max_per_hour=%d",
 		cfg.DownloadDir,
 		cfg.TorrentPort,
 		cfg.MaxActiveDownloads,
@@ -128,37 +144,23 @@ func New(cfg *config.Config) (*Engine, error) {
 		cfg.BTSwarmHardRefreshCooldownSec,
 		cfg.BTSwarmHardRefreshAfterSoftFails,
 		cfg.BTSwarmHardRefreshMinTorrentAgeSec,
+		cfg.BTSwarmDegradationEpisodeTTLSec,
+		cfg.BTSwarmRecoveryGraceSec,
+		cfg.BTClientRecycleEnabled,
+		cfg.BTClientRecycleCooldownSec,
+		cfg.BTClientRecycleAfterHardFails,
+		cfg.BTClientRecycleMaxPerHour,
 	)
 
-	clientConfig := buildClientConfig(cfg)
-
-	var eng *Engine
-	clientConfig.Callbacks.StatusUpdated = append(clientConfig.Callbacks.StatusUpdated, func(event torrent.StatusUpdatedEvent) {
-		if eng != nil {
-			eng.handleStatusEvent(event)
-		}
-	})
-	clientConfig.Callbacks.PeerConnAdded = append(clientConfig.Callbacks.PeerConnAdded, func(conn *torrent.PeerConn) {
-		if eng != nil {
-			eng.logPeerConnEvent("added", conn)
-		}
-	})
-	clientConfig.Callbacks.PeerConnClosed = func(conn *torrent.PeerConn) {
-		if eng != nil {
-			eng.logPeerConnEvent("closed", conn)
-		}
-	}
-
-	client, err := torrent.NewClient(clientConfig)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create torrent client: %w", err)
-	}
-
-	eng = &Engine{
-		client:          client,
+	eng := &Engine{
 		cfg:             cfg,
 		managedTorrents: make(map[string]*ManagedTorrent),
 	}
+	client, err := eng.newTorrentClient()
+	if err != nil {
+		return nil, fmt.Errorf("failed to create torrent client: %w", err)
+	}
+	eng.client = client
 	eng.streamManager = NewStreamManager(eng)
 
 	go eng.resourceMonitor()
@@ -167,6 +169,20 @@ func New(cfg *config.Config) (*Engine, error) {
 	}
 
 	return eng, nil
+}
+
+func (e *Engine) newTorrentClient() (*torrent.Client, error) {
+	clientConfig := buildClientConfig(e.cfg)
+	clientConfig.Callbacks.StatusUpdated = append(clientConfig.Callbacks.StatusUpdated, func(event torrent.StatusUpdatedEvent) {
+		e.handleStatusEvent(event)
+	})
+	clientConfig.Callbacks.PeerConnAdded = append(clientConfig.Callbacks.PeerConnAdded, func(conn *torrent.PeerConn) {
+		e.logPeerConnEvent("added", conn)
+	})
+	clientConfig.Callbacks.PeerConnClosed = func(conn *torrent.PeerConn) {
+		e.logPeerConnEvent("closed", conn)
+	}
+	return torrent.NewClient(clientConfig)
 }
 
 func buildClientConfig(cfg *config.Config) *torrent.ClientConfig {
@@ -483,13 +499,14 @@ func (e *Engine) addTorrentWithSource(t *torrent.Torrent, sourceURI string) (*mo
 	}
 
 	mt := &ManagedTorrent{
-		t:                         t,
-		state:                     models.StateQueued, // initially queued, resourceMonitor will start it
-		err:                       models.ErrNone,
-		sourceURI:                 strings.TrimSpace(sourceURI),
-		addedAt:                   time.Now(),
-		lastHealthyAt:             time.Now(),
-		normalMaxEstablishedConns: e.cfg.BTEstablishedConns,
+		t:                               t,
+		state:                           models.StateQueued, // initially queued, resourceMonitor will start it
+		err:                             models.ErrNone,
+		sourceURI:                       strings.TrimSpace(sourceURI),
+		addedAt:                         time.Now(),
+		lastHealthyAt:                   time.Now(),
+		lastSoftRefreshCountResetReason: "new torrent",
+		normalMaxEstablishedConns:       e.cfg.BTEstablishedConns,
 	}
 	e.managedTorrents[hash] = mt
 	logging.Infof("torrent registered hash=%s name=%q state=%s metadata_ready=%t", hash, t.Name(), mt.state, t.Info() != nil)
@@ -572,32 +589,45 @@ func (e *Engine) GetAllTorrents() []*models.Torrent {
 func (e *Engine) BTHealth() *models.BTHealth {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	now := time.Now()
+	recycleBlocked := e.clientRecycleBlockedReasonLocked(now)
 
 	health := &models.BTHealth{
-		SeedEnabled:               e.cfg.BTSeed,
-		UploadEnabled:             !e.cfg.BTNoUpload,
-		DHTEnabled:                !e.cfg.BTDisableDHT,
-		PEXEnabled:                !e.cfg.BTDisablePEX,
-		UPNPEnabled:               !e.cfg.BTDisableUPNP,
-		TCPEnabled:                !e.cfg.BTDisableTCP,
-		UTPEnabled:                !e.cfg.BTDisableUTP,
-		IPv6Enabled:               !e.cfg.BTDisableIPv6,
-		ListenPort:                e.cfg.TorrentPort,
-		ClientProfile:             normalizedBTClientProfile(e.cfg.BTClientProfile),
-		RetrackersMode:            normalizedRetrackersMode(e.cfg.BTRetrackersMode),
-		DownloadLimit:             e.cfg.DownloadLimit,
-		UploadLimit:               e.cfg.UploadLimit,
-		SwarmWatchdogEnabled:      e.cfg.BTSwarmWatchdogEnabled,
-		SwarmCheckIntervalSec:     e.cfg.BTSwarmCheckIntervalSec,
-		SwarmRefreshCooldownSec:   e.cfg.BTSwarmRefreshCooldownSec,
-		HardRefreshEnabled:        e.cfg.BTSwarmHardRefreshEnabled,
-		HardRefreshCooldownSec:    e.cfg.BTSwarmHardRefreshCooldownSec,
-		HardRefreshAfterSoftFails: e.cfg.BTSwarmHardRefreshAfterSoftFails,
-		PeerDropRatio:             e.cfg.BTSwarmPeerDropRatio,
-		SeedDropRatio:             e.cfg.BTSwarmSeedDropRatio,
-		SpeedDropRatio:            e.cfg.BTSwarmSpeedDropRatio,
-		IncomingConnectivityNote:  "Incoming peers may not reach this client unless TCP/UDP torrent port is forwarded or UPnP succeeds.",
-		Torrents:                  make([]models.BTTorrentHealth, 0, len(e.managedTorrents)),
+		SeedEnabled:                 e.cfg.BTSeed,
+		UploadEnabled:               !e.cfg.BTNoUpload,
+		DHTEnabled:                  !e.cfg.BTDisableDHT,
+		PEXEnabled:                  !e.cfg.BTDisablePEX,
+		UPNPEnabled:                 !e.cfg.BTDisableUPNP,
+		TCPEnabled:                  !e.cfg.BTDisableTCP,
+		UTPEnabled:                  !e.cfg.BTDisableUTP,
+		IPv6Enabled:                 !e.cfg.BTDisableIPv6,
+		ListenPort:                  e.cfg.TorrentPort,
+		ClientProfile:               normalizedBTClientProfile(e.cfg.BTClientProfile),
+		RetrackersMode:              normalizedRetrackersMode(e.cfg.BTRetrackersMode),
+		DownloadLimit:               e.cfg.DownloadLimit,
+		UploadLimit:                 e.cfg.UploadLimit,
+		SwarmWatchdogEnabled:        e.cfg.BTSwarmWatchdogEnabled,
+		SwarmCheckIntervalSec:       e.cfg.BTSwarmCheckIntervalSec,
+		SwarmRefreshCooldownSec:     e.cfg.BTSwarmRefreshCooldownSec,
+		HardRefreshEnabled:          e.cfg.BTSwarmHardRefreshEnabled,
+		HardRefreshCooldownSec:      e.cfg.BTSwarmHardRefreshCooldownSec,
+		HardRefreshAfterSoftFails:   e.cfg.BTSwarmHardRefreshAfterSoftFails,
+		ClientRecycleEnabled:        e.cfg.BTClientRecycleEnabled,
+		ClientRecycleCooldownSec:    e.cfg.BTClientRecycleCooldownSec,
+		ClientRecycleAfterHardFails: e.cfg.BTClientRecycleAfterHardFails,
+		ClientRecycleCount:          e.clientRecycleCount,
+		ClientRecycleCountLastHour:  e.clientRecycleCountLastHourLocked(now),
+		LastClientRecycleAt:         formatBTHealthTime(e.lastClientRecycleAt),
+		LastClientRecycleReason:     e.lastClientRecycleReason,
+		LastClientRecycleError:      e.lastClientRecycleErr,
+		ClientRecycleAllowed:        recycleBlocked == "",
+		ClientRecycleBlockedReason:  recycleBlocked,
+		NextClientRecycleAt:         formatBTHealthTime(nextClientRecycleAt(e.cfg, e.lastClientRecycleAt, now)),
+		PeerDropRatio:               e.cfg.BTSwarmPeerDropRatio,
+		SeedDropRatio:               e.cfg.BTSwarmSeedDropRatio,
+		SpeedDropRatio:              e.cfg.BTSwarmSpeedDropRatio,
+		IncomingConnectivityNote:    "Incoming peers may not reach this client unless TCP/UDP torrent port is forwarded or UPnP succeeds.",
+		Torrents:                    make([]models.BTTorrentHealth, 0, len(e.managedTorrents)),
 	}
 
 	for _, mt := range e.managedTorrents {
@@ -607,7 +637,7 @@ func (e *Engine) BTHealth() *models.BTHealth {
 		if maxEstablishedConns == 0 {
 			maxEstablishedConns = e.cfg.BTEstablishedConns
 		}
-		if !mt.boostUntil.IsZero() && time.Now().Before(mt.boostUntil) {
+		if !mt.boostUntil.IsZero() && now.Before(mt.boostUntil) {
 			maxEstablishedConns = e.cfg.BTSwarmBoostConns
 		}
 		activeStreams := e.streamManager.ActiveStreamsForTorrent(mt.t.InfoHash().HexString())
@@ -615,42 +645,54 @@ func (e *Engine) BTHealth() *models.BTHealth {
 			State:             mt.state,
 			AddedAt:           mt.addedAt,
 			LastHardRefreshAt: mt.lastHardRefreshAt,
-			SoftRefreshCount:  mt.softRefreshCount,
+			SoftRefreshCount:  mt.softRefreshAttemptsInEpisode,
 			ActiveStreams:     activeStreams,
 			Pending:           mt.pendingHardRefresh,
-			Now:               time.Now(),
+			Now:               now,
 		})
+		mt.nextHardRefreshAt = nextHardRefreshAt(e.cfg, hardRefreshGateSnapshot{AddedAt: mt.addedAt, LastHardRefreshAt: mt.lastHardRefreshAt, Now: now})
+		mt.nextClientRecycleAt = nextClientRecycleAt(e.cfg, e.lastClientRecycleAt, now)
 		health.Torrents = append(health.Torrents, models.BTTorrentHealth{
-			Hash:                     mt.t.InfoHash().HexString(),
-			Name:                     mt.t.Name(),
-			State:                    mt.state,
-			Known:                    stats.TotalPeers,
-			Connected:                stats.ActivePeers,
-			Pending:                  stats.PendingPeers,
-			HalfOpen:                 stats.HalfOpenPeers,
-			Seeds:                    stats.ConnectedSeeders,
-			TrackerStatus:            mt.trackerStatus,
-			TrackerError:             mt.trackerError,
-			DownloadSpeed:            mt.downloadSpeed,
-			UploadSpeed:              mt.uploadSpeed,
-			Degraded:                 mt.degraded,
-			LastRefreshAt:            formatBTHealthTime(mt.lastSwarmRefreshAt),
-			LastRefreshReason:        mt.lastSwarmRefreshReason,
-			LastHealthyAt:            formatBTHealthTime(mt.lastHealthyAt),
-			BoostedUntil:             formatBTHealthTime(mt.boostUntil),
-			MaxEstablishedConns:      maxEstablishedConns,
-			PeakConnected:            mt.peakConnected,
-			PeakSeeds:                mt.peakSeeds,
-			PeakDownloadSpeed:        mt.peakDownloadSpeed,
-			PeakUpdatedAt:            formatBTHealthTime(mt.peakUpdatedAt),
-			SoftRefreshCount:         mt.softRefreshCount,
-			HardRefreshCount:         mt.hardRefreshCount,
-			LastHardRefreshAt:        formatBTHealthTime(mt.lastHardRefreshAt),
-			LastHardRefreshReason:    mt.lastHardRefreshReason,
-			LastHardRefreshError:     mt.lastHardRefreshErr,
-			HardRefreshAllowed:       blockedReason == "",
-			HardRefreshBlockedReason: blockedReason,
-			ActiveStreams:            activeStreams,
+			Hash:                            mt.t.InfoHash().HexString(),
+			Name:                            mt.t.Name(),
+			State:                           mt.state,
+			Known:                           stats.TotalPeers,
+			Connected:                       stats.ActivePeers,
+			Pending:                         stats.PendingPeers,
+			HalfOpen:                        stats.HalfOpenPeers,
+			Seeds:                           stats.ConnectedSeeders,
+			TrackerStatus:                   mt.trackerStatus,
+			TrackerError:                    mt.trackerError,
+			DownloadSpeed:                   mt.downloadSpeed,
+			UploadSpeed:                     mt.uploadSpeed,
+			Degraded:                        mt.degraded,
+			LastRefreshAt:                   formatBTHealthTime(mt.lastSwarmRefreshAt),
+			LastRefreshReason:               mt.lastSwarmRefreshReason,
+			LastHealthyAt:                   formatBTHealthTime(mt.lastHealthyAt),
+			BoostedUntil:                    formatBTHealthTime(mt.boostUntil),
+			MaxEstablishedConns:             maxEstablishedConns,
+			PeakConnected:                   mt.peakConnected,
+			PeakSeeds:                       mt.peakSeeds,
+			PeakDownloadSpeed:               mt.peakDownloadSpeed,
+			PeakUpdatedAt:                   formatBTHealthTime(mt.peakUpdatedAt),
+			SoftRefreshCount:                mt.softRefreshCount,
+			HardRefreshCount:                mt.hardRefreshCount,
+			LastHardRefreshAt:               formatBTHealthTime(mt.lastHardRefreshAt),
+			LastHardRefreshReason:           mt.lastHardRefreshReason,
+			LastHardRefreshError:            mt.lastHardRefreshErr,
+			HardRefreshAllowed:              blockedReason == "",
+			HardRefreshBlockedReason:        blockedReason,
+			ActiveStreams:                   activeStreams,
+			DegradationEpisodeStartedAt:     formatBTHealthTime(mt.degradationEpisodeStartedAt),
+			LastDegradedAt:                  formatBTHealthTime(mt.lastDegradedAt),
+			LastRecoveredAt:                 formatBTHealthTime(mt.lastRecoveredAt),
+			LastSoftRefreshAt:               formatBTHealthTime(mt.lastSoftRefreshAt),
+			LastSoftRefreshReason:           mt.lastSoftRefreshReason,
+			SoftRefreshAttemptsInEpisode:    mt.softRefreshAttemptsInEpisode,
+			HardRefreshAttemptsInEpisode:    mt.hardRefreshAttemptsInEpisode,
+			LastSoftRefreshCountResetReason: mt.lastSoftRefreshCountResetReason,
+			NextHardRefreshAt:               formatBTHealthTime(mt.nextHardRefreshAt),
+			NextClientRecycleAt:             formatBTHealthTime(mt.nextClientRecycleAt),
 		})
 	}
 
@@ -988,6 +1030,7 @@ type hardRefreshGateSnapshot struct {
 	SoftRefreshCount  int
 	ActiveStreams     int
 	Pending           bool
+	Manual            bool
 	Now               time.Time
 }
 
@@ -996,29 +1039,47 @@ func decideHardRefreshBlockedReason(cfg *config.Config, snap hardRefreshGateSnap
 		cfg = &config.Config{}
 	}
 	config.ApplyDefaults(cfg)
+	if snap.ActiveStreams > 0 {
+		return "active stream"
+	}
 	if !cfg.BTSwarmHardRefreshEnabled {
 		return "disabled"
-	}
-	if snap.Pending {
-		return "pending"
 	}
 	switch snap.State {
 	case models.StatePaused, models.StateError, models.StateMissingFiles, models.StateDiskFull:
 		return "state " + string(snap.State)
 	}
-	if snap.ActiveStreams > 0 {
-		return "active stream"
-	}
-	if !snap.AddedAt.IsZero() && snap.Now.Sub(snap.AddedAt) < time.Duration(cfg.BTSwarmHardRefreshMinTorrentAgeSec)*time.Second {
-		return "torrent too young"
+	if snap.Pending {
+		return "pending"
 	}
 	if !snap.LastHardRefreshAt.IsZero() && snap.Now.Sub(snap.LastHardRefreshAt) < time.Duration(cfg.BTSwarmHardRefreshCooldownSec)*time.Second {
 		return "cooldown"
 	}
-	if snap.SoftRefreshCount < cfg.BTSwarmHardRefreshAfterSoftFails {
+	if !snap.AddedAt.IsZero() && snap.Now.Sub(snap.AddedAt) < time.Duration(cfg.BTSwarmHardRefreshMinTorrentAgeSec)*time.Second {
+		return "torrent too young"
+	}
+	if !snap.Manual && snap.SoftRefreshCount < cfg.BTSwarmHardRefreshAfterSoftFails {
 		return "waiting for soft refresh attempts"
 	}
 	return ""
+}
+
+func nextHardRefreshAt(cfg *config.Config, snap hardRefreshGateSnapshot) time.Time {
+	config.ApplyDefaults(cfg)
+	var next time.Time
+	if !snap.LastHardRefreshAt.IsZero() {
+		next = snap.LastHardRefreshAt.Add(time.Duration(cfg.BTSwarmHardRefreshCooldownSec) * time.Second)
+	}
+	if !snap.AddedAt.IsZero() {
+		ageNext := snap.AddedAt.Add(time.Duration(cfg.BTSwarmHardRefreshMinTorrentAgeSec) * time.Second)
+		if next.IsZero() || ageNext.After(next) {
+			next = ageNext
+		}
+	}
+	if !next.IsZero() && next.Before(snap.Now) {
+		return time.Time{}
+	}
+	return next
 }
 
 func (e *Engine) swarmRefreshMonitor() {
@@ -1051,6 +1112,7 @@ func (e *Engine) checkSwarms() {
 	var targets []refreshTarget
 	var hardRefreshTargets []refreshTarget
 	var expiredBoosts []boostExpireTarget
+	recycleReason := ""
 
 	e.mu.Lock()
 	for hash, mt := range e.managedTorrents {
@@ -1084,20 +1146,31 @@ func (e *Engine) checkSwarms() {
 
 		mt.lastSwarmCheckAt = now
 		if decision.Degraded {
+			updateDegradationEpisodeLocked(e.cfg, mt, true, now)
 			if !mt.degraded || mt.lastSwarmRefreshReason != decision.Reason {
 				logging.Infof("swarm degraded hash=%s reason=%s connected=%d seeds=%d speed=%d", hash, decision.Reason, stats.ActivePeers, stats.ConnectedSeeders, mt.downloadSpeed)
 			}
 			mt.degraded = true
+			if mt.hardRefreshAttemptsInEpisode >= e.cfg.BTClientRecycleAfterHardFails && recycleReason == "" {
+				if blocked := e.clientRecycleBlockedReasonLocked(now); blocked == "" {
+					recycleReason = "degraded after hard refresh: " + decision.Reason
+					mt.nextClientRecycleAt = now
+					logging.Infof("bt client recycle scheduled hash=%s reason=%s hard_attempts=%d", hash, decision.Reason, mt.hardRefreshAttemptsInEpisode)
+				} else {
+					mt.nextClientRecycleAt = nextClientRecycleAt(e.cfg, e.lastClientRecycleAt, now)
+				}
+			}
 			activeStreams := e.streamManager.ActiveStreamsForTorrent(hash)
 			blockedReason := decideHardRefreshBlockedReason(e.cfg, hardRefreshGateSnapshot{
 				State:             mt.state,
 				AddedAt:           mt.addedAt,
 				LastHardRefreshAt: mt.lastHardRefreshAt,
-				SoftRefreshCount:  mt.softRefreshCount,
+				SoftRefreshCount:  mt.softRefreshAttemptsInEpisode,
 				ActiveStreams:     activeStreams,
 				Pending:           mt.pendingHardRefresh,
 				Now:               now,
 			})
+			mt.nextHardRefreshAt = nextHardRefreshAt(e.cfg, hardRefreshGateSnapshot{AddedAt: mt.addedAt, LastHardRefreshAt: mt.lastHardRefreshAt, Now: now})
 			if blockedReason == "" {
 				mt.pendingHardRefresh = true
 				hardRefreshTargets = append(hardRefreshTargets, refreshTarget{hash: hash, t: mt.t, reason: decision.Reason})
@@ -1108,7 +1181,10 @@ func (e *Engine) checkSwarms() {
 			if mt.lastSwarmRefreshAt.IsZero() || now.Sub(mt.lastSwarmRefreshAt) >= time.Duration(e.cfg.BTSwarmRefreshCooldownSec)*time.Second {
 				mt.lastSwarmRefreshAt = now
 				mt.lastSwarmRefreshReason = decision.Reason
+				mt.lastSoftRefreshAt = now
+				mt.lastSoftRefreshReason = decision.Reason
 				mt.softRefreshCount++
+				mt.softRefreshAttemptsInEpisode++
 				mt.boostUntil = now.Add(time.Duration(e.cfg.BTSwarmBoostDurationSec) * time.Second)
 				if mt.normalMaxEstablishedConns == 0 {
 					mt.normalMaxEstablishedConns = e.cfg.BTEstablishedConns
@@ -1124,7 +1200,7 @@ func (e *Engine) checkSwarms() {
 		}
 
 		mt.lastHealthyAt = now
-		mt.softRefreshCount = 0
+		updateDegradationEpisodeLocked(e.cfg, mt, false, now)
 		if mt.degraded {
 			logging.Infof("swarm recovered hash=%s connected=%d seeds=%d speed=%d", hash, stats.ActivePeers, stats.ConnectedSeeders, mt.downloadSpeed)
 		}
@@ -1151,8 +1227,13 @@ func (e *Engine) checkSwarms() {
 		e.refreshDHTAsync(target.hash, target.t, target.reason)
 	}
 	for _, target := range hardRefreshTargets {
-		if err := e.hardRefreshTorrent(target.hash, target.reason); err != nil {
+		if err := e.hardRefreshTorrent(target.hash, target.reason, false); err != nil {
 			logging.Warnf("swarm hard refresh failed hash=%s reason=%s: %v", target.hash, target.reason, err)
+		}
+	}
+	if recycleReason != "" {
+		if err := e.recycleClient(recycleReason, false); err != nil {
+			logging.Warnf("bt client recycle failed reason=%s: %v", recycleReason, err)
 		}
 	}
 	for _, target := range expiredBoosts {
@@ -1187,7 +1268,40 @@ func updateSwarmPeaksLocked(cfg *config.Config, mt *ManagedTorrent, connected, s
 	}
 }
 
-func (e *Engine) hardRefreshTorrent(hash string, reason string) error {
+func updateDegradationEpisodeLocked(cfg *config.Config, mt *ManagedTorrent, degraded bool, now time.Time) {
+	config.ApplyDefaults(cfg)
+	if degraded {
+		mt.lastDegradedAt = now
+		if mt.degradationEpisodeStartedAt.IsZero() || now.Sub(mt.degradationEpisodeStartedAt) > time.Duration(cfg.BTSwarmDegradationEpisodeTTLSec)*time.Second {
+			mt.degradationEpisodeStartedAt = now
+			mt.softRefreshAttemptsInEpisode = 0
+			mt.hardRefreshAttemptsInEpisode = 0
+			mt.lastSoftRefreshCountResetReason = "new degradation episode"
+		}
+		return
+	}
+
+	mt.lastRecoveredAt = now
+	if mt.degradationEpisodeStartedAt.IsZero() {
+		return
+	}
+	if mt.lastDegradedAt.IsZero() || now.Sub(mt.lastDegradedAt) < time.Duration(cfg.BTSwarmRecoveryGraceSec)*time.Second {
+		return
+	}
+	mt.degradationEpisodeStartedAt = time.Time{}
+	mt.softRefreshAttemptsInEpisode = 0
+	mt.hardRefreshAttemptsInEpisode = 0
+	mt.softRefreshCount = 0
+	mt.nextHardRefreshAt = time.Time{}
+	mt.nextClientRecycleAt = time.Time{}
+	mt.lastSoftRefreshCountResetReason = "stable recovery"
+}
+
+func (e *Engine) HardRefresh(hash string, reason string) error {
+	return e.hardRefreshTorrent(hash, reason, true)
+}
+
+func (e *Engine) hardRefreshTorrent(hash string, reason string, manual bool) error {
 	now := time.Now()
 
 	e.mu.Lock()
@@ -1201,9 +1315,10 @@ func (e *Engine) hardRefreshTorrent(hash string, reason string) error {
 		State:             mt.state,
 		AddedAt:           mt.addedAt,
 		LastHardRefreshAt: mt.lastHardRefreshAt,
-		SoftRefreshCount:  mt.softRefreshCount,
+		SoftRefreshCount:  mt.softRefreshAttemptsInEpisode,
 		ActiveStreams:     activeStreams,
 		Pending:           false,
+		Manual:            manual,
 		Now:               now,
 	}); blocked != "" {
 		mt.pendingHardRefresh = false
@@ -1217,19 +1332,20 @@ func (e *Engine) hardRefreshTorrent(hash string, reason string) error {
 		logging.Warnf("hard refresh falling back to bare info hash hash=%s", hash)
 	}
 	saved := hardRefreshSavedState{
-		state:                     mt.state,
-		err:                       mt.err,
-		sourceURI:                 sourceURI,
-		metadataLogged:            mt.metadataLogged,
-		downloadAllStarted:        mt.downloadAllStarted,
-		lastHealthyAt:             mt.lastHealthyAt,
-		peakConnected:             mt.peakConnected,
-		peakSeeds:                 mt.peakSeeds,
-		peakDownloadSpeed:         mt.peakDownloadSpeed,
-		peakUpdatedAt:             mt.peakUpdatedAt,
-		softRefreshCount:          mt.softRefreshCount,
-		hardRefreshCount:          mt.hardRefreshCount,
-		normalMaxEstablishedConns: mt.normalMaxEstablishedConns,
+		state:                        mt.state,
+		err:                          mt.err,
+		sourceURI:                    sourceURI,
+		metadataLogged:               mt.metadataLogged,
+		downloadAllStarted:           mt.downloadAllStarted,
+		lastHealthyAt:                mt.lastHealthyAt,
+		peakConnected:                mt.peakConnected,
+		peakSeeds:                    mt.peakSeeds,
+		peakDownloadSpeed:            mt.peakDownloadSpeed,
+		peakUpdatedAt:                mt.peakUpdatedAt,
+		softRefreshCount:             mt.softRefreshCount,
+		hardRefreshCount:             mt.hardRefreshCount,
+		hardRefreshAttemptsInEpisode: mt.hardRefreshAttemptsInEpisode,
+		normalMaxEstablishedConns:    mt.normalMaxEstablishedConns,
 	}
 	oldTorrent := mt.t
 	delete(e.managedTorrents, hash)
@@ -1253,22 +1369,23 @@ func (e *Engine) hardRefreshTorrent(hash string, reason string) error {
 	if err != nil {
 		e.mu.Lock()
 		failed := &ManagedTorrent{
-			t:                         oldTorrent,
-			state:                     models.StateError,
-			err:                       models.ErrTrackerUnreachable,
-			sourceURI:                 saved.sourceURI,
-			addedAt:                   now,
-			lastHealthyAt:             saved.lastHealthyAt,
-			peakConnected:             saved.peakConnected,
-			peakSeeds:                 saved.peakSeeds,
-			peakDownloadSpeed:         saved.peakDownloadSpeed,
-			peakUpdatedAt:             saved.peakUpdatedAt,
-			softRefreshCount:          saved.softRefreshCount,
-			hardRefreshCount:          saved.hardRefreshCount,
-			lastHardRefreshAt:         now,
-			lastHardRefreshReason:     reason,
-			lastHardRefreshErr:        logging.SanitizeText(err.Error()),
-			normalMaxEstablishedConns: saved.normalMaxEstablishedConns,
+			t:                            oldTorrent,
+			state:                        models.StateError,
+			err:                          models.ErrTrackerUnreachable,
+			sourceURI:                    saved.sourceURI,
+			addedAt:                      now,
+			lastHealthyAt:                saved.lastHealthyAt,
+			peakConnected:                saved.peakConnected,
+			peakSeeds:                    saved.peakSeeds,
+			peakDownloadSpeed:            saved.peakDownloadSpeed,
+			peakUpdatedAt:                saved.peakUpdatedAt,
+			softRefreshCount:             saved.softRefreshCount,
+			hardRefreshCount:             saved.hardRefreshCount,
+			hardRefreshAttemptsInEpisode: saved.hardRefreshAttemptsInEpisode + 1,
+			lastHardRefreshAt:            now,
+			lastHardRefreshReason:        reason,
+			lastHardRefreshErr:           logging.SanitizeText(err.Error()),
+			normalMaxEstablishedConns:    saved.normalMaxEstablishedConns,
 		}
 		if _, exists := e.managedTorrents[hash]; !exists {
 			e.managedTorrents[hash] = failed
@@ -1278,23 +1395,24 @@ func (e *Engine) hardRefreshTorrent(hash string, reason string) error {
 	}
 
 	newMT := &ManagedTorrent{
-		t:                         newTorrent,
-		state:                     saved.state,
-		err:                       saved.err,
-		sourceURI:                 saved.sourceURI,
-		addedAt:                   now,
-		metadataLogged:            saved.metadataLogged,
-		downloadAllStarted:        false,
-		lastHealthyAt:             saved.lastHealthyAt,
-		peakConnected:             saved.peakConnected,
-		peakSeeds:                 saved.peakSeeds,
-		peakDownloadSpeed:         saved.peakDownloadSpeed,
-		peakUpdatedAt:             saved.peakUpdatedAt,
-		softRefreshCount:          0,
-		hardRefreshCount:          saved.hardRefreshCount + 1,
-		lastHardRefreshAt:         now,
-		lastHardRefreshReason:     reason,
-		normalMaxEstablishedConns: saved.normalMaxEstablishedConns,
+		t:                            newTorrent,
+		state:                        saved.state,
+		err:                          saved.err,
+		sourceURI:                    saved.sourceURI,
+		addedAt:                      now,
+		metadataLogged:               saved.metadataLogged,
+		downloadAllStarted:           false,
+		lastHealthyAt:                saved.lastHealthyAt,
+		peakConnected:                saved.peakConnected,
+		peakSeeds:                    saved.peakSeeds,
+		peakDownloadSpeed:            saved.peakDownloadSpeed,
+		peakUpdatedAt:                saved.peakUpdatedAt,
+		softRefreshCount:             0,
+		hardRefreshCount:             saved.hardRefreshCount + 1,
+		hardRefreshAttemptsInEpisode: saved.hardRefreshAttemptsInEpisode + 1,
+		lastHardRefreshAt:            now,
+		lastHardRefreshReason:        reason,
+		normalMaxEstablishedConns:    saved.normalMaxEstablishedConns,
 	}
 	if newMT.normalMaxEstablishedConns == 0 {
 		newMT.normalMaxEstablishedConns = e.cfg.BTEstablishedConns
@@ -1315,19 +1433,20 @@ func (e *Engine) hardRefreshTorrent(hash string, reason string) error {
 }
 
 type hardRefreshSavedState struct {
-	state                     models.TorrentState
-	err                       models.ErrorReason
-	sourceURI                 string
-	metadataLogged            bool
-	downloadAllStarted        bool
-	lastHealthyAt             time.Time
-	peakConnected             int
-	peakSeeds                 int
-	peakDownloadSpeed         int64
-	peakUpdatedAt             time.Time
-	softRefreshCount          int
-	hardRefreshCount          int
-	normalMaxEstablishedConns int
+	state                        models.TorrentState
+	err                          models.ErrorReason
+	sourceURI                    string
+	metadataLogged               bool
+	downloadAllStarted           bool
+	lastHealthyAt                time.Time
+	peakConnected                int
+	peakSeeds                    int
+	peakDownloadSpeed            int64
+	peakUpdatedAt                time.Time
+	softRefreshCount             int
+	hardRefreshCount             int
+	hardRefreshAttemptsInEpisode int
+	normalMaxEstablishedConns    int
 }
 
 func (e *Engine) torrentSpecFromSource(sourceURI string) (*torrent.TorrentSpec, error) {
@@ -1337,6 +1456,217 @@ func (e *Engine) torrentSpecFromSource(sourceURI string) (*torrent.TorrentSpec, 
 	}
 	e.augmentTorrentSpec(spec)
 	return spec, nil
+}
+
+type recycleTorrentSnapshot struct {
+	hash                         string
+	sourceURI                    string
+	state                        models.TorrentState
+	err                          models.ErrorReason
+	metadataLogged               bool
+	lastHealthyAt                time.Time
+	peakConnected                int
+	peakSeeds                    int
+	peakDownloadSpeed            int64
+	peakUpdatedAt                time.Time
+	softRefreshCount             int
+	hardRefreshCount             int
+	degradationEpisodeStartedAt  time.Time
+	lastDegradedAt               time.Time
+	lastRecoveredAt              time.Time
+	lastSoftRefreshAt            time.Time
+	lastSoftRefreshReason        string
+	softRefreshAttemptsInEpisode int
+	hardRefreshAttemptsInEpisode int
+	lastHardRefreshAt            time.Time
+	lastHardRefreshReason        string
+	lastHardRefreshErr           string
+	normalMaxEstablishedConns    int
+}
+
+func (e *Engine) RecycleClient(reason string) error {
+	return e.recycleClient(reason, true)
+}
+
+func (e *Engine) recycleClient(reason string, manual bool) error {
+	now := time.Now()
+	e.mu.Lock()
+	if blocked := e.clientRecycleBlockedReasonLocked(now); blocked != "" {
+		e.mu.Unlock()
+		return fmt.Errorf("client recycle blocked: %s", blocked)
+	}
+	e.recyclingClient = true
+	oldClient := e.client
+	snapshots := make([]recycleTorrentSnapshot, 0, len(e.managedTorrents))
+	for hash, mt := range e.managedTorrents {
+		sourceURI := strings.TrimSpace(mt.sourceURI)
+		if sourceURI == "" {
+			sourceURI = "magnet:?xt=urn:btih:" + hash
+		}
+		snapshots = append(snapshots, recycleTorrentSnapshot{
+			hash:                         hash,
+			sourceURI:                    sourceURI,
+			state:                        mt.state,
+			err:                          mt.err,
+			metadataLogged:               mt.metadataLogged,
+			lastHealthyAt:                mt.lastHealthyAt,
+			peakConnected:                mt.peakConnected,
+			peakSeeds:                    mt.peakSeeds,
+			peakDownloadSpeed:            mt.peakDownloadSpeed,
+			peakUpdatedAt:                mt.peakUpdatedAt,
+			softRefreshCount:             mt.softRefreshCount,
+			hardRefreshCount:             mt.hardRefreshCount,
+			degradationEpisodeStartedAt:  mt.degradationEpisodeStartedAt,
+			lastDegradedAt:               mt.lastDegradedAt,
+			lastRecoveredAt:              mt.lastRecoveredAt,
+			lastSoftRefreshAt:            mt.lastSoftRefreshAt,
+			lastSoftRefreshReason:        mt.lastSoftRefreshReason,
+			softRefreshAttemptsInEpisode: mt.softRefreshAttemptsInEpisode,
+			hardRefreshAttemptsInEpisode: mt.hardRefreshAttemptsInEpisode,
+			lastHardRefreshAt:            mt.lastHardRefreshAt,
+			lastHardRefreshReason:        mt.lastHardRefreshReason,
+			lastHardRefreshErr:           mt.lastHardRefreshErr,
+			normalMaxEstablishedConns:    mt.normalMaxEstablishedConns,
+		})
+	}
+	e.mu.Unlock()
+
+	newClient, err := e.newTorrentClient()
+	if err != nil {
+		e.mu.Lock()
+		e.recyclingClient = false
+		e.lastClientRecycleAt = now
+		e.lastClientRecycleReason = reason
+		e.lastClientRecycleErr = logging.SanitizeText(err.Error())
+		e.mu.Unlock()
+		return err
+	}
+
+	newManaged := make(map[string]*ManagedTorrent, len(snapshots))
+	var watchList []struct {
+		hash string
+		t    *torrent.Torrent
+	}
+	var recycleErr error
+	for _, snap := range snapshots {
+		spec, err := e.torrentSpecFromSource(snap.sourceURI)
+		if err != nil {
+			recycleErr = errors.Join(recycleErr, fmt.Errorf("build spec %s: %w", snap.hash, err))
+			continue
+		}
+		newTorrent, _, err := newClient.AddTorrentSpec(spec)
+		if err != nil {
+			recycleErr = errors.Join(recycleErr, fmt.Errorf("add torrent %s: %w", snap.hash, err))
+			continue
+		}
+		mt := &ManagedTorrent{
+			t:                            newTorrent,
+			state:                        snap.state,
+			err:                          snap.err,
+			sourceURI:                    snap.sourceURI,
+			addedAt:                      now,
+			metadataLogged:               snap.metadataLogged,
+			lastHealthyAt:                snap.lastHealthyAt,
+			peakConnected:                snap.peakConnected,
+			peakSeeds:                    snap.peakSeeds,
+			peakDownloadSpeed:            snap.peakDownloadSpeed,
+			peakUpdatedAt:                snap.peakUpdatedAt,
+			softRefreshCount:             snap.softRefreshCount,
+			hardRefreshCount:             snap.hardRefreshCount,
+			degradationEpisodeStartedAt:  snap.degradationEpisodeStartedAt,
+			lastDegradedAt:               snap.lastDegradedAt,
+			lastRecoveredAt:              snap.lastRecoveredAt,
+			lastSoftRefreshAt:            snap.lastSoftRefreshAt,
+			lastSoftRefreshReason:        snap.lastSoftRefreshReason,
+			softRefreshAttemptsInEpisode: snap.softRefreshAttemptsInEpisode,
+			hardRefreshAttemptsInEpisode: snap.hardRefreshAttemptsInEpisode,
+			lastHardRefreshAt:            snap.lastHardRefreshAt,
+			lastHardRefreshReason:        snap.lastHardRefreshReason,
+			lastHardRefreshErr:           snap.lastHardRefreshErr,
+			normalMaxEstablishedConns:    snap.normalMaxEstablishedConns,
+		}
+		if mt.normalMaxEstablishedConns == 0 {
+			mt.normalMaxEstablishedConns = e.cfg.BTEstablishedConns
+		}
+		newHash := newTorrent.InfoHash().HexString()
+		newManaged[newHash] = mt
+		watchList = append(watchList, struct {
+			hash string
+			t    *torrent.Torrent
+		}{hash: newHash, t: newTorrent})
+	}
+
+	e.mu.Lock()
+	e.client = newClient
+	e.managedTorrents = newManaged
+	e.recyclingClient = false
+	e.clientRecycleCount++
+	e.clientRecycleTimes = append(e.clientRecycleTimes, now)
+	e.lastClientRecycleAt = now
+	e.lastClientRecycleReason = reason
+	e.lastClientRecycleErr = ""
+	if recycleErr != nil {
+		e.lastClientRecycleErr = logging.SanitizeText(recycleErr.Error())
+	}
+	e.manageResourcesLocked()
+	e.mu.Unlock()
+
+	if oldClient != nil {
+		oldClient.Close()
+	}
+	for _, item := range watchList {
+		e.watchMetadata(item.hash, item.t)
+	}
+	logging.Infof("bt client recycled reason=%s torrents=%d manual=%t partial_error=%t", reason, len(watchList), manual, recycleErr != nil)
+	return recycleErr
+}
+
+func (e *Engine) clientRecycleBlockedReasonLocked(now time.Time) string {
+	if e.streamManager != nil && e.streamManager.ActiveStreamsTotal() > 0 {
+		return "active stream"
+	}
+	if !e.cfg.BTClientRecycleEnabled {
+		return "disabled"
+	}
+	if e.recyclingClient {
+		return "pending"
+	}
+	if len(e.managedTorrents) < e.cfg.BTClientRecycleMinTorrents {
+		return "not enough torrents"
+	}
+	if !e.lastClientRecycleAt.IsZero() && now.Sub(e.lastClientRecycleAt) < time.Duration(e.cfg.BTClientRecycleCooldownSec)*time.Second {
+		return "cooldown"
+	}
+	if e.clientRecycleCountLastHourLocked(now) >= e.cfg.BTClientRecycleMaxPerHour {
+		return "hourly limit"
+	}
+	return ""
+}
+
+func (e *Engine) clientRecycleCountLastHourLocked(now time.Time) int {
+	count := 0
+	cutoff := now.Add(-time.Hour)
+	kept := e.clientRecycleTimes[:0]
+	for _, ts := range e.clientRecycleTimes {
+		if ts.After(cutoff) {
+			kept = append(kept, ts)
+			count++
+		}
+	}
+	e.clientRecycleTimes = kept
+	return count
+}
+
+func nextClientRecycleAt(cfg *config.Config, last time.Time, now time.Time) time.Time {
+	config.ApplyDefaults(cfg)
+	if last.IsZero() {
+		return time.Time{}
+	}
+	next := last.Add(time.Duration(cfg.BTClientRecycleCooldownSec) * time.Second)
+	if next.Before(now) {
+		return time.Time{}
+	}
+	return next
 }
 
 func (e *Engine) refreshDHTAsync(hash string, t *torrent.Torrent, reason string) {

@@ -129,6 +129,22 @@ func (uc *TorrentUseCase) BTHealth() *models.BTHealth {
 	return uc.engine.BTHealth()
 }
 
+func (uc *TorrentUseCase) HardRefresh(hash string) error {
+	logging.Infof("usecase hard refresh hash=%s", hash)
+	if err := uc.engine.HardRefresh(hash, "manual api action"); err != nil {
+		if errors.Is(err, engine.ErrTorrentNotFound) {
+			return TorrentNotFoundError{Hash: hash}
+		}
+		return err
+	}
+	return nil
+}
+
+func (uc *TorrentUseCase) RecycleBTClient() error {
+	logging.Infof("usecase recycle bt client")
+	return uc.engine.RecycleClient("manual api action")
+}
+
 func (uc *TorrentUseCase) GetTorrent(hash string) (*models.Torrent, error) {
 	dbT, err := uc.repo.GetTorrent(hash)
 	if err != nil {

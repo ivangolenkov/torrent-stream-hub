@@ -88,6 +88,16 @@ export interface BTTorrentHealth {
   hard_refresh_allowed: boolean;
   hard_refresh_blocked_reason?: string;
   active_streams: number;
+  degradation_episode_started_at?: string;
+  last_degraded_at?: string;
+  last_recovered_at?: string;
+  last_soft_refresh_at?: string;
+  last_soft_refresh_reason?: string;
+  soft_refresh_attempts_in_episode: number;
+  hard_refresh_attempts_in_episode: number;
+  last_soft_refresh_count_reset_reason?: string;
+  next_hard_refresh_at?: string;
+  next_client_recycle_at?: string;
 }
 
 export interface BTHealth {
@@ -110,6 +120,17 @@ export interface BTHealth {
   hard_refresh_enabled: boolean;
   hard_refresh_cooldown_sec: number;
   hard_refresh_after_soft_fails: number;
+  client_recycle_enabled: boolean;
+  client_recycle_cooldown_sec: number;
+  client_recycle_after_hard_fails: number;
+  client_recycle_count: number;
+  client_recycle_count_last_hour: number;
+  last_client_recycle_at?: string;
+  last_client_recycle_reason?: string;
+  last_client_recycle_error?: string;
+  client_recycle_allowed: boolean;
+  client_recycle_blocked_reason?: string;
+  next_client_recycle_at?: string;
   peer_drop_ratio: number;
   seed_drop_ratio: number;
   speed_drop_ratio: number;

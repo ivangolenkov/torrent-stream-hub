@@ -59,6 +59,26 @@ func (sm *StreamManager) ActiveStreamsForTorrent(hash string) int {
 	return active
 }
 
+func (sm *StreamManager) ActiveStreamsTotal() int {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	active := 0
+	for _, state := range sm.states {
+		if state == nil {
+			continue
+		}
+		if state.ActiveStreams > 0 {
+			active += state.ActiveStreams
+			continue
+		}
+		if state.DebounceTimer != nil {
+			active++
+		}
+	}
+	return active
+}
+
 // AddStream increments the reference count for a file and enables sequential mode if it's the first stream.
 func (sm *StreamManager) AddStream(ctx context.Context, hash string, fileIndex int) error {
 	sm.mu.Lock()

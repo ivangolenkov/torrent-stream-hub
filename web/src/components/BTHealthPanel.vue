@@ -5,6 +5,7 @@ import type { BTHealth } from '../types';
 
 const health = ref<BTHealth | null>(null);
 const error = ref('');
+const actionMessage = ref('');
 let timer: number | undefined;
 
 const formatSpeed = (bytesPerSec: number) => {
@@ -21,6 +22,26 @@ const loadHealth = async () => {
     error.value = '';
   } catch (e) {
     error.value = e instanceof Error ? e.message : 'Failed to load BitTorrent health';
+  }
+};
+
+const hardRefresh = async (hash: string) => {
+  try {
+    await apiClient.action(hash, 'hard_refresh');
+    actionMessage.value = 'Hard refresh requested';
+    await loadHealth();
+  } catch (e) {
+    error.value = e instanceof Error ? e.message : 'Failed to hard refresh torrent';
+  }
+};
+
+const recycleClient = async () => {
+  try {
+    await apiClient.recycleBTClient();
+    actionMessage.value = 'BitTorrent client recycle requested';
+    await loadHealth();
+  } catch (e) {
+    error.value = e instanceof Error ? e.message : 'Failed to recycle BitTorrent client';
   }
 };
 
@@ -64,6 +85,10 @@ const formatTime = (value?: string) => {
   }).format(new Date(value));
 };
 
+const canManualHardRefresh = (torrent: { hard_refresh_allowed: boolean; hard_refresh_blocked_reason?: string }) => {
+  return torrent.hard_refresh_allowed || torrent.hard_refresh_blocked_reason === 'waiting for soft refresh attempts';
+};
+
 onMounted(() => {
   loadHealth();
   timer = window.setInterval(loadHealth, 5000);
@@ -87,10 +112,23 @@ onUnmounted(() => {
       >
         Refresh
       </button>
+      <button
+        v-if="health"
+        class="inline-flex items-center px-3 py-2 border border-blue-300 text-sm font-medium rounded-md text-blue-700 bg-blue-50 hover:bg-blue-100 disabled:cursor-not-allowed disabled:opacity-50"
+        :disabled="!health.client_recycle_allowed"
+        :title="health.client_recycle_blocked_reason"
+        @click="recycleClient"
+      >
+        Recycle client
+      </button>
     </div>
 
     <div v-if="error" class="px-5 py-4 text-sm text-red-700 bg-red-50 border-b border-red-100">
       {{ error }}
+    </div>
+
+    <div v-if="actionMessage" class="px-5 py-3 text-sm text-blue-700 bg-blue-50 border-b border-blue-100">
+      {{ actionMessage }}
     </div>
 
     <div v-else-if="health" class="p-5 space-y-4">
@@ -116,7 +154,7 @@ onUnmounted(() => {
       </div>
 
       <div class="rounded-md border border-gray-200 bg-gray-50 px-4 py-3 text-sm text-gray-700">
-        Hard refresh recreates torrent runtime state to restart tracker/DHT peer acquisition. It does not delete downloaded files or SQLite metadata.
+        Hard refresh recreates torrent runtime state. Client recycle recreates the BitTorrent client runtime. Neither action deletes downloaded files or SQLite metadata.
       </div>
 
       <div class="grid grid-cols-2 gap-4 text-sm md:grid-cols-6">
@@ -141,6 +179,11 @@ onUnmounted(() => {
           <div class="mt-1 font-medium text-gray-900">{{ health.swarm_watchdog_enabled ? 'enabled' : 'disabled' }}</div>
         </div>
         <div>
+          <div class="text-gray-500 text-xs uppercase tracking-wider">Client Recycle</div>
+          <div class="mt-1 font-medium text-gray-900">{{ health.client_recycle_count }} total · {{ health.client_recycle_count_last_hour }}/h</div>
+          <div class="text-xs text-gray-500">{{ health.client_recycle_allowed ? 'allowed' : health.client_recycle_blocked_reason }}</div>
+        </div>
+        <div>
           <div class="text-gray-500 text-xs uppercase tracking-wider">Trend Ratios</div>
           <div class="mt-1 font-medium text-gray-900">P {{ health.peer_drop_ratio }} · S {{ health.seed_drop_ratio }} · V {{ health.speed_drop_ratio }}</div>
         </div>
@@ -157,6 +200,7 @@ onUnmounted(() => {
               <th class="px-4 py-3 text-left font-medium">Refresh</th>
               <th class="px-4 py-3 text-left font-medium">Tracker</th>
               <th class="px-4 py-3 text-left font-medium">Speed</th>
+              <th class="px-4 py-3 text-left font-medium">Action</th>
             </tr>
           </thead>
           <tbody class="divide-y divide-gray-200 bg-white">
@@ -177,6 +221,7 @@ onUnmounted(() => {
                   {{ torrent.last_refresh_reason }}
                 </div>
                 <div v-if="torrent.active_streams" class="mt-1 text-xs text-blue-600">streams {{ torrent.active_streams }}</div>
+                <div v-if="torrent.degradation_episode_started_at" class="mt-1 text-xs text-gray-400">episode {{ formatTime(torrent.degradation_episode_started_at) }}</div>
               </td>
               <td class="px-4 py-3 text-gray-500">
                 <div>{{ torrent.connected }} / {{ torrent.peak_connected || 0 }} peers</div>
@@ -186,7 +231,9 @@ onUnmounted(() => {
               </td>
               <td class="px-4 py-3 text-gray-500">
                 <div>soft {{ torrent.soft_refresh_count || 0 }} · hard {{ torrent.hard_refresh_count || 0 }}</div>
+                <div class="text-xs text-gray-500">episode soft {{ torrent.soft_refresh_attempts_in_episode || 0 }} · hard {{ torrent.hard_refresh_attempts_in_episode || 0 }}</div>
                 <div class="text-xs text-gray-400">hard {{ formatTime(torrent.last_hard_refresh_at) }}</div>
+                <div class="text-xs text-gray-400">next {{ formatTime(torrent.next_hard_refresh_at) }}</div>
                 <div v-if="torrent.last_hard_refresh_reason" class="mt-1 max-w-xs truncate text-xs text-gray-500" :title="torrent.last_hard_refresh_reason">
                   {{ torrent.last_hard_refresh_reason }}
                 </div>
@@ -201,6 +248,16 @@ onUnmounted(() => {
                 <span :class="torrent.tracker_error ? 'text-amber-700' : 'text-gray-500'">{{ torrent.tracker_error || torrent.tracker_status || 'n/a' }}</span>
               </td>
               <td class="px-4 py-3 text-gray-500">↓ {{ formatSpeed(torrent.download_speed) }} · ↑ {{ formatSpeed(torrent.upload_speed) }}</td>
+              <td class="px-4 py-3">
+                <button
+                  class="rounded-md border border-gray-300 bg-white px-2 py-1 text-xs font-medium text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+                  :disabled="!canManualHardRefresh(torrent)"
+                  :title="torrent.hard_refresh_blocked_reason"
+                  @click="hardRefresh(torrent.hash)"
+                >
+                  Hard refresh
+                </button>
+              </td>
             </tr>
           </tbody>
         </table>

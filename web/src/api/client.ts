@@ -32,7 +32,7 @@ export const apiClient = {
     if (!response.ok) throw new Error(await readError(response, 'Failed to upload torrent file'));
   },
 
-  async action(hash: string, action: 'pause' | 'resume' | 'delete' | 'recheck', deleteFiles: boolean = false): Promise<void> {
+  async action(hash: string, action: 'pause' | 'resume' | 'delete' | 'recheck' | 'hard_refresh', deleteFiles: boolean = false): Promise<void> {
     const response = await fetch(`${API_BASE}/torrent/${hash}/action`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -52,6 +52,11 @@ export const apiClient = {
     const response = await fetch(`${API_BASE}/health/bt`);
     if (!response.ok) throw new Error(await readError(response, 'Failed to fetch BitTorrent health'));
     return await response.json();
+  },
+
+  async recycleBTClient(): Promise<void> {
+    const response = await fetch(`${API_BASE}/health/bt/recycle`, { method: 'POST' });
+    if (!response.ok) throw new Error(await readError(response, 'Failed to recycle BitTorrent client'));
   }
 };
 

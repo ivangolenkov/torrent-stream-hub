@@ -31,6 +31,7 @@ func (h *APIHandler) RegisterRoutes(r chi.Router) {
 	r.Post("/torrent/{hash}/action", h.TorrentAction)
 	r.Get("/torrent/{hash}/files", h.GetTorrentFiles)
 	r.Get("/health/bt", h.BTHealth)
+	r.Post("/health/bt/recycle", h.RecycleBTClient)
 	r.Get("/events", h.SSEEvents)
 }
 
@@ -100,6 +101,8 @@ func (h *APIHandler) TorrentAction(w http.ResponseWriter, r *http.Request) {
 		err = h.uc.Resume(hash)
 	case "delete":
 		err = h.uc.Delete(hash, req.DeleteFiles)
+	case "hard_refresh":
+		err = h.uc.HardRefresh(hash)
 	case "recheck":
 		// TODO: implement recheck
 	default:
@@ -143,6 +146,16 @@ func (h *APIHandler) GetTorrentFiles(w http.ResponseWriter, r *http.Request) {
 
 func (h *APIHandler) BTHealth(w http.ResponseWriter, r *http.Request) {
 	response.JSON(w, http.StatusOK, h.uc.BTHealth())
+}
+
+func (h *APIHandler) RecycleBTClient(w http.ResponseWriter, r *http.Request) {
+	logging.Infof("api bt client recycle requested")
+	if err := h.uc.RecycleBTClient(); err != nil {
+		logging.Warnf("api bt client recycle failed: %v", err)
+		response.Error(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	response.Status(w, http.StatusOK, "ok")
 }
 
 // SSEEvents handles Server-Sent Events connection for UI updates

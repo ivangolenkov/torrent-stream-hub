@@ -119,8 +119,14 @@ func TestApplyDefaultsSetsBTDefaults(t *testing.T) {
 	if cfg.BTSwarmPeakTTLSec != 1800 || !cfg.BTSwarmHardRefreshEnabled || cfg.BTSwarmHardRefreshCooldownSec != 900 {
 		t.Fatalf("unexpected hard refresh defaults: %+v", cfg)
 	}
-	if cfg.BTSwarmHardRefreshAfterSoftFails != 2 || cfg.BTSwarmHardRefreshMinTorrentAgeSec != 300 {
+	if cfg.BTSwarmHardRefreshAfterSoftFails != 1 || cfg.BTSwarmHardRefreshMinTorrentAgeSec != 60 {
 		t.Fatalf("unexpected hard refresh thresholds: %+v", cfg)
+	}
+	if cfg.BTSwarmDegradationEpisodeTTLSec != 900 || cfg.BTSwarmRecoveryGraceSec != 180 {
+		t.Fatalf("unexpected episode defaults: %+v", cfg)
+	}
+	if !cfg.BTClientRecycleEnabled || cfg.BTClientRecycleCooldownSec != 900 || cfg.BTClientRecycleAfterHardFails != 1 || cfg.BTClientRecycleMinTorrents != 1 || cfg.BTClientRecycleMaxPerHour != 2 {
+		t.Fatalf("unexpected client recycle defaults: %+v", cfg)
 	}
 }
 

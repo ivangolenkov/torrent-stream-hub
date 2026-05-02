@@ -176,9 +176,9 @@ func TestDecideHardRefreshBlockedReason(t *testing.T) {
 		want string
 	}{
 		{name: "cooldown", snap: hardRefreshGateSnapshot{State: models.StateDownloading, AddedAt: now.Add(-time.Hour), LastHardRefreshAt: now.Add(-time.Minute), SoftRefreshCount: 10, Now: now}, want: "cooldown"},
-		{name: "young", snap: hardRefreshGateSnapshot{State: models.StateDownloading, AddedAt: now.Add(-time.Minute), SoftRefreshCount: 10, Now: now}, want: "torrent too young"},
+		{name: "young", snap: hardRefreshGateSnapshot{State: models.StateDownloading, AddedAt: now.Add(-30 * time.Second), SoftRefreshCount: 10, Now: now}, want: "torrent too young"},
 		{name: "active stream", snap: hardRefreshGateSnapshot{State: models.StateDownloading, AddedAt: now.Add(-time.Hour), SoftRefreshCount: 10, ActiveStreams: 1, Now: now}, want: "active stream"},
-		{name: "soft fails", snap: hardRefreshGateSnapshot{State: models.StateDownloading, AddedAt: now.Add(-time.Hour), SoftRefreshCount: 1, Now: now}, want: "waiting for soft refresh attempts"},
+		{name: "soft fails", snap: hardRefreshGateSnapshot{State: models.StateDownloading, AddedAt: now.Add(-time.Hour), SoftRefreshCount: 0, Now: now}, want: "waiting for soft refresh attempts"},
 		{name: "allowed", snap: hardRefreshGateSnapshot{State: models.StateDownloading, AddedAt: now.Add(-time.Hour), SoftRefreshCount: 10, Now: now}, want: ""},
 	}
 

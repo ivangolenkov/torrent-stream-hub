@@ -103,3 +103,5 @@ require (
 	modernc.org/token v1.0.1 // indirect
 	zombiezen.com/go/sqlite v0.13.1 // indirect
 )
+
+replace github.com/anacrolix/torrent => ./pkg/anacrolix-torrent

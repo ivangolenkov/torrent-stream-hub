@@ -13,6 +13,7 @@ FROM golang:1.25-alpine AS go-builder
 WORKDIR /app
 
 COPY go.mod go.sum ./
+COPY pkg/ ./pkg/
 RUN go mod download
 
 COPY cmd/ ./cmd/

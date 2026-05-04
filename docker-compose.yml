@@ -38,7 +38,7 @@ services:
       HUB_BT_DISABLE_PEX: "false"
       HUB_BT_DISABLE_UPNP: "false"
       HUB_BT_DISABLE_TCP: "false"
-#      HUB_BT_DISABLE_UTP: "false"
+      HUB_BT_DISABLE_UTP: "true"
       HUB_BT_DISABLE_IPV6: "false"
       HUB_BT_SWARM_WATCHDOG_ENABLED: "true"
       HUB_BT_SWARM_CHECK_INTERVAL_SEC: "60"

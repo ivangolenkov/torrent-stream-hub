@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 	"torrent-stream-hub/internal/logging"
+	"torrent-stream-hub/internal/models"
 
 	"github.com/anacrolix/torrent"
 )
@@ -238,8 +239,20 @@ func (sm *StreamManager) setSequentialMode(hash string, fileIndex int, enable bo
 	} else {
 		logging.Infof("sequential mode disabled hash=%s file_index=%d", hash, fileIndex)
 		// Disable sequential/egoistic mode. Return to rarest-first/normal.
-		for _, f := range files {
-			f.SetPriority(torrent.PiecePriorityNormal)
+		sm.engine.mu.RLock()
+		state := mt.state
+		sm.engine.mu.RUnlock()
+
+		if state == models.StatePaused || state == models.StateError || state == models.StateMissingFiles || state == models.StateDiskFull {
+			logging.Debugf("torrent is in inactive state %s, skipping restore to normal priority hash=%s", state, hash)
+			for _, f := range files {
+				f.SetPriority(torrent.PiecePriorityNone)
+			}
+			mt.t.CancelPieces(0, mt.t.NumPieces())
+		} else {
+			for _, f := range files {
+				f.SetPriority(torrent.PiecePriorityNormal)
+			}
 		}
 	}
 

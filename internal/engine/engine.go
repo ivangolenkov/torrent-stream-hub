@@ -756,6 +756,7 @@ func (e *Engine) Pause(hash string) error {
 		for _, f := range mt.t.Files() {
 			f.SetPriority(torrent.PiecePriorityNone)
 		}
+		mt.t.CancelPieces(0, mt.t.NumPieces())
 	} else {
 		logging.Debugf("pause requested before metadata is ready hash=%s", hash)
 	}

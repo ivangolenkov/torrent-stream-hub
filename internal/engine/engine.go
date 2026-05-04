@@ -768,6 +768,7 @@ func (e *Engine) Pause(hash string) error {
 			f.SetPriority(torrent.PiecePriorityNone)
 		}
 		mt.t.CancelPieces(0, mt.t.NumPieces())
+		mt.t.DisallowDataUpload()
 	} else {
 		logging.Debugf("pause requested before metadata is ready hash=%s", hash)
 	}
@@ -788,6 +789,9 @@ func (e *Engine) Resume(hash string) error {
 
 	mt.downloadAllStarted = false
 	mt.metadataWaitLogged = false
+	if mt.t != nil {
+		mt.t.AllowDataUpload()
+	}
 	e.setStateLocked(hash, mt, models.StateQueued, models.ErrNone, "resume requested") // put to queue, let resource monitor handle it
 	e.manageResourcesLocked()
 	return nil

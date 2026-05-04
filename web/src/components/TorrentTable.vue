@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue';
+import { computed, ref, onMounted, onUnmounted, nextTick } from 'vue';
 import { useTorrentStore } from '../stores/torrentStore';
-import { PlayIcon, PauseIcon, TrashIcon } from '@heroicons/vue/24/solid';
+import { PlayIcon, PauseIcon, TrashIcon, EllipsisVerticalIcon } from '@heroicons/vue/24/solid';
 import { FolderMinusIcon } from '@heroicons/vue/24/outline';
 import type { Torrent } from '../types';
 import ConfirmDialog from './ConfirmDialog.vue';
@@ -9,6 +9,59 @@ import ConfirmDialog from './ConfirmDialog.vue';
 const store = useTorrentStore();
 const pendingDelete = ref<{ torrent: Torrent; deleteFiles: boolean } | null>(null);
 const deleting = ref(false);
+const activeMenu = ref<string | null>(null);
+const activeTorrent = computed(() => store.torrents.find(t => t.hash === activeMenu.value));
+const menuRef = ref<HTMLElement | null>(null);
+const buttonRef = ref<HTMLElement | null>(null);
+const menuStyle = ref({ top: '0px', left: '0px' });
+
+const handleClickOutside = (event: MouseEvent) => {
+  if (activeMenu.value && menuRef.value && buttonRef.value) {
+    const isClickInsideMenu = menuRef.value.contains(event.target as Node);
+    const isClickInsideButton = buttonRef.value.contains(event.target as Node);
+    if (!isClickInsideMenu && !isClickInsideButton) {
+      activeMenu.value = null;
+    }
+  }
+};
+
+const toggleMenu = async (hash: string, event: MouseEvent) => {
+  event.stopPropagation();
+  if (activeMenu.value === hash) {
+    activeMenu.value = null;
+  } else {
+    activeMenu.value = hash;
+    await nextTick();
+    const button = event.currentTarget as HTMLElement;
+    buttonRef.value = button;
+    const rect = button.getBoundingClientRect();
+    
+    // Check if there is enough space below, otherwise show above
+    const spaceBelow = window.innerHeight - rect.bottom;
+    const menuHeight = 160; // approx height of the menu
+    
+    if (spaceBelow < menuHeight && rect.top > menuHeight) {
+      menuStyle.value = {
+        top: `${rect.top - menuHeight}px`,
+        left: `${rect.right - 224}px` // 224px = w-56
+      };
+    } else {
+      menuStyle.value = {
+        top: `${rect.bottom}px`,
+        left: `${rect.right - 224}px` // 224px = w-56
+      };
+    }
+  }
+};
+
+
+onMounted(() => {
+  document.addEventListener('click', handleClickOutside);
+});
+
+onUnmounted(() => {
+  document.removeEventListener('click', handleClickOutside);
+});
 
 const formatSize = (bytes: number) => {
   if (!bytes) return '0 B';
@@ -28,16 +81,16 @@ const formatSpeed = (bytesPerSec: number) => {
 
 const getStateColor = (state: string) => {
   const map: Record<string, string> = {
-    'Streaming': 'bg-purple-100 text-purple-800',
-    'Downloading': 'bg-blue-100 text-blue-800',
-    'Seeding': 'bg-green-100 text-green-800',
-    'Queued': 'bg-gray-100 text-gray-800',
-    'Paused': 'bg-yellow-100 text-yellow-800',
-    'Error': 'bg-red-100 text-red-800',
-    'DiskFull': 'bg-orange-100 text-orange-800',
-    'MissingFiles': 'bg-red-100 text-red-800'
+    'Streaming': 'bg-purple-100 text-purple-800 border-purple-200',
+    'Downloading': 'bg-blue-100 text-blue-800 border-blue-200',
+    'Seeding': 'bg-green-100 text-green-800 border-green-200',
+    'Queued': 'bg-gray-100 text-gray-800 border-gray-200',
+    'Paused': 'bg-yellow-100 text-yellow-800 border-yellow-200',
+    'Error': 'bg-red-100 text-red-800 border-red-200',
+    'DiskFull': 'bg-orange-100 text-orange-800 border-orange-200',
+    'MissingFiles': 'bg-red-100 text-red-800 border-red-200'
   };
-  return map[state] || 'bg-gray-100 text-gray-800';
+  return map[state] || 'bg-gray-100 text-gray-800 border-gray-200';
 };
 
 const getPeerSummary = (torrent: Torrent) => torrent.peer_summary || {
@@ -94,7 +147,7 @@ const confirmDelete = async () => {
 </script>
 
 <template>
-  <div class="overflow-x-auto">
+  <div class="overflow-x-auto min-h-[300px]">
     <table class="min-w-full divide-y divide-gray-200">
       <thead class="bg-gray-50">
         <tr>
@@ -145,7 +198,7 @@ const confirmDelete = async () => {
             <div class="text-xs text-gray-500 mt-1">{{ t.progress.toFixed(1) }}%</div>
           </td>
           <td class="px-6 py-4 whitespace-nowrap">
-            <span :class="['px-2 inline-flex text-xs leading-5 font-semibold rounded-full', getStateColor(t.state)]">
+            <span :class="['px-2.5 py-0.5 inline-flex text-xs leading-5 font-semibold rounded-full border', getStateColor(t.state)]">
               {{ t.state }}
             </span>
             <div v-if="t.error" class="text-xs text-red-500 mt-1 truncate max-w-[150px]" :title="t.error">
@@ -154,10 +207,10 @@ const confirmDelete = async () => {
           </td>
           <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
             <div v-if="['Downloading', 'Streaming'].includes(t.state)">
-              <span class="text-green-600">↓ {{ formatSpeed(t.download_speed) }}</span>
+              <span class="text-green-600 font-medium">↓ {{ formatSpeed(t.download_speed) }}</span>
             </div>
             <div v-if="['Downloading', 'Streaming', 'Seeding'].includes(t.state) && t.upload_speed > 0">
-              <span class="text-blue-600">↑ {{ formatSpeed(t.upload_speed) }}</span>
+              <span class="text-blue-600 font-medium">↑ {{ formatSpeed(t.upload_speed) }}</span>
             </div>
             <div v-else-if="!['Downloading', 'Streaming'].includes(t.state)">
               -
@@ -169,53 +222,61 @@ const confirmDelete = async () => {
             </div>
             <div class="text-xs text-gray-500">
               seeds {{ getPeerSummary(t).seeds }}
-              <span v-if="getPeerSummary(t).pending || getPeerSummary(t).half_open">
-                - pending {{ getPeerSummary(t).pending }} - half-open {{ getPeerSummary(t).half_open }}
-              </span>
             </div>
             <div v-if="!getPeerSummary(t).metadata_ready" class="text-xs text-amber-600">
               metadata pending
             </div>
           </td>
-          <td class="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
-            <div class="flex items-center justify-end space-x-3">
-              <button 
-                v-if="['Paused', 'Error', 'DiskFull'].includes(t.state)"
-                @click.stop="store.performAction(t.hash, 'resume')"
-                class="text-green-600 hover:text-green-900 p-1 rounded-full hover:bg-green-50"
-                title="Resume"
-              >
-                <PlayIcon class="w-5 h-5" />
-              </button>
-              <button 
-                v-else
-                @click.stop="store.performAction(t.hash, 'pause')"
-                class="text-yellow-600 hover:text-yellow-900 p-1 rounded-full hover:bg-yellow-50"
-                title="Pause"
-              >
-                <PauseIcon class="w-5 h-5" />
-              </button>
-              
-              <button 
-                @click.stop="openDeleteDialog(t, false)"
-                class="text-red-500 hover:text-red-800 p-1 rounded-full hover:bg-red-50"
-                title="Remove torrent only"
-              >
-                <TrashIcon class="w-5 h-5" />
-              </button>
-
-              <button 
-                @click.stop="openDeleteDialog(t, true)"
-                class="text-red-600 hover:text-red-900 p-1 rounded-full hover:bg-red-50"
-                title="Remove torrent and files"
-              >
-                <FolderMinusIcon class="w-5 h-5" />
-              </button>
-            </div>
+          <td class="px-6 py-4 whitespace-nowrap text-right text-sm font-medium relative">
+            <button 
+              @click="toggleMenu(t.hash, $event)"
+              class="text-gray-400 hover:text-gray-600 p-1 rounded-full hover:bg-gray-100"
+            >
+              <EllipsisVerticalIcon class="w-5 h-5" />
+            </button>
           </td>
         </tr>
       </tbody>
     </table>
+
+    <!-- Action Menu Dropdown -->
+    <Teleport to="body">
+      <div 
+        v-if="activeMenu && activeTorrent" 
+        ref="menuRef" 
+        :style="menuStyle"
+        class="fixed z-[100] w-56 rounded-md shadow-lg bg-white ring-1 ring-black ring-opacity-5"
+      >
+        <div class="py-1" role="menu">
+          <button 
+            v-if="['Paused', 'Error', 'DiskFull'].includes(activeTorrent.state)"
+            @click="store.performAction(activeTorrent.hash, 'resume'); activeMenu = null"
+            class="flex items-center w-full px-4 py-2 text-sm text-gray-700 hover:bg-gray-100"
+          >
+            <PlayIcon class="w-4 h-4 mr-2" /> Resume
+          </button>
+          <button 
+            v-else
+            @click="store.performAction(activeTorrent.hash, 'pause'); activeMenu = null"
+            class="flex items-center w-full px-4 py-2 text-sm text-gray-700 hover:bg-gray-100"
+          >
+            <PauseIcon class="w-4 h-4 mr-2" /> Pause
+          </button>
+          <button 
+            @click="openDeleteDialog(activeTorrent, false); activeMenu = null"
+            class="flex items-center w-full px-4 py-2 text-sm text-red-600 hover:bg-red-50"
+          >
+            <TrashIcon class="w-4 h-4 mr-2" /> Remove
+          </button>
+          <button 
+            @click="openDeleteDialog(activeTorrent, true); activeMenu = null"
+            class="flex items-center w-full px-4 py-2 text-sm text-red-600 hover:bg-red-50"
+          >
+            <FolderMinusIcon class="w-4 h-4 mr-2" /> Remove with files
+          </button>
+        </div>
+      </div>
+    </Teleport>
 
     <ConfirmDialog
       :is-open="Boolean(pendingDelete)"

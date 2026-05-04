@@ -31,28 +31,28 @@ const stats = computed(() => {
 
 <template>
   <div class="grid grid-cols-1 gap-5 sm:grid-cols-4">
-    <div class="bg-white overflow-hidden shadow rounded-lg border border-gray-200">
-      <div class="px-4 py-5 sm:p-6">
-        <dt class="text-sm font-medium text-gray-500 truncate">Total Downloads</dt>
-        <dd class="mt-1 text-3xl font-semibold text-gray-900">{{ stats.total }}</dd>
+    <div class="bg-white overflow-hidden shadow-sm rounded-xl border border-gray-100">
+      <div class="px-5 py-4">
+        <dt class="text-xs font-medium text-gray-500 uppercase tracking-wider">Total Torrents</dt>
+        <dd class="mt-1 text-2xl font-bold text-gray-900">{{ stats.total }}</dd>
       </div>
     </div>
-    <div class="bg-white overflow-hidden shadow rounded-lg border border-gray-200">
-      <div class="px-4 py-5 sm:p-6">
-        <dt class="text-sm font-medium text-gray-500 truncate">Active Torrents</dt>
-        <dd class="mt-1 text-3xl font-semibold text-blue-600">{{ stats.active }}</dd>
+    <div class="bg-white overflow-hidden shadow-sm rounded-xl border border-gray-100">
+      <div class="px-5 py-4">
+        <dt class="text-xs font-medium text-gray-500 uppercase tracking-wider">Active</dt>
+        <dd class="mt-1 text-2xl font-bold text-blue-600">{{ stats.active }}</dd>
       </div>
     </div>
-    <div class="bg-white overflow-hidden shadow rounded-lg border border-gray-200">
-      <div class="px-4 py-5 sm:p-6">
-        <dt class="text-sm font-medium text-gray-500 truncate">Global Download</dt>
-        <dd class="mt-1 text-3xl font-semibold text-green-600">{{ formatSpeed(stats.down) }}</dd>
+    <div class="bg-white overflow-hidden shadow-sm rounded-xl border border-gray-100">
+      <div class="px-5 py-4">
+        <dt class="text-xs font-medium text-gray-500 uppercase tracking-wider">Download</dt>
+        <dd class="mt-1 text-2xl font-bold text-green-600">{{ formatSpeed(stats.down) }}</dd>
       </div>
     </div>
-    <div class="bg-white overflow-hidden shadow rounded-lg border border-gray-200">
-      <div class="px-4 py-5 sm:p-6">
-        <dt class="text-sm font-medium text-gray-500 truncate">Global Upload</dt>
-        <dd class="mt-1 text-3xl font-semibold text-indigo-600">{{ formatSpeed(stats.up) }}</dd>
+    <div class="bg-white overflow-hidden shadow-sm rounded-xl border border-gray-100">
+      <div class="px-5 py-4">
+        <dt class="text-xs font-medium text-gray-500 uppercase tracking-wider">Upload</dt>
+        <dd class="mt-1 text-2xl font-bold text-indigo-600">{{ formatSpeed(stats.up) }}</dd>
       </div>
     </div>
   </div>

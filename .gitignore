@@ -30,3 +30,4 @@ hub.db-wal
 .vscode/
 *.swp
 *.suo
+/.playwright-mcp/

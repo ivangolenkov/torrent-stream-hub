@@ -30,6 +30,7 @@ func (h *APIHandler) RegisterRoutes(r chi.Router) {
 	r.Post("/torrent/add", h.AddTorrent)
 	r.Post("/torrent/{hash}/action", h.TorrentAction)
 	r.Get("/torrent/{hash}/files", h.GetTorrentFiles)
+	r.Get("/torrent/{hash}/pieces", h.GetTorrentPieces)
 	r.Get("/health/bt", h.BTHealth)
 	r.Post("/health/bt/recycle", h.RecycleBTClient)
 	r.Get("/events", h.SSEEvents)
@@ -142,6 +143,24 @@ func (h *APIHandler) GetTorrentFiles(w http.ResponseWriter, r *http.Request) {
 
 	logging.Debugf("api get torrent files hash=%s files=%d", hash, len(t.Files))
 	response.JSON(w, http.StatusOK, t.Files)
+}
+
+func (h *APIHandler) GetTorrentPieces(w http.ResponseWriter, r *http.Request) {
+	hash := chi.URLParam(r, "hash")
+	pieces, err := h.uc.GetTorrentPieces(hash)
+	if err != nil {
+		if errors.Is(err, usecase.ErrTorrentNotFound) {
+			response.Error(w, http.StatusNotFound, "Torrent not found")
+			return
+		}
+		logging.Warnf("api get torrent pieces failed hash=%s: %v", hash, err)
+		response.Error(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/plain")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte(pieces))
 }
 
 func (h *APIHandler) BTHealth(w http.ResponseWriter, r *http.Request) {

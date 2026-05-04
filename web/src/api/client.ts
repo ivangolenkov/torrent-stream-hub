@@ -48,6 +48,12 @@ export const apiClient = {
     return Array.isArray(data) ? data : [];
   },
 
+  async getPieces(hash: string): Promise<string> {
+    const response = await fetch(`${API_BASE}/torrent/${hash}/pieces`);
+    if (!response.ok) throw new Error(await readError(response, 'Failed to fetch pieces'));
+    return await response.text();
+  },
+
   async getBTHealth(): Promise<BTHealth> {
     const response = await fetch(`${API_BASE}/health/bt`);
     if (!response.ok) throw new Error(await readError(response, 'Failed to fetch BitTorrent health'));

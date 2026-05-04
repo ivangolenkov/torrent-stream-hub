@@ -20,6 +20,7 @@ export interface File {
   index: number;
   path: string;
   size: number;
+  offset: number;
   downloaded: number;
   priority: number;
   is_media: boolean;
@@ -50,6 +51,8 @@ export interface Torrent {
   state: TorrentState;
   error?: ErrorReason;
   files?: File[];
+  piece_length: number;
+  num_pieces: number;
   download_speed: number;
   upload_speed: number;
   peers: number;

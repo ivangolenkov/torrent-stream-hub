@@ -742,6 +742,17 @@ func (e *Engine) addTorrentWithSource(t *torrent.Torrent, sourceURI string) (*mo
 	return model, nil
 }
 
+// GetRawTorrent returns the underlying anacrolix torrent for raw piece data access.
+func (e *Engine) GetRawTorrent(hash string) *torrent.Torrent {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+
+	if mt, ok := e.managedTorrents[hash]; ok && mt.t != nil {
+		return mt.t
+	}
+	return nil
+}
+
 func (e *Engine) Pause(hash string) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -1087,11 +1098,14 @@ func (e *Engine) mapManagedTorrent(mt *ManagedTorrent) *models.Torrent {
 	}
 
 	if info != nil {
+		model.PieceLength = info.PieceLength
+		model.NumPieces = info.NumPieces()
 		for i, file := range t.Files() {
 			model.Files = append(model.Files, &models.File{
 				Index:      i,
 				Path:       file.DisplayPath(),
 				Size:       file.Length(),
+				Offset:     file.Offset(),
 				Downloaded: file.BytesCompleted(),
 				Priority:   models.FilePriority(file.Priority()),
 				IsMedia:    isMediaFile(file.DisplayPath()),

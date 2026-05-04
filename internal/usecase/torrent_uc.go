@@ -158,6 +158,45 @@ func (uc *TorrentUseCase) GetTorrent(hash string) (*models.Torrent, error) {
 	return engineT, nil
 }
 
+// GetTorrentPieces returns a string representing the status of all pieces in a torrent.
+// "2" = downloaded, "1" = partial/downloading, "0" = missing.
+// Returns an empty string if torrent or metadata is not available.
+func (uc *TorrentUseCase) GetTorrentPieces(hash string) (string, error) {
+	btTorrent := uc.engine.GetRawTorrent(hash)
+	if btTorrent == nil {
+		return "", TorrentNotFoundError{Hash: hash}
+	}
+
+	info := btTorrent.Info()
+	if info == nil {
+		return "", nil // metadata not ready
+	}
+
+	numPieces := info.NumPieces()
+	if numPieces <= 0 {
+		return "", nil
+	}
+
+	var sb strings.Builder
+	sb.Grow(numPieces)
+
+	runs := btTorrent.PieceStateRuns()
+	for _, run := range runs {
+		status := '0'
+		if run.Complete {
+			status = '2' // complete
+		} else if run.Partial || run.Hashing || run.Checking || run.Priority != 0 {
+			status = '1' // partial or downloading
+		}
+
+		for i := 0; i < run.Length; i++ {
+			sb.WriteRune(status)
+		}
+	}
+
+	return sb.String(), nil
+}
+
 func (uc *TorrentUseCase) UpdateMetadata(hash string, metadata TorrentMetadata) (*models.Torrent, error) {
 	t, err := uc.repo.GetTorrent(hash)
 	if err != nil {

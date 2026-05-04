@@ -7,6 +7,7 @@ export const useTorrentStore = defineStore('torrents', () => {
   const torrents = ref<Torrent[]>([]);
   const selectedHash = ref<string | null>(null);
   const files = ref<Record<string, File[]>>({});
+  const pieces = ref<Record<string, string>>({});
   
   let sseCleanup: (() => void) | null = null;
 
@@ -43,6 +44,14 @@ export const useTorrentStore = defineStore('torrents', () => {
     }
   };
 
+  const fetchPieces = async (hash: string) => {
+    try {
+      pieces.value[hash] = await apiClient.getPieces(hash);
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
   const closeInspector = () => {
     selectedHash.value = null;
   };
@@ -63,10 +72,12 @@ export const useTorrentStore = defineStore('torrents', () => {
     torrents,
     selectedHash,
     files,
+    pieces,
     initSSE,
     stopSSE,
     loadTorrents,
     selectTorrent,
+    fetchPieces,
     closeInspector,
     performAction,
   };

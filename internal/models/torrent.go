@@ -49,6 +49,9 @@ type Torrent struct {
 	State      TorrentState `json:"state"`
 	Error      ErrorReason  `json:"error,omitempty"`
 	Files      []*File      `json:"files,omitempty"`
+	// Piece info for UI progress
+	PieceLength int64 `json:"piece_length"`
+	NumPieces   int   `json:"num_pieces"`
 	// Runtime statistics
 	DownloadSpeed int64       `json:"download_speed"`
 	UploadSpeed   int64       `json:"upload_speed"`
@@ -203,6 +206,7 @@ type File struct {
 	Index      int          `json:"index"`
 	Path       string       `json:"path"`
 	Size       int64        `json:"size"`
+	Offset     int64        `json:"offset"`
 	Downloaded int64        `json:"downloaded"`
 	Priority   FilePriority `json:"priority"`
 	IsMedia    bool         `json:"is_media"` // Helper flag for UI (can be streamed)

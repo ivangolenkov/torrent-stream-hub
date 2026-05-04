@@ -3,7 +3,7 @@ import { onMounted, onUnmounted, ref } from 'vue';
 import { useTorrentStore } from '../stores/torrentStore';
 import DashboardStats from '../components/DashboardStats.vue';
 import TorrentTable from '../components/TorrentTable.vue';
-import TorrentInspector from '../components/TorrentInspector.vue';
+import BottomPanel from '../components/BottomPanel.vue';
 import AddTorrentModal from '../components/AddTorrentModal.vue';
 
 const store = useTorrentStore();
@@ -35,16 +35,14 @@ onUnmounted(() => {
     <DashboardStats />
 
     <!-- Main Grid -->
-    <div class="flex flex-col lg:flex-row gap-6 items-start">
+    <div class="flex flex-col lg:flex-row gap-6 items-start pb-20">
       <div class="flex-1 w-full bg-white shadow rounded-lg border border-gray-200 overflow-hidden">
         <TorrentTable />
       </div>
-
-      <!-- Inspector Sidebar (Right side on large screens) -->
-      <div v-if="store.selectedHash" class="w-full lg:w-96 flex-shrink-0 bg-white shadow rounded-lg border border-gray-200 overflow-hidden sticky top-20">
-        <TorrentInspector />
-      </div>
     </div>
+
+    <!-- Bottom Panel -->
+    <BottomPanel />
 
     <AddTorrentModal :is-open="isAddModalOpen" @close="isAddModalOpen = false" />
   </div>

@@ -15,6 +15,10 @@ const currentTorrent = computed(() => {
 
 const currentFiles = computed(() => {
   if (!store.selectedHash) return [];
+  // Use files from currentTorrent (updated via SSE) if available to get real-time progress
+  if (currentTorrent.value && currentTorrent.value.files && currentTorrent.value.files.length > 0) {
+    return currentTorrent.value.files;
+  }
   return store.files[store.selectedHash] || [];
 });
 

@@ -129,22 +129,6 @@ func (uc *TorrentUseCase) BTHealth() *models.BTHealth {
 	return uc.engine.BTHealth()
 }
 
-func (uc *TorrentUseCase) HardRefresh(hash string) error {
-	logging.Infof("usecase hard refresh hash=%s", hash)
-	if err := uc.engine.HardRefresh(hash, "manual api action"); err != nil {
-		if errors.Is(err, engine.ErrTorrentNotFound) {
-			return TorrentNotFoundError{Hash: hash}
-		}
-		return err
-	}
-	return nil
-}
-
-func (uc *TorrentUseCase) RecycleBTClient() error {
-	logging.Infof("usecase recycle bt client")
-	return uc.engine.RecycleClient("manual api action")
-}
-
 func (uc *TorrentUseCase) GetTorrent(hash string) (*models.Torrent, error) {
 	dbT, err := uc.repo.GetTorrent(hash)
 	if err != nil {
@@ -451,33 +435,30 @@ func (uc *TorrentUseCase) RestoreTorrents() error {
 
 func (uc *TorrentUseCase) restoreTorrentToEngine(t *models.Torrent) (*models.Torrent, error) {
 	var restoreErr error
-	if path := uc.engine.MetainfoPath(t.Hash); path != "" {
-		f, err := os.Open(path)
-		if err == nil {
-			logging.Debugf("restore uses persisted metainfo hash=%s", t.Hash)
-			restored, addErr := uc.engine.AddTorrentFile(f)
-			closeErr := f.Close()
-			if addErr == nil && closeErr == nil {
-				uc.engine.SetRestoreDiagnostics("metainfo_file", "")
-				return restored, nil
-			}
-			if addErr == nil {
-				addErr = closeErr
-			}
-			restoreErr = errors.Join(restoreErr, fmt.Errorf("metainfo_file: %w", addErr))
-			uc.engine.MarkInvalidMetainfo(t.Hash, addErr.Error())
-			logging.Warnf("restore metainfo failed hash=%s, trying fallback: %v", t.Hash, addErr)
+	path := filepath.Join(uc.engine.ConfigDir(), "metainfo", strings.ToLower(t.Hash)+".torrent")
+	f, err := os.Open(path)
+	if err == nil {
+		logging.Debugf("restore uses persisted metainfo hash=%s", t.Hash)
+		restored, addErr := uc.engine.AddTorrentFile(f)
+		closeErr := f.Close()
+		if addErr == nil && closeErr == nil {
+			return restored, nil
 		}
-		if err != nil && !errors.Is(err, os.ErrNotExist) {
-			logging.Warnf("restore failed to open persisted metainfo hash=%s: %v", t.Hash, err)
-			restoreErr = errors.Join(restoreErr, fmt.Errorf("open metainfo_file: %w", err))
+		if addErr == nil {
+			addErr = closeErr
 		}
+		restoreErr = errors.Join(restoreErr, fmt.Errorf("metainfo_file: %w", addErr))
+		logging.Warnf("restore metainfo failed hash=%s, trying fallback: %v", t.Hash, addErr)
 	}
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		logging.Warnf("restore failed to open persisted metainfo hash=%s: %v", t.Hash, err)
+		restoreErr = errors.Join(restoreErr, fmt.Errorf("open metainfo_file: %w", err))
+	}
+
 	if t.SourceURI != "" {
 		logging.Debugf("restore uses persisted source URI hash=%s", t.Hash)
 		restored, err := uc.engine.AddMagnet(t.SourceURI)
 		if err == nil {
-			uc.engine.SetRestoreDiagnostics("magnet", "")
 			return restored, nil
 		}
 		restoreErr = errors.Join(restoreErr, fmt.Errorf("magnet: %w", err))
@@ -487,11 +468,9 @@ func (uc *TorrentUseCase) restoreTorrentToEngine(t *models.Torrent) (*models.Tor
 	logging.Warnf("restore falling back to bare info hash hash=%s", t.Hash)
 	restored, err := uc.engine.AddInfoHash(t.Hash)
 	if err == nil {
-		uc.engine.SetRestoreDiagnostics("infohash", "")
 		return restored, nil
 	}
 	restoreErr = errors.Join(restoreErr, fmt.Errorf("infohash: %w", err))
-	uc.engine.SetRestoreDiagnostics("", restoreErr.Error())
 	return nil, restoreErr
 }
 

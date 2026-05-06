@@ -144,38 +144,6 @@ func TestRestoreTorrentsUsesPersistedSourceURI(t *testing.T) {
 	}
 }
 
-func TestRestoreTorrentsFallsBackFromInvalidMetainfoToSourceURI(t *testing.T) {
-	uc, repo, cleanup := setupTorrentUseCase(t)
-	defer cleanup()
-
-	source := "magnet:?xt=urn:btih:" + testInfoHash + "&tr=http%3A%2F%2Ftracker.example%2Fannounce"
-	if err := repo.SaveTorrent(&models.Torrent{Hash: testInfoHash, Name: testInfoHash, State: models.StateQueued, SourceURI: source}); err != nil {
-		t.Fatalf("failed to save torrent: %v", err)
-	}
-	metainfoPath := uc.engine.MetainfoPath(testInfoHash)
-	if err := os.MkdirAll(filepath.Dir(metainfoPath), 0o755); err != nil {
-		t.Fatalf("failed to create metainfo dir: %v", err)
-	}
-	if err := os.WriteFile(metainfoPath, []byte("not a torrent"), 0o600); err != nil {
-		t.Fatalf("failed to write invalid metainfo: %v", err)
-	}
-
-	if err := uc.RestoreTorrents(); err != nil {
-		t.Fatalf("restore should fall back to source URI: %v", err)
-	}
-	if _, err := os.Stat(metainfoPath + ".invalid"); err != nil {
-		t.Fatalf("expected invalid metainfo to be renamed, stat err=%v", err)
-	}
-
-	engineTorrents := uc.engine.GetAllTorrents()
-	if len(engineTorrents) != 1 {
-		t.Fatalf("expected fallback to restore engine torrent, got %d", len(engineTorrents))
-	}
-	if engineTorrents[0].SourceURI != source {
-		t.Fatalf("expected source URI to be preserved, got %q", engineTorrents[0].SourceURI)
-	}
-}
-
 func TestPauseMissingTorrentReturnsNotFound(t *testing.T) {
 	uc, _, cleanup := setupTorrentUseCase(t)
 	defer cleanup()

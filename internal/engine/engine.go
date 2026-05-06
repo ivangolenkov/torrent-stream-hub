@@ -722,6 +722,7 @@ func (e *Engine) Pause(hash string) error {
 		}
 		mt.t.CancelPieces(0, mt.t.NumPieces())
 		mt.t.DisallowDataUpload()
+		mt.t.DisallowDataDownload()
 	} else {
 		logging.Debugf("pause requested before metadata is ready hash=%s", hash)
 	}
@@ -746,6 +747,7 @@ func (e *Engine) Resume(hash string) error {
 
 	if mt.t != nil {
 		mt.t.AllowDataUpload()
+		mt.t.AllowDataDownload()
 	}
 
 	mt.mu.Lock()
@@ -1317,7 +1319,7 @@ func (e *Engine) checkSwarms() {
 		info := mt.t.Info()
 		complete := info != nil && mt.t.BytesCompleted() == info.TotalLength()
 
-		if !complete && mt.downloadSpeed == 0 {
+		if mt.state == models.StateDownloading && !complete && mt.downloadSpeed == 0 {
 			if mt.stallStartedAt.IsZero() {
 				mt.stallStartedAt = now
 			} else if now.Sub(mt.stallStartedAt) > time.Minute {

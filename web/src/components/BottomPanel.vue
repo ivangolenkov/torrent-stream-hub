@@ -2,6 +2,8 @@
 import { computed, ref, onMounted, onUnmounted, watch } from 'vue';
 import { useTorrentStore } from '../stores/torrentStore';
 import { PlayCircleIcon } from '@heroicons/vue/24/solid';
+import { ArrowDownTrayIcon } from '@heroicons/vue/24/outline';
+import { apiClient } from '../api/client';
 import VideoPlayer from './VideoPlayer.vue';
 import PieceProgressBar from './PieceProgressBar.vue';
 
@@ -47,6 +49,12 @@ const formatSize = (bytes: number) => {
 
 const playVideo = (hash: string, index: number, path: string) => {
   activeVideo.value = { hash, index, path };
+};
+
+const canDownloadFile = (file: { size: number; downloaded: number }) => file.size > 0 && file.downloaded >= file.size;
+
+const downloadFile = (hash: string, index: number) => {
+  window.location.href = apiClient.fileDownloadUrl(hash, index);
 };
 
 // Resizer logic
@@ -222,7 +230,7 @@ watch([() => store.selectedHash, activeTab], ([newHash, newTab]) => {
               <th scope="col" class="px-4 py-2 text-right font-semibold text-gray-500 w-32 bg-gray-50">Size</th>
               <th scope="col" class="px-4 py-2 text-right font-semibold text-gray-500 w-24 bg-gray-50">Progress</th>
               <th scope="col" class="px-4 py-2 text-left font-semibold text-gray-500 min-w-[200px] max-w-[400px] bg-gray-50">Pieces</th>
-              <th scope="col" class="px-4 py-2 text-center font-semibold text-gray-500 w-16 bg-gray-50">Play</th>
+              <th scope="col" class="px-4 py-2 text-center font-semibold text-gray-500 w-24 bg-gray-50">Actions</th>
             </tr>
           </thead>
           <tbody class="divide-y divide-gray-100">
@@ -244,6 +252,14 @@ watch([() => store.selectedHash, activeTab], ([newHash, newTab]) => {
                 />
               </td>
               <td class="px-4 py-2 whitespace-nowrap text-center">
+                <button
+                  v-if="canDownloadFile(file)"
+                  @click="downloadFile(currentTorrent.hash, file.index)"
+                  class="inline-flex items-center justify-center text-gray-600 hover:text-gray-900 mr-2"
+                  title="Download file"
+                >
+                  <ArrowDownTrayIcon class="h-5 w-5" aria-hidden="true" />
+                </button>
                 <button 
                   v-if="file.is_media || file.path.endsWith('.mp4') || file.path.endsWith('.mkv')"
                   @click="playVideo(currentTorrent.hash, file.index, file.path)"

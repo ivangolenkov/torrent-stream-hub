@@ -2,7 +2,8 @@
 import { computed, ref, onMounted, onUnmounted, nextTick } from 'vue';
 import { useTorrentStore } from '../stores/torrentStore';
 import { PlayIcon, PauseIcon, TrashIcon, EllipsisVerticalIcon } from '@heroicons/vue/24/solid';
-import { FolderMinusIcon } from '@heroicons/vue/24/outline';
+import { ArrowDownTrayIcon, FolderMinusIcon } from '@heroicons/vue/24/outline';
+import { apiClient } from '../api/client';
 import type { Torrent } from '../types';
 import ConfirmDialog from './ConfirmDialog.vue';
 
@@ -38,7 +39,7 @@ const toggleMenu = async (hash: string, event: MouseEvent) => {
     
     // Check if there is enough space below, otherwise show above
     const spaceBelow = window.innerHeight - rect.bottom;
-    const menuHeight = 160; // approx height of the menu
+    const menuHeight = 200; // approx height of the menu
     
     if (spaceBelow < menuHeight && rect.top > menuHeight) {
       menuStyle.value = {
@@ -111,6 +112,11 @@ const formatPeerTitle = (torrent: Torrent) => {
 };
 
 const torrentLabel = (torrent: Torrent) => torrent.name || torrent.title || torrent.hash;
+const canDownloadTorrent = (torrent: Torrent) => torrent.size > 0 && torrent.downloaded >= torrent.size;
+
+const downloadTorrent = (torrent: Torrent) => {
+  window.location.href = apiClient.torrentDownloadUrl(torrent.hash);
+};
 
 const deleteTitle = computed(() => {
   if (!pendingDelete.value) return '';
@@ -261,6 +267,13 @@ const confirmDelete = async () => {
             class="flex items-center w-full px-4 py-2 text-sm text-gray-700 hover:bg-gray-100"
           >
             <PauseIcon class="w-4 h-4 mr-2" /> Pause
+          </button>
+          <button 
+            v-if="canDownloadTorrent(activeTorrent)"
+            @click="downloadTorrent(activeTorrent); activeMenu = null"
+            class="flex items-center w-full px-4 py-2 text-sm text-gray-700 hover:bg-gray-100"
+          >
+            <ArrowDownTrayIcon class="w-4 h-4 mr-2" /> Download
           </button>
           <button 
             @click="openDeleteDialog(activeTorrent, false); activeMenu = null"

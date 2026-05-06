@@ -17,6 +17,7 @@ import (
 )
 
 var ErrTorrentNotFound = errors.New("torrent not found")
+var ErrDownloadNotReady = errors.New("download is not ready")
 
 type TorrentNotFoundError struct {
 	Hash string
@@ -40,6 +41,13 @@ type TorrentMetadata struct {
 	Data     string
 	Poster   string
 	Category string
+}
+
+type DownloadedDiskFile struct {
+	Index    int
+	Path     string
+	DiskPath string
+	Size     int64
 }
 
 func NewTorrentUseCase(e *engine.Engine, r *repository.TorrentRepo) *TorrentUseCase {
@@ -366,7 +374,7 @@ func safeDownloadPath(downloadDir, relPath string) (string, error) {
 	}
 	path := filepath.Clean(filepath.Join(downloadDir, relPath))
 	if path == downloadDir || !strings.HasPrefix(path, downloadDir+string(os.PathSeparator)) {
-		return "", fmt.Errorf("refusing to delete path outside download dir: %s", relPath)
+		return "", fmt.Errorf("refusing to access path outside download dir: %s", relPath)
 	}
 	return path, nil
 }
@@ -374,7 +382,7 @@ func safeDownloadPath(downloadDir, relPath string) (string, error) {
 func validateRelativeDownloadPath(relPath string) error {
 	clean := filepath.Clean(relPath)
 	if clean == "." || clean == ".." || filepath.IsAbs(clean) || strings.HasPrefix(clean, ".."+string(os.PathSeparator)) {
-		return fmt.Errorf("refusing to delete path outside download dir: %s", relPath)
+		return fmt.Errorf("refusing to access path outside download dir: %s", relPath)
 	}
 	return nil
 }
@@ -507,6 +515,92 @@ func (uc *TorrentUseCase) GetTorrentFile(hash string, index int) (*torrent.File,
 		return nil, err
 	}
 	return f, nil
+}
+
+func (uc *TorrentUseCase) GetDownloadedFile(hash string, index int) (*models.Torrent, DownloadedDiskFile, error) {
+	t, err := uc.GetTorrent(hash)
+	if err != nil {
+		return nil, DownloadedDiskFile{}, err
+	}
+	if t == nil {
+		return nil, DownloadedDiskFile{}, TorrentNotFoundError{Hash: hash}
+	}
+	if len(t.Files) == 0 {
+		return nil, DownloadedDiskFile{}, ErrDownloadNotReady
+	}
+
+	for _, file := range t.Files {
+		if file == nil || file.Index != index {
+			continue
+		}
+		diskFile, err := uc.resolveDownloadedFile(t, file)
+		if err != nil {
+			return nil, DownloadedDiskFile{}, err
+		}
+		return t, diskFile, nil
+	}
+
+	return nil, DownloadedDiskFile{}, fmt.Errorf("file index out of bounds")
+}
+
+func (uc *TorrentUseCase) GetDownloadedTorrentFiles(hash string) (*models.Torrent, []DownloadedDiskFile, error) {
+	t, err := uc.GetTorrent(hash)
+	if err != nil {
+		return nil, nil, err
+	}
+	if t == nil {
+		return nil, nil, TorrentNotFoundError{Hash: hash}
+	}
+	if len(t.Files) == 0 || t.Size <= 0 || t.Downloaded < t.Size {
+		return nil, nil, ErrDownloadNotReady
+	}
+
+	files := make([]DownloadedDiskFile, 0, len(t.Files))
+	for _, file := range t.Files {
+		if file == nil {
+			continue
+		}
+		diskFile, err := uc.resolveDownloadedFile(t, file)
+		if err != nil {
+			return nil, nil, err
+		}
+		files = append(files, diskFile)
+	}
+	if len(files) == 0 {
+		return nil, nil, ErrDownloadNotReady
+	}
+
+	return t, files, nil
+}
+
+func (uc *TorrentUseCase) resolveDownloadedFile(t *models.Torrent, file *models.File) (DownloadedDiskFile, error) {
+	if file == nil || file.Path == "" {
+		return DownloadedDiskFile{}, ErrDownloadNotReady
+	}
+	if file.Downloaded < file.Size {
+		return DownloadedDiskFile{}, ErrDownloadNotReady
+	}
+	if err := validateRelativeDownloadPath(file.Path); err != nil {
+		return DownloadedDiskFile{}, err
+	}
+
+	downloadDir := filepath.Clean(uc.engine.DownloadDir())
+	for _, candidate := range torrentFilePathCandidates(downloadDir, t.Name, file.Path) {
+		stat, err := os.Stat(candidate)
+		if err != nil {
+			continue
+		}
+		if stat.Mode().IsRegular() && stat.Size() == file.Size {
+			return DownloadedDiskFile{
+				Index:    file.Index,
+				Path:     file.Path,
+				DiskPath: candidate,
+				Size:     file.Size,
+			}, nil
+		}
+	}
+
+	return DownloadedDiskFile{}, ErrDownloadNotReady
 }
 
 func applyMetadata(t *models.Torrent, metadata TorrentMetadata) {

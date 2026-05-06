@@ -28,7 +28,7 @@ func NewRouter(uc *usecase.TorrentUseCase, sw *usecase.SyncWorker, staticFS ...h
 		AllowedOrigins:   []string{"*"},
 		AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
 		AllowedHeaders:   []string{"*"},
-		ExposedHeaders:   []string{"Accept-Ranges", "Content-Length", "Content-Range", "Content-Type"},
+		ExposedHeaders:   []string{"Accept-Ranges", "Content-Disposition", "Content-Length", "Content-Range", "Content-Type"},
 		AllowCredentials: false,
 		MaxAge:           300,
 	}))

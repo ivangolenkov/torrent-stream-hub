@@ -63,6 +63,14 @@ export const apiClient = {
   async recycleBTClient(): Promise<void> {
     const response = await fetch(`${API_BASE}/health/bt/recycle`, { method: 'POST' });
     if (!response.ok) throw new Error(await readError(response, 'Failed to recycle BitTorrent client'));
+  },
+
+  torrentDownloadUrl(hash: string): string {
+    return `${API_BASE}/torrent/${encodeURIComponent(hash)}/download`;
+  },
+
+  fileDownloadUrl(hash: string, index: number): string {
+    return `${API_BASE}/torrent/${encodeURIComponent(hash)}/file/${index}/download`;
   }
 };
 

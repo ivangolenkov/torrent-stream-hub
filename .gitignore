@@ -31,3 +31,4 @@ hub.db-wal
 *.swp
 *.suo
 /.playwright-mcp/
+/.idea/

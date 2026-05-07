@@ -269,6 +269,44 @@ func (uc *TorrentUseCase) Resume(hash string) error {
 	return nil
 }
 
+func (uc *TorrentUseCase) SetFilePriority(hash string, fileIndex int, priority models.FilePriority) error {
+	logging.Infof("usecase set file priority hash=%s index=%d priority=%d", hash, fileIndex, priority)
+
+	// Try to update engine first
+	engineErr := uc.engine.SetFilePriority(hash, fileIndex, priority)
+	if engineErr != nil && !errors.Is(engineErr, engine.ErrTorrentNotFound) && engineErr.Error() != "metadata not ready" {
+		logging.Warnf("engine set file priority failed hash=%s: %v", hash, engineErr)
+		return engineErr
+	}
+
+	// Always save to repository
+	if err := uc.repo.UpdateFilePriority(hash, fileIndex, priority); err != nil {
+		logging.Warnf("failed to persist file priority hash=%s index=%d: %v", hash, fileIndex, err)
+		return err
+	}
+
+	return nil
+}
+
+func (uc *TorrentUseCase) SetTorrentFilesPriority(hash string, priority models.FilePriority) error {
+	logging.Infof("usecase set torrent files priority hash=%s priority=%d", hash, priority)
+
+	// Try to update engine first
+	engineErr := uc.engine.SetTorrentFilesPriority(hash, priority)
+	if engineErr != nil && !errors.Is(engineErr, engine.ErrTorrentNotFound) && engineErr.Error() != "metadata not ready" {
+		logging.Warnf("engine set torrent files priority failed hash=%s: %v", hash, engineErr)
+		return engineErr
+	}
+
+	// Always save to repository
+	if err := uc.repo.UpdateTorrentFilesPriority(hash, priority); err != nil {
+		logging.Warnf("failed to persist torrent files priority hash=%s: %v", hash, err)
+		return err
+	}
+
+	return nil
+}
+
 func (uc *TorrentUseCase) Delete(hash string, deleteFiles bool) error {
 	logging.Infof("usecase delete hash=%s delete_files=%t", hash, deleteFiles)
 	t, err := uc.repo.GetTorrent(hash)
@@ -425,6 +463,12 @@ func (uc *TorrentUseCase) RestoreTorrents() error {
 		restored, err := uc.restoreTorrentToEngine(t)
 		if err == nil {
 			mergePersistedMetadata(restored, t)
+			for _, file := range t.Files {
+				if file != nil {
+					// Pre-load priority to engine. We ignore the error as it might just mean "metadata not ready"
+					_ = uc.engine.SetFilePriority(restored.Hash, file.Index, file.Priority)
+				}
+			}
 			uc.engine.ScheduleRecheckIfProgressBehind(restored.Hash, t.Downloaded)
 			if err := uc.repo.SaveTorrent(restored); err != nil {
 				logging.Warnf("failed to save restored torrent hash=%s: %v", t.Hash, err)

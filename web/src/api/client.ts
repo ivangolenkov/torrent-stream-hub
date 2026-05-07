@@ -41,6 +41,24 @@ export const apiClient = {
     if (!response.ok) throw new Error(await readError(response, `Failed to perform action: ${action}`));
   },
 
+  async setTorrentPriority(hash: string, priority: number): Promise<void> {
+    const response = await fetch(`${API_BASE}/torrent/${hash}/priority`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ priority })
+    });
+    if (!response.ok) throw new Error(await readError(response, 'Failed to set torrent priority'));
+  },
+
+  async setFilePriority(hash: string, index: number, priority: number): Promise<void> {
+    const response = await fetch(`${API_BASE}/torrent/${hash}/file/${index}/priority`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ priority })
+    });
+    if (!response.ok) throw new Error(await readError(response, 'Failed to set file priority'));
+  },
+
   async getFiles(hash: string): Promise<File[]> {
     const response = await fetch(`${API_BASE}/torrent/${hash}/files`);
     if (!response.ok) throw new Error(await readError(response, 'Failed to fetch files'));

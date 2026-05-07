@@ -254,6 +254,7 @@ watch([() => store.selectedHash, activeTab], ([newHash, newTab]) => {
                   <th scope="col" class="px-4 py-2 text-right font-semibold text-gray-500 w-32 bg-gray-50">Size</th>
                   <th scope="col" class="px-4 py-2 text-right font-semibold text-gray-500 w-24 bg-gray-50">Progress</th>
                   <th scope="col" class="px-4 py-2 text-left font-semibold text-gray-500 min-w-[200px] max-w-[400px] bg-gray-50">Pieces</th>
+                  <th scope="col" class="px-4 py-2 text-center font-semibold text-gray-500 w-24 bg-gray-50">Priority</th>
                   <th scope="col" class="px-4 py-2 text-center font-semibold text-gray-500 w-24 bg-gray-50">Actions</th>
                 </tr>
               </thead>
@@ -274,6 +275,22 @@ watch([() => store.selectedHash, activeTab], ([newHash, newTab]) => {
                       :torrent="currentTorrent" 
                       :pieces-string="piecesString" 
                     />
+                  </td>
+                  <td class="px-4 py-2 whitespace-nowrap text-center">
+                    <select 
+                      :value="file.priority" 
+                      @change="store.setFilePriority(currentTorrent.hash, file.index, Number(($event.target as HTMLSelectElement).value))"
+                      class="block w-auto py-0.5 pl-2.5 pr-6 text-xs font-medium rounded-full border cursor-pointer transition-colors outline-none focus:ring-2 focus:ring-offset-1 focus:ring-blue-500"
+                      :class="{
+                        'bg-red-50 text-red-700 border-red-200 hover:bg-red-100': file.priority === -1,
+                        'bg-green-50 text-green-700 border-green-200 hover:bg-green-100': file.priority === 1,
+                        'bg-gray-50 text-gray-700 border-gray-200 hover:bg-gray-100': file.priority === 0
+                      }"
+                    >
+                      <option :value="-1">Skip</option>
+                      <option :value="0">Normal</option>
+                      <option :value="1">High</option>
+                    </select>
                   </td>
                   <td class="px-4 py-2 whitespace-nowrap text-center">
                     <button
@@ -327,7 +344,23 @@ watch([() => store.selectedHash, activeTab], ([newHash, newTab]) => {
                 
                 <!-- Info row: Size and Progress -->
                 <div class="flex justify-between items-center text-xs text-gray-500">
-                  <span>{{ formatSize(file.size) }}</span>
+                  <div class="flex items-center gap-2">
+                    <span>{{ formatSize(file.size) }}</span>
+                    <select 
+                      :value="file.priority" 
+                      @change="store.setFilePriority(currentTorrent.hash, file.index, Number(($event.target as HTMLSelectElement).value))"
+                      class="block w-auto py-0.5 pl-2 pr-5 text-xs font-medium rounded-full border cursor-pointer transition-colors outline-none focus:ring-2 focus:ring-offset-1 focus:ring-blue-500"
+                      :class="{
+                        'bg-red-50 text-red-700 border-red-200 hover:bg-red-100': file.priority === -1,
+                        'bg-green-50 text-green-700 border-green-200 hover:bg-green-100': file.priority === 1,
+                        'bg-gray-50 text-gray-700 border-gray-200 hover:bg-gray-100': file.priority === 0
+                      }"
+                    >
+                      <option :value="-1">Skip</option>
+                      <option :value="0">Normal</option>
+                      <option :value="1">High</option>
+                    </select>
+                  </div>
                   <span class="font-mono font-medium text-gray-700">{{ ((file.downloaded / file.size) * 100).toFixed(1) }}%</span>
                 </div>
 

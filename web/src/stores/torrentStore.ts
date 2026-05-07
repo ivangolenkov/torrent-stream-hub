@@ -68,6 +68,30 @@ export const useTorrentStore = defineStore('torrents', () => {
     await loadTorrents();
   };
 
+  const setTorrentPriority = async (hash: string, priority: number) => {
+    await apiClient.setTorrentPriority(hash, priority);
+    // Reload files for this torrent if it's currently selected to update UI
+    if (files.value[hash]) {
+      try {
+        files.value[hash] = await apiClient.getFiles(hash);
+      } catch (e) {
+        console.error(e);
+      }
+    }
+    await loadTorrents();
+  };
+
+  const setFilePriority = async (hash: string, index: number, priority: number) => {
+    await apiClient.setFilePriority(hash, index, priority);
+    // Update local file state
+    if (files.value[hash]) {
+      const file = files.value[hash].find(f => f.index === index);
+      if (file) {
+        file.priority = priority;
+      }
+    }
+  };
+
   return {
     torrents,
     selectedHash,
@@ -80,5 +104,7 @@ export const useTorrentStore = defineStore('torrents', () => {
     fetchPieces,
     closeInspector,
     performAction,
+    setTorrentPriority,
+    setFilePriority,
   };
 });

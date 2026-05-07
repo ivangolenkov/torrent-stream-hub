@@ -139,3 +139,13 @@ func (r *TorrentRepo) DeleteTorrent(hash string) error {
 	_, err := r.db.DB().Exec(`DELETE FROM torrents WHERE hash = ?`, hash)
 	return err
 }
+
+func (r *TorrentRepo) UpdateFilePriority(hash string, fileIndex int, priority models.FilePriority) error {
+	_, err := r.db.DB().Exec(`UPDATE files SET priority = ? WHERE hash = ? AND "index" = ?`, priority, hash, fileIndex)
+	return err
+}
+
+func (r *TorrentRepo) UpdateTorrentFilesPriority(hash string, priority models.FilePriority) error {
+	_, err := r.db.DB().Exec(`UPDATE files SET priority = ? WHERE hash = ?`, priority, hash)
+	return err
+}

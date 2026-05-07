@@ -250,9 +250,7 @@ func (sm *StreamManager) setSequentialMode(hash string, fileIndex int, enable bo
 			}
 			mt.t.CancelPieces(0, mt.t.NumPieces())
 		} else {
-			for _, f := range files {
-				f.SetPriority(torrent.PiecePriorityNormal)
-			}
+			sm.engine.applyFilePrioritiesAndDownload(mt)
 		}
 	}
 

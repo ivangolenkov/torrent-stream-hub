@@ -182,6 +182,7 @@ const confirmDelete = async () => {
             <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
             <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Speed</th>
             <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Peers</th>
+            <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Priority</th>
             <th scope="col" class="relative px-6 py-3"><span class="sr-only">Actions</span></th>
           </tr>
         </thead>
@@ -247,6 +248,17 @@ const confirmDelete = async () => {
                 metadata pending
               </div>
             </td>
+            <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500" @click.stop>
+              <select 
+                @change="store.setTorrentPriority(t.hash, Number(($event.target as HTMLSelectElement).value)); ($event.target as HTMLSelectElement).value = ''"
+                class="block w-auto py-1 pl-3 pr-7 text-xs font-medium bg-gray-50 text-gray-700 border-gray-200 hover:bg-gray-100 rounded-full border cursor-pointer transition-colors outline-none focus:ring-2 focus:ring-offset-1 focus:ring-blue-500"
+              >
+                <option value="" disabled selected>Set...</option>
+                <option :value="-1" class="text-red-500">Skip All</option>
+                <option :value="0" class="text-gray-700">Normal</option>
+                <option :value="1" class="text-green-600">High All</option>
+              </select>
+            </td>
             <td class="px-6 py-4 whitespace-nowrap text-right text-sm font-medium relative">
               <button 
                 @click="toggleMenu(t.hash, $event)"
@@ -291,12 +303,22 @@ const confirmDelete = async () => {
             </button>
           </div>
           
-          <!-- Status tag + Size -->
+          <!-- Status tag + Size + Priority -->
           <div class="flex items-center gap-2 mb-2 text-xs">
             <span :class="['px-2 py-0.5 inline-flex leading-4 font-semibold rounded border', getStateColor(t.state)]">
               {{ t.state }}
             </span>
             <span class="text-gray-500">{{ formatSize(t.size) }}</span>
+            <select 
+              @click.stop
+              @change="store.setTorrentPriority(t.hash, Number(($event.target as HTMLSelectElement).value)); ($event.target as HTMLSelectElement).value = ''"
+              class="block w-auto py-0.5 pl-2 pr-6 ml-auto text-[10px] font-medium bg-gray-50 text-gray-700 border-gray-200 hover:bg-gray-100 rounded-full border cursor-pointer transition-colors outline-none focus:ring-2 focus:ring-offset-1 focus:ring-blue-500"
+            >
+              <option value="" disabled selected>Priority</option>
+              <option :value="-1" class="text-red-500">Skip All</option>
+              <option :value="0" class="text-gray-700">Normal</option>
+              <option :value="1" class="text-green-600">High All</option>
+            </select>
           </div>
 
           <!-- Progress bar -->

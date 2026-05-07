@@ -5,9 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 
 	"torrent-stream-hub/internal/delivery/http/response"
 	"torrent-stream-hub/internal/logging"
+	"torrent-stream-hub/internal/models"
 	"torrent-stream-hub/internal/usecase"
 
 	"github.com/go-chi/chi/v5"
@@ -29,6 +31,8 @@ func (h *APIHandler) RegisterRoutes(r chi.Router) {
 	r.Get("/torrents", h.GetAllTorrents)
 	r.Post("/torrent/add", h.AddTorrent)
 	r.Post("/torrent/{hash}/action", h.TorrentAction)
+	r.Put("/torrent/{hash}/priority", h.SetTorrentPriority)
+	r.Put("/torrent/{hash}/file/{index}/priority", h.SetFilePriority)
 	r.Get("/torrent/{hash}/files", h.GetTorrentFiles)
 	r.Get("/torrent/{hash}/download", h.DownloadTorrent)
 	r.Head("/torrent/{hash}/download", h.DownloadTorrent)
@@ -124,6 +128,58 @@ func (h *APIHandler) TorrentAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	response.Status(w, http.StatusOK, "ok")
+}
+
+type PriorityReq struct {
+	Priority int `json:"priority"`
+}
+
+func (h *APIHandler) SetTorrentPriority(w http.ResponseWriter, r *http.Request) {
+	hash := chi.URLParam(r, "hash")
+	var req PriorityReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		response.Error(w, http.StatusBadRequest, "Invalid JSON")
+		return
+	}
+
+	err := h.uc.SetTorrentFilesPriority(hash, models.FilePriority(req.Priority))
+	if err != nil {
+		if errors.Is(err, usecase.ErrTorrentNotFound) {
+			response.Error(w, http.StatusNotFound, "Torrent not found")
+			return
+		}
+		response.Error(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	response.Status(w, http.StatusOK, "ok")
+}
+
+func (h *APIHandler) SetFilePriority(w http.ResponseWriter, r *http.Request) {
+	hash := chi.URLParam(r, "hash")
+	indexStr := chi.URLParam(r, "index")
+
+	index, err := strconv.Atoi(indexStr)
+	if err != nil {
+		response.Error(w, http.StatusBadRequest, "Invalid file index")
+		return
+	}
+
+	var req PriorityReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		response.Error(w, http.StatusBadRequest, "Invalid JSON")
+		return
+	}
+
+	err = h.uc.SetFilePriority(hash, index, models.FilePriority(req.Priority))
+	if err != nil {
+		if errors.Is(err, usecase.ErrTorrentNotFound) {
+			response.Error(w, http.StatusNotFound, "Torrent not found")
+			return
+		}
+		response.Error(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	response.Status(w, http.StatusOK, "ok")
 }
 

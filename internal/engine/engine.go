@@ -93,6 +93,7 @@ type ManagedTorrent struct {
 	peakUpdatedAt             time.Time
 	boostUntil                time.Time
 	normalMaxEstablishedConns int
+	filePriorities            map[int]models.FilePriority
 }
 
 func New(cfg *config.Config) (*Engine, error) {
@@ -543,7 +544,7 @@ func (e *Engine) ScheduleRecheckIfProgressBehind(hash string, persistedDownloade
 			return
 		}
 		if mt.state == models.StateDownloading && t.Info() != nil {
-			t.DownloadAll()
+			e.applyFilePrioritiesAndDownload(mt)
 			mt.downloadAllStarted = true
 			logging.Debugf("download all restarted after data recheck hash=%s files=%d", hash, len(t.Files()))
 		}
@@ -678,6 +679,7 @@ func (e *Engine) addTorrentWithSource(t *torrent.Torrent, sourceURI string) (*mo
 		addedAt:                   time.Now(),
 		lastHealthyAt:             time.Now(),
 		normalMaxEstablishedConns: e.cfg.BTEstablishedConns,
+		filePriorities:            make(map[int]models.FilePriority),
 	}
 	if t.Info() != nil {
 		mi := t.Metainfo()
@@ -695,6 +697,37 @@ func (e *Engine) addTorrentWithSource(t *torrent.Torrent, sourceURI string) (*mo
 	e.watchMetadata(hash, t)
 
 	return model, nil
+}
+
+func mapToPiecePriority(prio models.FilePriority) torrent.PiecePriority {
+	switch prio {
+	case models.PriorityNone:
+		return torrent.PiecePriorityNone
+	case models.PriorityHigh:
+		return torrent.PiecePriorityHigh
+	default:
+		return torrent.PiecePriorityNormal
+	}
+}
+
+func (e *Engine) applyFilePrioritiesAndDownload(mt *ManagedTorrent) {
+	if mt.t.Info() == nil {
+		return
+	}
+
+	mt.mu.Lock()
+	defer mt.mu.Unlock()
+
+	for i := range mt.t.Files() {
+		if _, ok := mt.filePriorities[i]; !ok {
+			mt.filePriorities[i] = models.PriorityNormal
+		}
+	}
+
+	for i, f := range mt.t.Files() {
+		prio := mt.filePriorities[i]
+		f.SetPriority(mapToPiecePriority(prio))
+	}
 }
 
 // GetRawTorrent returns the underlying anacrolix torrent for raw piece data access.
@@ -776,6 +809,74 @@ func (e *Engine) Delete(hash string) error {
 
 	logging.Infof("deleting torrent hash=%s", hash)
 	mt.t.Drop()
+	return nil
+}
+
+func (e *Engine) SetFilePriority(hash string, fileIndex int, priority models.FilePriority) error {
+	e.mu.RLock()
+	mt, ok := e.managedTorrents[hash]
+	e.mu.RUnlock()
+
+	if !ok {
+		logging.Debugf("set file priority requested for unmanaged torrent hash=%s", hash)
+		return TorrentNotFoundError{Hash: hash}
+	}
+
+	mt.mu.Lock()
+	mt.filePriorities[fileIndex] = priority
+	mt.mu.Unlock()
+
+	if mt.t.Info() != nil {
+		mt.mu.Lock()
+		files := mt.t.Files()
+		if fileIndex >= 0 && fileIndex < len(files) {
+			files[fileIndex].SetPriority(mapToPiecePriority(priority))
+			logging.Debugf("set file priority hash=%s index=%d priority=%d", hash, fileIndex, priority)
+		} else {
+			mt.mu.Unlock()
+			return fmt.Errorf("file index out of bounds")
+		}
+		mt.mu.Unlock()
+	}
+
+	return nil
+}
+
+func (e *Engine) SetTorrentFilesPriority(hash string, priority models.FilePriority) error {
+	e.mu.RLock()
+	mt, ok := e.managedTorrents[hash]
+	e.mu.RUnlock()
+
+	if !ok {
+		logging.Debugf("set torrent files priority requested for unmanaged torrent hash=%s", hash)
+		return TorrentNotFoundError{Hash: hash}
+	}
+
+	mt.mu.Lock()
+	if mt.t.Info() != nil {
+		for i := range mt.t.Files() {
+			mt.filePriorities[i] = priority
+		}
+	} else {
+		// If metadata is not ready, we can't easily iterate file indexes.
+		// However, we can clear the map, and when metadata is ready we'll handle it?
+		// Better yet, maybe we shouldn't allow SetTorrentFilesPriority before metadata is ready.
+		// But in RestoreTorrents, we just use SetFilePriority.
+	}
+	mt.mu.Unlock()
+
+	if mt.t.Info() != nil {
+		mt.mu.Lock()
+		for i, f := range mt.t.Files() {
+			mt.filePriorities[i] = priority
+			f.SetPriority(mapToPiecePriority(priority))
+		}
+		mt.mu.Unlock()
+		logging.Debugf("set torrent files priority hash=%s priority=%d", hash, priority)
+	} else {
+		return fmt.Errorf("metadata not ready")
+	}
+
 	return nil
 }
 
@@ -1040,17 +1141,24 @@ func (e *Engine) mapManagedTorrent(mt *ManagedTorrent) *models.Torrent {
 	if info != nil {
 		model.PieceLength = info.PieceLength
 		model.NumPieces = info.NumPieces()
+
+		mt.mu.Lock()
 		for i, file := range t.Files() {
+			prio := models.PriorityNormal
+			if p, ok := mt.filePriorities[i]; ok {
+				prio = p
+			}
 			model.Files = append(model.Files, &models.File{
 				Index:      i,
 				Path:       file.DisplayPath(),
 				Size:       file.Length(),
 				Offset:     file.Offset(),
 				Downloaded: file.BytesCompleted(),
-				Priority:   models.FilePriority(file.Priority()),
+				Priority:   prio,
 				IsMedia:    isMediaFile(file.DisplayPath()),
 			})
 		}
+		mt.mu.Unlock()
 	}
 
 	return model
@@ -1123,7 +1231,7 @@ func (e *Engine) watchMetadata(hash string, t *torrent.Torrent) {
 		mt.mu.Unlock()
 
 		if state == models.StateDownloading && !downloadAllStarted {
-			t.DownloadAll()
+			e.applyFilePrioritiesAndDownload(mt)
 			logging.Debugf("download all started after metadata hash=%s files=%d", hash, fileCount)
 		}
 	}()
@@ -1387,7 +1495,6 @@ func (e *Engine) checkSwarms() {
 
 	for _, mt := range torrents {
 		stats := mt.t.Stats()
-		var refreshHash string
 		var refreshTorrent *torrent.Torrent
 		var refreshReason string
 		refreshDownloadAll := false
@@ -1410,7 +1517,6 @@ func (e *Engine) checkSwarms() {
 				if mt.lastSwarmRefreshAt.IsZero() || now.Sub(mt.lastSwarmRefreshAt) > e.swarmRefreshCooldown() {
 					mt.lastSwarmRefreshAt = now
 					mt.lastSwarmRefreshReason = lowSpeedReason
-					refreshHash = mt.t.InfoHash().HexString()
 					refreshTorrent = mt.t
 					refreshReason = lowSpeedReason
 					refreshDownloadAll = info != nil
@@ -1422,7 +1528,7 @@ func (e *Engine) checkSwarms() {
 		mt.mu.Unlock()
 
 		if refreshTorrent != nil {
-			go e.refreshPeerDiscovery(refreshHash, refreshTorrent, refreshReason, refreshDownloadAll)
+			go e.refreshPeerDiscovery(mt, refreshReason, refreshDownloadAll)
 		}
 	}
 }
@@ -1489,17 +1595,19 @@ func (e *Engine) refreshDHTAsync(hash string, t *torrent.Torrent, reason string)
 	}
 }
 
-func (e *Engine) refreshPeerDiscovery(hash string, t *torrent.Torrent, reason string, downloadAll bool) {
-	if t == nil {
+func (e *Engine) refreshPeerDiscovery(mt *ManagedTorrent, reason string, downloadAll bool) {
+	if mt == nil || mt.t == nil {
 		return
 	}
+	t := mt.t
+	hash := t.InfoHash().HexString()
 	t.SetMaxEstablishedConns(e.cfg.BTSwarmBoostConns)
 	t.AllowDataDownload()
 	if !e.cfg.BTNoUpload {
 		t.AllowDataUpload()
 	}
 	if downloadAll {
-		t.DownloadAll()
+		e.applyFilePrioritiesAndDownload(mt)
 	}
 	trackers := e.retrackers()
 	if len(trackers) > 0 && !strings.EqualFold(strings.TrimSpace(e.cfg.BTRetrackersMode), "off") {
@@ -1556,7 +1664,7 @@ func (e *Engine) manageResources() {
 				if !mt.downloadAllStarted {
 					mt.downloadAllStarted = true
 					mt.mu.Unlock()
-					mt.t.DownloadAll()
+					e.applyFilePrioritiesAndDownload(mt)
 					logging.Debugf("download all started hash=%s files=%d", mt.t.InfoHash().HexString(), len(mt.t.Files()))
 					mt.mu.Lock()
 				}
@@ -1584,7 +1692,7 @@ func (e *Engine) manageResources() {
 				if mt.t.Info() != nil {
 					mt.downloadAllStarted = true
 					mt.mu.Unlock()
-					mt.t.DownloadAll()
+					e.applyFilePrioritiesAndDownload(mt)
 					logging.Debugf("download all started hash=%s files=%d", mt.t.InfoHash().HexString(), len(mt.t.Files()))
 					mt.mu.Lock()
 				} else if !mt.metadataWaitLogged {

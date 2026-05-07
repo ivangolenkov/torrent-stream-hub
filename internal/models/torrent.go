@@ -142,6 +142,8 @@ type BTTorrentHealth struct {
 	DownloadSpeed         int64        `json:"download_speed"`
 	UploadSpeed           int64        `json:"upload_speed"`
 	Degraded              bool         `json:"degraded"`
+	PeakDownloadSpeed     int64        `json:"peak_download_speed"`
+	PeakUpdatedAt         string       `json:"peak_updated_at,omitempty"`
 	LastRefreshAt         string       `json:"last_refresh_at,omitempty"`
 	LastRefreshReason     string       `json:"last_refresh_reason,omitempty"`
 	LastPeerRefreshAt     string       `json:"last_peer_refresh_at,omitempty"`

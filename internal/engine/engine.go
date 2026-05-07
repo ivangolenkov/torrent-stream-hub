@@ -89,6 +89,8 @@ type ManagedTorrent struct {
 	lastPeerRefreshReason     string
 	lastHealthyAt             time.Time
 	stallStartedAt            time.Time
+	peakDownloadSpeed         int64
+	peakUpdatedAt             time.Time
 	boostUntil                time.Time
 	normalMaxEstablishedConns int
 }
@@ -863,6 +865,8 @@ func (e *Engine) BTHealth() *models.BTHealth {
 		mtBoostUntil := mt.boostUntil
 		mtDownloadSpeed := mt.downloadSpeed
 		mtUploadSpeed := mt.uploadSpeed
+		mtPeakDownloadSpeed := mt.peakDownloadSpeed
+		mtPeakUpdatedAt := mt.peakUpdatedAt
 		mtState := mt.state
 		mt.mu.Unlock()
 
@@ -898,6 +902,8 @@ func (e *Engine) BTHealth() *models.BTHealth {
 			TrackerStatus:         mtTrackerStatus,
 			TrackerError:          mtTrackerError,
 			Degraded:              mtDegraded,
+			PeakDownloadSpeed:     mtPeakDownloadSpeed,
+			PeakUpdatedAt:         formatBTHealthTime(mtPeakUpdatedAt),
 			LastRefreshAt:         formatBTHealthTime(mtLastSwarmRefreshAt),
 			LastRefreshReason:     mtLastSwarmRefreshReason,
 			LastPeerRefreshAt:     formatBTHealthTime(mtLastPeerRefreshAt),
@@ -1163,6 +1169,75 @@ func (e *Engine) updateSpeedsLocked(mt *ManagedTorrent, stats torrent.TorrentSta
 	mt.lastWrittenBytes = writtenBytes
 }
 
+func (e *Engine) updatePeakDownloadSpeedLocked(mt *ManagedTorrent, now time.Time) {
+	peakTTL := time.Duration(e.cfg.BTSwarmPeakTTLSec) * time.Second
+	if peakTTL <= 0 {
+		peakTTL = 30 * time.Minute
+	}
+
+	if !mt.peakUpdatedAt.IsZero() && now.Sub(mt.peakUpdatedAt) > peakTTL {
+		mt.peakDownloadSpeed = 0
+		mt.peakUpdatedAt = time.Time{}
+	}
+
+	if mt.state != models.StateDownloading || mt.downloadSpeed <= 0 {
+		return
+	}
+
+	if mt.downloadSpeed > mt.peakDownloadSpeed {
+		mt.peakDownloadSpeed = mt.downloadSpeed
+		mt.peakUpdatedAt = now
+	}
+}
+
+func (e *Engine) lowSpeedRefreshReasonLocked(mt *ManagedTorrent, metadataReady bool, complete bool, now time.Time) string {
+	if mt.state != models.StateDownloading || !metadataReady || complete {
+		return ""
+	}
+
+	stalledSpeed := int64(e.cfg.BTSwarmStalledSpeedBps)
+	if stalledSpeed <= 0 {
+		stalledSpeed = 32768
+	}
+	if mt.downloadSpeed < stalledSpeed {
+		return "stalled_speed_below_threshold"
+	}
+
+	peakTTL := time.Duration(e.cfg.BTSwarmPeakTTLSec) * time.Second
+	if peakTTL <= 0 {
+		peakTTL = 30 * time.Minute
+	}
+	if mt.peakDownloadSpeed <= 0 || mt.peakUpdatedAt.IsZero() || now.Sub(mt.peakUpdatedAt) > peakTTL {
+		return ""
+	}
+
+	ratio := e.cfg.BTSwarmSpeedDropRatio
+	if ratio <= 0 || ratio >= 1 {
+		ratio = 0.35
+	}
+	if mt.downloadSpeed < int64(float64(mt.peakDownloadSpeed)*ratio) {
+		return "speed_dropped_below_peak"
+	}
+
+	return ""
+}
+
+func (e *Engine) swarmStalledDuration() time.Duration {
+	d := time.Duration(e.cfg.BTSwarmStalledDurationSec) * time.Second
+	if d <= 0 {
+		return 3 * time.Minute
+	}
+	return d
+}
+
+func (e *Engine) swarmRefreshCooldown() time.Duration {
+	d := time.Duration(e.cfg.BTSwarmRefreshCooldownSec) * time.Second
+	if d <= 0 {
+		return 3 * time.Minute
+	}
+	return d
+}
+
 func (e *Engine) logPeerSummaryLocked(hash string, summary models.PeerSummary, mt *ManagedTorrent) {
 	if !logging.IsDebugEnabled() {
 		return
@@ -1312,29 +1387,43 @@ func (e *Engine) checkSwarms() {
 
 	for _, mt := range torrents {
 		stats := mt.t.Stats()
+		var refreshHash string
+		var refreshTorrent *torrent.Torrent
+		var refreshReason string
+		refreshDownloadAll := false
 
 		mt.mu.Lock()
 		e.updateSpeedsLocked(mt, stats)
 
 		info := mt.t.Info()
 		complete := info != nil && mt.t.BytesCompleted() == info.TotalLength()
+		if !complete {
+			e.updatePeakDownloadSpeedLocked(mt, now)
+		}
+		lowSpeedReason := e.lowSpeedRefreshReasonLocked(mt, info != nil, complete, now)
 
-		if mt.state == models.StateDownloading && !complete && mt.downloadSpeed == 0 {
+		if lowSpeedReason != "" {
 			if mt.stallStartedAt.IsZero() {
 				mt.stallStartedAt = now
-			} else if now.Sub(mt.stallStartedAt) > time.Minute {
+			} else if now.Sub(mt.stallStartedAt) > e.swarmStalledDuration() {
 				// Soft refresh (re-announce to DHT/Trackers)
-				if mt.lastSwarmRefreshAt.IsZero() || now.Sub(mt.lastSwarmRefreshAt) > 3*time.Minute {
+				if mt.lastSwarmRefreshAt.IsZero() || now.Sub(mt.lastSwarmRefreshAt) > e.swarmRefreshCooldown() {
 					mt.lastSwarmRefreshAt = now
-					mt.lastSwarmRefreshReason = "stalled"
-					hash := mt.t.InfoHash().HexString()
-					go e.refreshPeerDiscovery(hash, mt.t, "stalled", info != nil)
+					mt.lastSwarmRefreshReason = lowSpeedReason
+					refreshHash = mt.t.InfoHash().HexString()
+					refreshTorrent = mt.t
+					refreshReason = lowSpeedReason
+					refreshDownloadAll = info != nil
 				}
 			}
 		} else {
 			mt.stallStartedAt = time.Time{}
 		}
 		mt.mu.Unlock()
+
+		if refreshTorrent != nil {
+			go e.refreshPeerDiscovery(refreshHash, refreshTorrent, refreshReason, refreshDownloadAll)
+		}
 	}
 }
 

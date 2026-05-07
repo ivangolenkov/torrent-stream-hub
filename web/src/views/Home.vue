@@ -37,7 +37,7 @@ onUnmounted(() => {
     <!-- Main Grid -->
     <div class="flex flex-col lg:flex-row gap-6 items-start pb-20">
       <div class="flex-1 w-full bg-white shadow rounded-lg border border-gray-200 overflow-hidden">
-        <TorrentTable />
+        <TorrentTable @add-torrent="isAddModalOpen = true" />
       </div>
     </div>
 

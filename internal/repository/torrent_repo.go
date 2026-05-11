@@ -100,6 +100,7 @@ func (r *TorrentRepo) GetAllTorrents() ([]*models.Torrent, error) {
 	defer rows.Close()
 
 	torrents := make([]*models.Torrent, 0)
+	byHash := make(map[string]*models.Torrent)
 	for rows.Next() {
 		t := &models.Torrent{}
 		var stateStr, errorStr string
@@ -108,10 +109,14 @@ func (r *TorrentRepo) GetAllTorrents() ([]*models.Torrent, error) {
 		}
 		t.State = models.TorrentState(stateStr)
 		t.Error = models.ErrorReason(errorStr)
-		if err := r.loadFiles(t); err != nil {
-			return nil, err
-		}
+		byHash[t.Hash] = t
 		torrents = append(torrents, t)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if err := r.loadFilesForTorrents(byHash); err != nil {
+		return nil, err
 	}
 
 	return torrents, nil
@@ -131,6 +136,35 @@ func (r *TorrentRepo) loadFiles(t *models.Torrent) error {
 			return err
 		}
 		t.Files = append(t.Files, f)
+	}
+	return rows.Err()
+}
+
+func (r *TorrentRepo) loadFilesForTorrents(torrents map[string]*models.Torrent) error {
+	if len(torrents) == 0 {
+		return nil
+	}
+
+	rows, err := r.db.DB().Query(`
+		SELECT f.hash, f."index", f.path, f.size, f.downloaded, f.priority, f.is_media
+		FROM files f
+		JOIN torrents t ON t.hash = f.hash
+		ORDER BY f.hash ASC, f."index" ASC
+	`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var hash string
+		f := &models.File{}
+		if err := rows.Scan(&hash, &f.Index, &f.Path, &f.Size, &f.Downloaded, &f.Priority, &f.IsMedia); err != nil {
+			return err
+		}
+		if t := torrents[hash]; t != nil {
+			t.Files = append(t.Files, f)
+		}
 	}
 	return rows.Err()
 }

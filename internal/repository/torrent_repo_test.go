@@ -206,3 +206,88 @@ func TestGetNonExistentTorrent(t *testing.T) {
 		t.Fatalf("Expected nil result, got %+v", fetched)
 	}
 }
+
+func TestGetAllTorrentsBatchLoadsFilesAndPreservesOrder(t *testing.T) {
+	db, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	repo := NewTorrentRepo(db)
+	torrents := []*models.Torrent{
+		{
+			Hash:       "oldhash",
+			Name:       "Old Torrent",
+			Size:       300,
+			Downloaded: 120,
+			State:      models.StateDownloading,
+			Files: []*models.File{
+				{Index: 2, Path: "z.mkv", Size: 100, Downloaded: 20, Priority: models.PriorityHigh, IsMedia: true},
+				{Index: 0, Path: "a.txt", Size: 200, Downloaded: 100, Priority: models.PriorityNormal, IsMedia: false},
+			},
+		},
+		{
+			Hash:       "emptyhash",
+			Name:       "No Files Torrent",
+			Size:       0,
+			Downloaded: 0,
+			State:      models.StatePaused,
+		},
+		{
+			Hash:       "newhash",
+			Name:       "New Torrent",
+			Size:       100,
+			Downloaded: 100,
+			State:      models.StateSeeding,
+			Files: []*models.File{
+				{Index: 1, Path: "b.mp4", Size: 100, Downloaded: 100, Priority: models.PriorityNone, IsMedia: true},
+			},
+		},
+	}
+
+	for _, torrent := range torrents {
+		if err := repo.SaveTorrent(torrent); err != nil {
+			t.Fatalf("failed to save torrent %s: %v", torrent.Hash, err)
+		}
+	}
+
+	createdAt := map[string]string{
+		"oldhash":   "2026-01-01 00:00:00",
+		"newhash":   "2026-01-02 00:00:00",
+		"emptyhash": "2026-01-03 00:00:00",
+	}
+	for hash, value := range createdAt {
+		if _, err := db.DB().Exec(`UPDATE torrents SET created_at = ? WHERE hash = ?`, value, hash); err != nil {
+			t.Fatalf("failed to set created_at for %s: %v", hash, err)
+		}
+	}
+
+	all, err := repo.GetAllTorrents()
+	if err != nil {
+		t.Fatalf("GetAllTorrents failed: %v", err)
+	}
+	if len(all) != 3 {
+		t.Fatalf("expected 3 torrents, got %d", len(all))
+	}
+
+	wantOrder := []string{"emptyhash", "newhash", "oldhash"}
+	for i, wantHash := range wantOrder {
+		if all[i].Hash != wantHash {
+			t.Fatalf("unexpected torrent order at %d: want %s, got %s", i, wantHash, all[i].Hash)
+		}
+	}
+
+	if len(all[0].Files) != 0 {
+		t.Fatalf("expected empty torrent to have no files, got %+v", all[0].Files)
+	}
+	if len(all[1].Files) != 1 || all[1].Files[0].Path != "b.mp4" || all[1].Files[0].Priority != models.PriorityNone || !all[1].Files[0].IsMedia {
+		t.Fatalf("new torrent files mismatch: %+v", all[1].Files)
+	}
+	if len(all[2].Files) != 2 {
+		t.Fatalf("expected old torrent to have 2 files, got %+v", all[2].Files)
+	}
+	if all[2].Files[0].Index != 0 || all[2].Files[0].Path != "a.txt" || all[2].Files[0].Downloaded != 100 {
+		t.Fatalf("old torrent first file mismatch: %+v", all[2].Files[0])
+	}
+	if all[2].Files[1].Index != 2 || all[2].Files[1].Path != "z.mkv" || all[2].Files[1].Priority != models.PriorityHigh || !all[2].Files[1].IsMedia {
+		t.Fatalf("old torrent second file mismatch: %+v", all[2].Files[1])
+	}
+}

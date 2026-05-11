@@ -2,7 +2,9 @@ package engine
 
 import (
 	"os"
+	"path/filepath"
 	"testing"
+	"time"
 
 	"torrent-stream-hub/internal/config"
 	"torrent-stream-hub/internal/models"
@@ -70,4 +72,55 @@ func TestEngineLifecycle(t *testing.T) {
 		t.Fatalf("Delete failed: %v", err)
 	}
 	t.Log("Verifying deleted")
+}
+
+func TestEngineCloseStopsBackgroundMonitors(t *testing.T) {
+	tests := []struct {
+		name            string
+		swarmWatchdogOn bool
+	}{
+		{name: "with swarm watchdog", swarmWatchdogOn: true},
+		{name: "without swarm watchdog", swarmWatchdogOn: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			cfg := &config.Config{
+				DownloadDir:                dir,
+				DBPath:                     filepath.Join(dir, "hub.db"),
+				TorrentPort:                0,
+				BTDisableDHT:               true,
+				BTDisablePEX:               true,
+				BTDisableUPNP:              true,
+				BTDisableUTP:               true,
+				BTNoUpload:                 true,
+				BTSwarmWatchdogEnabled:     tt.swarmWatchdogOn,
+				BTSwarmWatchdogConfigured:  true,
+				BTSwarmCheckIntervalSec:    1,
+				BTSwarmRefreshCooldownSec:  1,
+				BTSwarmStalledDurationSec:  1,
+				BTClientRecycleMaxPerHour:  1,
+				BTClientRecycleMinTorrents: 1,
+			}
+
+			e, err := New(cfg)
+			if err != nil {
+				t.Fatalf("failed to create engine: %v", err)
+			}
+
+			done := make(chan struct{})
+			go func() {
+				e.Close()
+				e.Close()
+				close(done)
+			}()
+
+			select {
+			case <-done:
+			case <-time.After(2 * time.Second):
+				t.Fatalf("engine close timed out")
+			}
+		})
+	}
 }

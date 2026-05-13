@@ -36,6 +36,8 @@ type TorrentUseCase struct {
 	repo   *repository.TorrentRepo
 }
 
+type StreamOptions = engine.StreamOptions
+
 type TorrentMetadata struct {
 	Title    string
 	Data     string
@@ -534,9 +536,9 @@ func (uc *TorrentUseCase) Warmup(ctx context.Context, hash string, index int, si
 	return uc.engine.Warmup(ctx, hash, index, size)
 }
 
-func (uc *TorrentUseCase) AddStream(ctx context.Context, hash string, index int) error {
-	logging.Debugf("usecase add stream hash=%s file_index=%d", hash, index)
-	if err := uc.engine.StreamManager().AddStream(ctx, hash, index); err != nil {
+func (uc *TorrentUseCase) AddStream(ctx context.Context, hash string, index int, opts StreamOptions) error {
+	logging.Debugf("usecase add stream hash=%s file_index=%d range_start=%d has_range=%t head=%t skip=%t", hash, index, opts.RangeStart, opts.HasRange, opts.IsHEAD, opts.SkipQoS)
+	if err := uc.engine.StreamManager().AddStream(ctx, hash, index, opts); err != nil {
 		if errors.Is(err, engine.ErrTorrentNotFound) {
 			logging.Debugf("stream requested for missing torrent hash=%s file_index=%d", hash, index)
 			return TorrentNotFoundError{Hash: hash}

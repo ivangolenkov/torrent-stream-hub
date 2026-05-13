@@ -21,7 +21,7 @@ func (e *Engine) GetCacheStatus(hash string, fileIndex int, currentOffset int64)
 		logging.Debugf("cache status requested for missing torrent hash=%s file_index=%d offset=%d", hash, fileIndex, currentOffset)
 		return nil, TorrentNotFoundError{Hash: hash}
 	}
-	if mt.t.Info() == nil {
+	if mt.t == nil || mt.t.Info() == nil {
 		logging.Debugf("cache status requested before metadata hash=%s file_index=%d offset=%d", hash, fileIndex, currentOffset)
 		return nil, fmt.Errorf("torrent metadata is not available yet")
 	}
@@ -33,35 +33,37 @@ func (e *Engine) GetCacheStatus(hash string, fileIndex int, currentOffset int64)
 	}
 
 	file := files[fileIndex]
+	if currentOffset < 0 {
+		currentOffset = 0
+	}
+	if currentOffset >= file.Length() {
+		return &CacheStatus{
+			VirtualCacheBytes: 0,
+			IsFullyDownloaded: file.BytesCompleted() == file.Length(),
+		}, nil
+	}
 
 	// Optimization: if fully downloaded, skip bitfield calculations
 	if file.BytesCompleted() == file.Length() {
+		remaining := file.Length() - currentOffset
+		if remaining < 0 {
+			remaining = 0
+		}
 		logging.Debugf("cache status fully downloaded hash=%s file_index=%d offset=%d", hash, fileIndex, currentOffset)
 		return &CacheStatus{
-			VirtualCacheBytes: file.Length() - currentOffset,
+			VirtualCacheBytes: remaining,
 			IsFullyDownloaded: true,
 		}, nil
 	}
 
 	// Calculate which piece corresponds to the currentOffset
 	pieceLength := mt.t.Info().PieceLength
-	startPiece := (file.Offset() + currentOffset) / int64(pieceLength)
-	endPiece := (file.Offset() + file.Length() - 1) / int64(pieceLength)
-
-	var continuousPieces int64 = 0
-
-	// Check bitfield forwards to count continuous pieces
-	for p := startPiece; p <= endPiece; p++ {
-		piece := mt.t.Piece(int(p))
-		if piece.State().Complete {
-			continuousPieces++
-		} else {
-			break
-		}
+	if pieceLength <= 0 {
+		return &CacheStatus{VirtualCacheBytes: 0, IsFullyDownloaded: false}, nil
 	}
-
-	// Convert continuous pieces to bytes
-	virtualCacheBytes := continuousPieces * int64(pieceLength)
+	virtualCacheBytes := continuousCompleteBytesFromOffset(file.Offset(), file.Length(), currentOffset, pieceLength, func(pieceIndex int64) bool {
+		return mt.t.Piece(int(pieceIndex)).State().Complete
+	})
 
 	// Apply HUB_STREAM_CACHE_SIZE Fake Limit
 	if virtualCacheBytes > e.cfg.StreamCacheSize {
@@ -84,4 +86,36 @@ func (e *Engine) GetCacheStatus(hash string, fileIndex int, currentOffset int64)
 		VirtualCacheBytes: virtualCacheBytes,
 		IsFullyDownloaded: false,
 	}, nil
+}
+
+func continuousCompleteBytesFromOffset(fileStart, fileLength, currentOffset, pieceLength int64, complete func(pieceIndex int64) bool) int64 {
+	if fileLength <= 0 || pieceLength <= 0 || complete == nil {
+		return 0
+	}
+	if currentOffset < 0 {
+		currentOffset = 0
+	}
+	if currentOffset >= fileLength {
+		return 0
+	}
+
+	fileEnd := fileStart + fileLength
+	startAbs := fileStart + currentOffset
+	startPiece := startAbs / pieceLength
+	endPiece := (fileEnd - 1) / pieceLength
+
+	var bytes int64
+	for p := startPiece; p <= endPiece; p++ {
+		if !complete(p) {
+			break
+		}
+		pieceStart := p * pieceLength
+		pieceEnd := pieceStart + pieceLength
+		segmentStart := maxInt64(startAbs, maxInt64(pieceStart, fileStart))
+		segmentEnd := minInt64(pieceEnd, fileEnd)
+		if segmentEnd > segmentStart {
+			bytes += segmentEnd - segmentStart
+		}
+	}
+	return bytes
 }

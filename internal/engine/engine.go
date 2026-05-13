@@ -234,7 +234,6 @@ func (e *Engine) Warmup(ctx context.Context, hash string, index int, size int64)
 	if err != nil {
 		return 0, 0, err
 	}
-	file.SetPriority(torrent.PiecePriorityHigh)
 
 	reader := file.NewReader()
 	reader.SetContext(ctx)
@@ -247,6 +246,19 @@ func (e *Engine) Warmup(ctx context.Context, hash string, index int, size int64)
 	if size > file.Length() {
 		size = file.Length()
 	}
+	reader.SetReadahead(size)
+
+	cleanup, err := e.streamManager.AddPreload(ctx, hash, index, StreamOptions{
+		RangeStart:  0,
+		HasRange:    true,
+		WindowBytes: size,
+	})
+	if err != nil {
+		logging.Debugf("warmup QoS overlay unavailable hash=%s file_index=%d: %v", hash, index, err)
+	} else {
+		defer cleanup()
+	}
+
 	limited := io.LimitReader(reader, size)
 	read, err := io.Copy(io.Discard, limited)
 	if err != nil && !errors.Is(err, context.Canceled) {

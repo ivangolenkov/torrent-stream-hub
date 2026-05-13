@@ -568,13 +568,26 @@ func (h *TorrServerHandler) serveStream(w http.ResponseWriter, r *http.Request, 
 		response.Error(w, status, message)
 		return
 	}
+	parsedRange := parseStreamRange(r.Header.Get("Range"), file.Length())
+	streamOpts := usecase.StreamOptions{
+		RangeStart: parsedRange.Start,
+		RangeEnd:   parsedRange.End,
+		HasRange:   parsedRange.HasRange,
+		IsHEAD:     r.Method == http.MethodHead,
+		SkipQoS:    !parsedRange.Valid,
+	}
+	logging.Debugf("stream range parsed hash=%s file_index=%d start=%d end=%d has_range=%t valid=%t multi=%t head=%t", hash, index, parsedRange.Start, parsedRange.End, parsedRange.HasRange, parsedRange.Valid, parsedRange.Multi, streamOpts.IsHEAD)
 
 	// 2. Register stream reference counting with context
-	// This will enable Sequential mode and automatically remove when request ends
+	// This applies range-aware QoS and automatically removes it when request ends.
 	ctx := r.Context()
-	err = h.uc.AddStream(ctx, hash, index)
-	if err != nil {
-		logging.Warnf("stream QoS registration failed hash=%s file_index=%d: %v", hash, index, err)
+	if !streamOpts.IsHEAD && !streamOpts.SkipQoS {
+		err = h.uc.AddStream(ctx, hash, index, streamOpts)
+		if err != nil {
+			logging.Warnf("stream QoS registration failed hash=%s file_index=%d: %v", hash, index, err)
+		}
+	} else {
+		logging.Debugf("stream QoS registration skipped hash=%s file_index=%d head=%t skip=%t", hash, index, streamOpts.IsHEAD, streamOpts.SkipQoS)
 	}
 
 	// 3. Set headers for streaming
@@ -593,6 +606,7 @@ func (h *TorrServerHandler) serveStream(w http.ResponseWriter, r *http.Request, 
 	reader := file.NewReader()
 	reader.SetContext(ctx)
 	defer reader.Close()
+	reader.SetReadahead(defaultPreloadSize)
 	reader.SetResponsive() // Better performance for streaming
 
 	logging.Debugf("stream serving hash=%s file_index=%d file=%q size=%d", hash, index, file.DisplayPath(), file.Length())

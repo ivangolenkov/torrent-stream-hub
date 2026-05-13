@@ -22,7 +22,7 @@ func TestStreamManager_AddRemoveStream_NotFound(t *testing.T) {
 	ctx := context.Background()
 
 	// Should fail because torrent is not in engine
-	err = sm.AddStream(ctx, "dummyhash", 0)
+	err = sm.AddStream(ctx, "dummyhash", 0, StreamOptions{})
 	if err == nil {
 		t.Fatal("Expected error for non-existent torrent, got nil")
 	}
@@ -33,6 +33,22 @@ func TestStreamManager_AddRemoveStream_NotFound(t *testing.T) {
 
 	if exists && state.ActiveStreams != 0 {
 		t.Errorf("Expected active streams to be 0 after failure, got %d", state.ActiveStreams)
+	}
+}
+
+func TestStreamManager_AddStreamSkipsHeadAndInvalidRange(t *testing.T) {
+	e := &Engine{}
+	sm := NewStreamManager(e)
+
+	if err := sm.AddStream(context.Background(), "hash", 0, StreamOptions{IsHEAD: true}); err != nil {
+		t.Fatalf("expected HEAD stream QoS to be skipped, got %v", err)
+	}
+	if err := sm.AddStream(context.Background(), "hash", 0, StreamOptions{SkipQoS: true}); err != nil {
+		t.Fatalf("expected skipped stream QoS to return nil, got %v", err)
+	}
+
+	if got := sm.ActiveStreamsTotal(); got != 0 {
+		t.Fatalf("expected no active streams for skipped QoS, got %d", got)
 	}
 }
 

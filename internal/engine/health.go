@@ -282,6 +282,13 @@ func minInt64(a, b int64) int64 {
 	return b
 }
 
+func maxInt64(a, b int64) int64 {
+	if a > b {
+		return a
+	}
+	return b
+}
+
 func (e *Engine) updateSpeedsLocked(mt *ManagedTorrent, stats torrent.TorrentStats) {
 	now := time.Now()
 	rawReadBytes := stats.BytesRead.Int64()

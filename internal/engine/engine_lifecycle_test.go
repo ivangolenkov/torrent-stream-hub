@@ -1,6 +1,8 @@
 package engine
 
 import (
+	"bytes"
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -8,6 +10,8 @@ import (
 
 	"torrent-stream-hub/internal/config"
 	"torrent-stream-hub/internal/models"
+
+	"github.com/anacrolix/torrent/metainfo"
 )
 
 func TestEngineLifecycle(t *testing.T) {
@@ -122,5 +126,140 @@ func TestEngineCloseStopsBackgroundMonitors(t *testing.T) {
 				t.Fatalf("engine close timed out")
 			}
 		})
+	}
+}
+
+func TestEngineLifecycle_DirectStreamClosedOnTorrentDelete(t *testing.T) {
+	fileData := [][]byte{bytes.Repeat([]byte("X"), 2048)}
+	e, mt, dir := setupEngineWithTorrent(t, 1024, "test_del_stream", []metainfo.FileInfo{
+		{Length: 2048, Path: []string{"video.mp4"}},
+	}, fileData)
+	hash := mt.Hash
+
+	filePath := filepath.Join(dir, "test_del_stream", "video.mp4")
+	if err := os.MkdirAll(filepath.Dir(filePath), 0o755); err != nil {
+		t.Fatalf("failed to create dir: %v", err)
+	}
+	if err := os.WriteFile(filePath, fileData[0], 0o644); err != nil {
+		t.Fatalf("failed to write file: %v", err)
+	}
+
+	verifyEngineTorrentPieces(t, e, hash, 0, 2)
+
+	src, err := e.OpenStreamSource(context.Background(), hash, 0, false)
+	if err != nil {
+		t.Fatalf("failed to open direct stream source: %v", err)
+	}
+	defer src.Close()
+
+	if src.Type != StreamSourceDisk {
+		t.Fatalf("expected StreamSourceDisk, got %s", src.Type)
+	}
+
+	// Delete torrent while stream is open
+	err = e.Delete(hash)
+	if err != nil {
+		t.Fatalf("failed to delete torrent: %v", err)
+	}
+
+	// Read on deleted torrent's stream should fail
+	buf := make([]byte, 100)
+	_, err = src.Reader.Read(buf)
+	if err == nil {
+		t.Fatal("expected read to fail after torrent deletion, got nil error")
+	}
+}
+
+func TestEngineLifecycle_DirectStreamClosedOnEngineClose(t *testing.T) {
+	fileData := [][]byte{bytes.Repeat([]byte("Y"), 2048)}
+	e, mt, dir := setupEngineWithTorrent(t, 1024, "test_close_stream", []metainfo.FileInfo{
+		{Length: 2048, Path: []string{"video.mp4"}},
+	}, fileData)
+	hash := mt.Hash
+
+	filePath := filepath.Join(dir, "test_close_stream", "video.mp4")
+	if err := os.MkdirAll(filepath.Dir(filePath), 0o755); err != nil {
+		t.Fatalf("failed to create dir: %v", err)
+	}
+	if err := os.WriteFile(filePath, fileData[0], 0o644); err != nil {
+		t.Fatalf("failed to write file: %v", err)
+	}
+
+	verifyEngineTorrentPieces(t, e, hash, 0, 2)
+
+	src, err := e.OpenStreamSource(context.Background(), hash, 0, false)
+	if err != nil {
+		t.Fatalf("failed to open direct stream source: %v", err)
+	}
+	defer src.Close()
+
+	if src.Type != StreamSourceDisk {
+		t.Fatalf("expected StreamSourceDisk, got %s", src.Type)
+	}
+
+	// Close engine while stream is open
+	e.Close()
+
+	// Read on closed engine's stream should fail
+	buf := make([]byte, 100)
+	_, err = src.Reader.Read(buf)
+	if err == nil {
+		t.Fatal("expected read to fail after engine close, got nil error")
+	}
+}
+
+func TestEngineLifecycle_RecheckPolicyOnDirectStream(t *testing.T) {
+	fileData := [][]byte{bytes.Repeat([]byte("R"), 2048)}
+	e, mt, dir := setupEngineWithTorrent(t, 1024, "test_recheck_stream", []metainfo.FileInfo{
+		{Length: 2048, Path: []string{"video.mp4"}},
+	}, fileData)
+	hash := mt.Hash
+
+	filePath := filepath.Join(dir, "test_recheck_stream", "video.mp4")
+	if err := os.MkdirAll(filepath.Dir(filePath), 0o755); err != nil {
+		t.Fatalf("failed to create dir: %v", err)
+	}
+	if err := os.WriteFile(filePath, fileData[0], 0o644); err != nil {
+		t.Fatalf("failed to write file: %v", err)
+	}
+
+	verifyEngineTorrentPieces(t, e, hash, 0, 2)
+
+	// Open stream 1 (disk source)
+	src1, err := e.OpenStreamSource(context.Background(), hash, 0, false)
+	if err != nil {
+		t.Fatalf("failed to open direct stream source 1: %v", err)
+	}
+	defer src1.Close()
+
+	if src1.Type != StreamSourceDisk {
+		t.Fatalf("expected StreamSourceDisk for src1, got %s", src1.Type)
+	}
+
+	// External truncation/corruption of file
+	_ = os.Chmod(filePath, 0o666)
+	if err := os.Truncate(filePath, 1000); err != nil {
+		t.Fatalf("failed to truncate file: %v", err)
+	}
+
+	// Existing open stream 1 can still read from its opened descriptor
+	buf := make([]byte, 100)
+	n, err := src1.Reader.Read(buf)
+	if err != nil || n != 100 {
+		t.Fatalf("expected src1 to read from existing descriptor, n=%d err=%v", n, err)
+	}
+
+	// New stream request will check size/readiness and fall back to torrent reader
+	src2, err := e.OpenStreamSource(context.Background(), hash, 0, false)
+	if err != nil {
+		t.Fatalf("failed to open stream source 2: %v", err)
+	}
+	defer src2.Close()
+
+	if src2.Type != StreamSourceTorrent {
+		t.Fatalf("expected StreamSourceTorrent for new request after file change, got %s", src2.Type)
+	}
+	if src2.FallbackReason != FallbackReasonSizeMismatch {
+		t.Fatalf("expected FallbackReasonSizeMismatch, got %s", src2.FallbackReason)
 	}
 }

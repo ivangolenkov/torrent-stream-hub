@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"fmt"
+	"io"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -39,18 +40,20 @@ type StreamState struct {
 }
 
 type StreamOptions struct {
-	RangeStart  int64
-	RangeEnd    int64
-	HasRange    bool
-	IsHEAD      bool
-	SkipQoS     bool
-	WindowBytes int64
+	RangeStart     int64
+	RangeEnd       int64
+	HasRange       bool
+	IsHEAD         bool
+	SkipQoS        bool
+	WindowBytes    int64
+	AccountingOnly bool
 }
 
 type StreamSession struct {
-	ID      int64
-	Options StreamOptions
-	Preload bool
+	ID             int64
+	Options        StreamOptions
+	Preload        bool
+	AccountingOnly bool
 }
 
 type streamPieceRange struct {
@@ -66,16 +69,26 @@ type streamFileBounds struct {
 	DisplayPath string
 }
 
+type directStreamHandle struct {
+	id         int64
+	hash       string
+	closer     io.Closer
+	cancelChan chan struct{}
+}
+
 type StreamManager struct {
-	mu     sync.Mutex
-	engine *Engine
-	states map[FileKey]*StreamState
+	mu            sync.Mutex
+	engine        *Engine
+	states        map[FileKey]*StreamState
+	directStreams map[int64]*directStreamHandle
+	nextDirectID  int64
 }
 
 func NewStreamManager(e *Engine) *StreamManager {
 	return &StreamManager{
-		engine: e,
-		states: make(map[FileKey]*StreamState),
+		engine:        e,
+		states:        make(map[FileKey]*StreamState),
+		directStreams: make(map[int64]*directStreamHandle),
 	}
 }
 
@@ -117,6 +130,68 @@ func (sm *StreamManager) ActiveStreamsTotal() int {
 		}
 	}
 	return active
+}
+
+func (sm *StreamManager) RegisterDirectStream(hash string, closer io.Closer) (<-chan struct{}, func()) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	sm.nextDirectID++
+	id := sm.nextDirectID
+	ch := make(chan struct{})
+	handle := &directStreamHandle{
+		id:         id,
+		hash:       hash,
+		closer:     closer,
+		cancelChan: ch,
+	}
+	sm.directStreams[id] = handle
+
+	var once sync.Once
+	unregister := func() {
+		once.Do(func() {
+			sm.mu.Lock()
+			delete(sm.directStreams, id)
+			sm.mu.Unlock()
+		})
+	}
+	return ch, unregister
+}
+
+func (sm *StreamManager) CloseStreamsForTorrent(hash string) {
+	sm.mu.Lock()
+	var toClose []*directStreamHandle
+	for id, handle := range sm.directStreams {
+		if handle.hash == hash {
+			toClose = append(toClose, handle)
+			delete(sm.directStreams, id)
+		}
+	}
+	sm.mu.Unlock()
+
+	for _, handle := range toClose {
+		close(handle.cancelChan)
+		if handle.closer != nil {
+			_ = handle.closer.Close()
+		}
+	}
+}
+
+func (sm *StreamManager) CloseAllStreams() {
+	sm.mu.Lock()
+	toClose := make([]*directStreamHandle, 0, len(sm.directStreams))
+	for id, handle := range sm.directStreams {
+		toClose = append(toClose, handle)
+		delete(sm.directStreams, id)
+	}
+	sm.mu.Unlock()
+
+	for _, handle := range toClose {
+		close(handle.cancelChan)
+		if handle.closer != nil {
+			_ = handle.closer.Close()
+		}
+	}
 }
 
 // AddStream increments the reference count for a file and applies a range-aware QoS overlay.
@@ -194,7 +269,12 @@ func (sm *StreamManager) addSession(hash string, fileIndex int, opts StreamOptio
 
 	state.NextSessionID++
 	sessionID := state.NextSessionID
-	state.Sessions[sessionID] = StreamSession{ID: sessionID, Options: opts, Preload: preload}
+	state.Sessions[sessionID] = StreamSession{
+		ID:             sessionID,
+		Options:        opts,
+		Preload:        preload,
+		AccountingOnly: opts.AccountingOnly,
+	}
 	if preload {
 		state.ActivePreloads++
 		logging.Debugf("stream preload reference incremented hash=%s file_index=%d active_preloads=%d", hash, fileIndex, state.ActivePreloads)
@@ -369,6 +449,9 @@ func (sm *StreamManager) refreshStreamOverlay(hash string, fileIndex int) error 
 	fullyDownloaded := file.BytesCompleted() == file.Length()
 	if !fullyDownloaded {
 		for _, session := range sessions {
+			if session.AccountingOnly {
+				continue
+			}
 			newRanges = append(newRanges, sm.computeStreamPieceRanges(file, session.Options)...)
 		}
 		newRanges = mergeStreamPieceRanges(newRanges)
@@ -376,6 +459,17 @@ func (sm *StreamManager) refreshStreamOverlay(hash string, fileIndex int) error 
 
 	if fullyDownloaded {
 		logging.Debugf("stream QoS skipped for completed file hash=%s file_index=%d", hash, fileIndex)
+	}
+
+	if len(oldRanges) == 0 && len(newRanges) == 0 {
+		sm.mu.Lock()
+		if st, ok := sm.states[key]; ok && st != nil {
+			st.AppliedRanges = nil
+			st.FullyDownloaded = fullyDownloaded
+		}
+		sm.mu.Unlock()
+		logging.Debugf("stream QoS refreshed (no ranges) hash=%s file_index=%d sessions=%d", hash, fileIndex, len(sessions))
+		return nil
 	}
 
 	if err := sm.applyOverlayDiff(mt, key, oldRanges, newRanges); err != nil {
@@ -404,6 +498,12 @@ func (sm *StreamManager) clearStreamOverlay(hash string, fileIndex int) {
 	oldRanges := cloneStreamPieceRanges(state.AppliedRanges)
 	delete(sm.states, key)
 	sm.mu.Unlock()
+
+	// If no ranges were applied (e.g. accounting-only sessions or completed files),
+	// do not touch piece priorities and do not restore base priorities.
+	if len(oldRanges) == 0 {
+		return
+	}
 
 	mt, _, err := sm.streamFile(hash, fileIndex)
 	if err != nil {

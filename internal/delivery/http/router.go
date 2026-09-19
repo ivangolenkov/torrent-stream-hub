@@ -26,7 +26,7 @@ func NewRouter(uc *usecase.TorrentUseCase, sw *usecase.SyncWorker, staticFS ...h
 	// Configure CORS to allow all origins as per requirements for Smart TV/Local network
 	r.Use(cors.Handler(cors.Options{
 		AllowedOrigins:   []string{"*"},
-		AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
+		AllowedMethods:   []string{"GET", "HEAD", "POST", "PUT", "DELETE", "OPTIONS"},
 		AllowedHeaders:   []string{"*"},
 		ExposedHeaders:   []string{"Accept-Ranges", "Content-Disposition", "Content-Length", "Content-Range", "Content-Type"},
 		AllowCredentials: false,

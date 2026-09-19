@@ -563,6 +563,30 @@ func (uc *TorrentUseCase) GetTorrentFile(hash string, index int) (*torrent.File,
 	return f, nil
 }
 
+func (uc *TorrentUseCase) OpenStreamSource(ctx context.Context, hash string, index int, isHEAD bool) (*engine.StreamSource, error) {
+	source, err := uc.engine.OpenStreamSource(ctx, hash, index, isHEAD)
+	if err != nil {
+		var notFound engine.TorrentNotFoundError
+		if errors.Is(err, engine.ErrTorrentNotFound) || errors.As(err, &notFound) {
+			return nil, TorrentNotFoundError{Hash: hash}
+		}
+		return nil, err
+	}
+	return source, nil
+}
+
+func (uc *TorrentUseCase) CheckFileDirectReady(hash string, index int) (bool, int64, error) {
+	ready, length, err := uc.engine.CheckFileDirectReady(hash, index)
+	if err != nil {
+		var notFound engine.TorrentNotFoundError
+		if errors.Is(err, engine.ErrTorrentNotFound) || errors.As(err, &notFound) {
+			return false, 0, TorrentNotFoundError{Hash: hash}
+		}
+		return false, 0, err
+	}
+	return ready, length, nil
+}
+
 func (uc *TorrentUseCase) GetDownloadedFile(hash string, index int) (*models.Torrent, DownloadedDiskFile, error) {
 	t, err := uc.GetTorrent(hash)
 	if err != nil {

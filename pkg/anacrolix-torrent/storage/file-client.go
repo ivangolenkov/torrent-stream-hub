@@ -45,13 +45,7 @@ func NewFileOpts(opts NewFileClientOpts) ClientImplCloser {
 		opts.TorrentDirMaker = defaultPathMaker
 	}
 	if opts.FilePathMaker == nil {
-		opts.FilePathMaker = func(opts FilePathMakerOpts) string {
-			var parts []string
-			if opts.Info.BestName() != metainfo.NoName {
-				parts = append(parts, opts.Info.BestName())
-			}
-			return filepath.Join(append(parts, opts.File.BestPath()...)...)
-		}
+		opts.FilePathMaker = DefaultFilePathMaker
 	}
 	if opts.PieceCompletion == nil {
 		if opts.partFiles() {

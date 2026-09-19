@@ -43,6 +43,7 @@ func (e *Engine) manageResources() {
 	for _, mt := range e.managedTorrents {
 		torrents = append(torrents, mt)
 	}
+	totalTorrents := len(e.managedTorrents)
 	e.mu.RUnlock()
 
 	activeCount := 0
@@ -117,10 +118,10 @@ func (e *Engine) manageResources() {
 		}
 	}
 
-	e.logResourceSummary(activeCount, diskFull, freeSpace, err)
+	e.logResourceSummary(totalTorrents, activeCount, diskFull, freeSpace, err)
 }
 
-func (e *Engine) logResourceSummary(activeCount int, diskFull bool, freeSpace uint64, freeSpaceErr error) {
+func (e *Engine) logResourceSummary(totalTorrents, activeCount int, diskFull bool, freeSpace uint64, freeSpaceErr error) {
 	if !logging.IsDebugEnabled() {
 		return
 	}
@@ -129,8 +130,11 @@ func (e *Engine) logResourceSummary(activeCount int, diskFull bool, freeSpace ui
 	if freeSpaceErr == nil {
 		freeValue = fmt.Sprintf("%d", freeSpace)
 	}
-	key := fmt.Sprintf("torrents=%d active=%d max=%d disk_full=%t free=%s", len(e.managedTorrents), activeCount, e.cfg.MaxActiveDownloads, diskFull, freeValue)
+	key := fmt.Sprintf("torrents=%d active=%d max=%d disk_full=%t free=%s", totalTorrents, activeCount, e.cfg.MaxActiveDownloads, diskFull, freeValue)
 	now := time.Now()
+
+	e.resourceLogMu.Lock()
+	defer e.resourceLogMu.Unlock()
 	if key == e.lastResourceKey && !e.lastResourceLog.IsZero() && now.Sub(e.lastResourceLog) < 30*time.Second {
 		return
 	}

@@ -45,6 +45,7 @@ type Engine struct {
 
 	mu                        sync.RWMutex
 	managedTorrents           map[string]*ManagedTorrent
+	resourceLogMu             sync.Mutex
 	lastResourceLog           time.Time
 	lastResourceKey           string
 	invalidMetainfoCount      int
@@ -235,23 +236,30 @@ func (e *Engine) Warmup(ctx context.Context, hash string, index int, size int64)
 		return 0, 0, err
 	}
 
+	target := size
+	if target <= 0 {
+		target = defaultStreamHeadPrebuffer
+	}
+	if target > file.Length() {
+		target = file.Length()
+	}
+
+	// If file is already completed and verified on disk, fast path returns immediately
+	if ready, _, checkErr := e.CheckFileDirectReady(hash, index); checkErr == nil && ready {
+		logging.Debugf("warmup skipped for completed disk file hash=%s file_index=%d size=%d", hash, index, target)
+		return target, target, nil
+	}
+
 	reader := file.NewReader()
 	reader.SetContext(ctx)
 	reader.SetResponsive()
 	defer reader.Close()
-
-	if size <= 0 {
-		size = 20 << 20
-	}
-	if size > file.Length() {
-		size = file.Length()
-	}
-	reader.SetReadahead(size)
+	reader.SetReadahead(target)
 
 	cleanup, err := e.streamManager.AddPreload(ctx, hash, index, StreamOptions{
 		RangeStart:  0,
 		HasRange:    true,
-		WindowBytes: size,
+		WindowBytes: target,
 	})
 	if err != nil {
 		logging.Debugf("warmup QoS overlay unavailable hash=%s file_index=%d: %v", hash, index, err)
@@ -259,12 +267,12 @@ func (e *Engine) Warmup(ctx context.Context, hash string, index int, size int64)
 		defer cleanup()
 	}
 
-	limited := io.LimitReader(reader, size)
+	limited := io.LimitReader(reader, target)
 	read, err := io.Copy(io.Discard, limited)
 	if err != nil && !errors.Is(err, context.Canceled) {
-		return read, size, err
+		return read, target, err
 	}
-	return read, size, nil
+	return read, target, nil
 }
 
 func (e *Engine) Close() {
@@ -272,6 +280,9 @@ func (e *Engine) Close() {
 		logging.Infof("closing torrent engine")
 		if e.cancel != nil {
 			e.cancel()
+		}
+		if e.streamManager != nil {
+			e.streamManager.CloseAllStreams()
 		}
 		e.wg.Wait()
 
@@ -538,6 +549,9 @@ func (e *Engine) Delete(hash string) error {
 	e.mu.Unlock()
 
 	logging.Infof("deleting torrent hash=%s", hash)
+	if e.streamManager != nil {
+		e.streamManager.CloseStreamsForTorrent(hash)
+	}
 	mt.t.Drop()
 	return nil
 }

@@ -25,6 +25,15 @@ func defaultPathMaker(baseDir string, info *metainfo.Info, infoHash metainfo.Has
 	return baseDir
 }
 
+// DefaultFilePathMaker returns the relative filepath according to default storage layout.
+func DefaultFilePathMaker(opts FilePathMakerOpts) string {
+	var parts []string
+	if opts.Info.BestName() != metainfo.NoName && opts.Info.BestName() != "" {
+		parts = append(parts, opts.Info.BestName())
+	}
+	return filepath.Join(append(parts, opts.File.BestPath()...)...)
+}
+
 func infoHashPathMaker(baseDir string, info *metainfo.Info, infoHash metainfo.Hash) string {
 	return filepath.Join(baseDir, infoHash.HexString())
 }

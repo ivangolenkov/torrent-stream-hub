@@ -240,3 +240,68 @@ func (f *File) Pieces() iter.Seq[*Piece] {
 		}
 	}
 }
+
+// ReadyForDirectRead returns true if the file is completely downloaded and ready
+// for direct OS filesystem reading, without requiring torrent reader or piece requests.
+// It acquires client read lock once and performs an in-memory check without doing storage I/O.
+func (f *File) ReadyForDirectRead() bool {
+	if f == nil || f.t == nil || f.t.cl == nil {
+		return false
+	}
+
+	f.t.cl.rLock()
+	defer f.t.cl.rUnlock()
+
+	if f.t.closed.IsSet() {
+		return false
+	}
+	if !f.t.haveInfo() || f.t.info == nil {
+		return false
+	}
+	if f.offset < 0 || f.length < 0 || f.offset+f.length > f.t.info.TotalLength() {
+		return false
+	}
+	if f.length == 0 {
+		return true
+	}
+
+	begin := f.BeginPieceIndex()
+	end := f.EndPieceIndex()
+	if begin < 0 || end > f.t.numPieces() || begin >= end {
+		return false
+	}
+	if len(f.t.pieces) < end {
+		return false
+	}
+
+	hasV2 := f.t.info.HasV2()
+	hasQueuedForHash := !f.t.piecesQueuedForHash.IsEmpty()
+	hasDirtyChunks := !f.t.dirtyChunks.IsEmpty()
+
+	for i := begin; i < end; i++ {
+		if !f.t.pieceComplete(pieceIndex(i)) {
+			return false
+		}
+		p := &f.t.pieces[i]
+		if !p.storageCompletionOk {
+			return false
+		}
+		if p.hashing || p.marking {
+			return false
+		}
+		if hasQueuedForHash && p.queuedForHash() {
+			return false
+		}
+		if p.hasPendingWrites() {
+			return false
+		}
+		if hasDirtyChunks && p.hasDirtyChunks() {
+			return false
+		}
+		if hasV2 && !p.hashV2.Ok && p.hasPieceLayer() {
+			return false
+		}
+	}
+
+	return true
+}

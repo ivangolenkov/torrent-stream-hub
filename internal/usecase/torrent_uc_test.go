@@ -1,6 +1,7 @@
 package usecase
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -221,5 +222,90 @@ func TestDeleteTorrentFilesRejectsUnsafePath(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("expected unsafe path error")
+	}
+}
+
+func TestOpenStreamSource_NotFoundAndInvalidIndex(t *testing.T) {
+	uc, _, cleanup := setupTorrentUseCase(t)
+	defer cleanup()
+
+	// Missing torrent
+	_, err := uc.OpenStreamSource(context.Background(), "0000000000000000000000000000000000000000", 0, false)
+	var notFound TorrentNotFoundError
+	if !errors.As(err, &notFound) {
+		t.Fatalf("expected TorrentNotFoundError, got %v", err)
+	}
+
+	// Missing torrent for CheckFileDirectReady
+	_, _, err = uc.CheckFileDirectReady("0000000000000000000000000000000000000000", 0)
+	if !errors.As(err, &notFound) {
+		t.Fatalf("expected TorrentNotFoundError for CheckFileDirectReady, got %v", err)
+	}
+}
+
+func TestOpenStreamSource_OldSQLiteProgressIgnored(t *testing.T) {
+	uc, repo, cleanup := setupTorrentUseCase(t)
+	defer cleanup()
+
+	// Save torrent in DB with 100% progress and Completed state
+	hash := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	if err := repo.SaveTorrent(&models.Torrent{
+		Hash:     hash,
+		Name:     "fake_100pct",
+		State:    models.StateSeeding,
+		Progress: 1.0,
+		Size:     1024,
+		Files: []*models.File{
+			{Index: 0, Path: "fake.mkv", Size: 1024},
+		},
+	}); err != nil {
+		t.Fatalf("failed to save torrent: %v", err)
+	}
+
+	// Torrent is not in engine, so CheckFileDirectReady returns not found or error, NOT true based on DB!
+	ready, _, err := uc.CheckFileDirectReady(hash, 0)
+	if err == nil && ready {
+		t.Fatal("expected DB-only completed torrent to not be direct ready in engine")
+	}
+}
+
+func TestGetDownloadedFile_PreservesContract(t *testing.T) {
+	uc, repo, cleanup := setupTorrentUseCase(t)
+	defer cleanup()
+
+	hash := "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	filePath := filepath.Join(uc.engine.DownloadDir(), "test.mkv")
+	if err := os.WriteFile(filePath, []byte("download-test-data"), 0o644); err != nil {
+		t.Fatalf("failed to write test file: %v", err)
+	}
+
+	if err := repo.SaveTorrent(&models.Torrent{
+		Hash:       hash,
+		Name:       "test.mkv",
+		State:      models.StateSeeding,
+		Size:       18,
+		Downloaded: 18,
+		Files: []*models.File{
+			{Index: 0, Path: "test.mkv", Size: 18, Downloaded: 18},
+		},
+	}); err != nil {
+		t.Fatalf("failed to save torrent: %v", err)
+	}
+
+	tor, diskFile, err := uc.GetDownloadedFile(hash, 0)
+	if err != nil {
+		t.Fatalf("GetDownloadedFile failed: %v", err)
+	}
+	if tor.Hash != hash {
+		t.Fatalf("expected hash %s, got %s", hash, tor.Hash)
+	}
+	if diskFile.Size != 18 {
+		t.Fatalf("expected size 18, got %d", diskFile.Size)
+	}
+	if diskFile.Path != "test.mkv" {
+		t.Fatalf("expected relative path test.mkv, got %s", diskFile.Path)
+	}
+	if diskFile.DiskPath != filePath {
+		t.Fatalf("expected disk path %s, got %s", filePath, diskFile.DiskPath)
 	}
 }

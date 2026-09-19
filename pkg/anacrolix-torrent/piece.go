@@ -149,6 +149,13 @@ func (p *Piece) waitNoPendingWrites() {
 	p.pendingWritesMutex.Unlock()
 }
 
+func (p *Piece) hasPendingWrites() bool {
+	p.pendingWritesMutex.Lock()
+	pw := p.pendingWrites
+	p.pendingWritesMutex.Unlock()
+	return pw != 0
+}
+
 func (p *Piece) chunkIndexDirty(chunk chunkIndexType) bool {
 	return p.t.dirtyChunks.Contains(p.requestIndexBegin() + chunk)
 }

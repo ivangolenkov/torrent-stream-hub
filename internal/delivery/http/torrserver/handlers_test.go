@@ -1,9 +1,13 @@
 package torrserver
 
 import (
+	"bytes"
+	"crypto/sha1"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -14,6 +18,9 @@ import (
 	"torrent-stream-hub/internal/models"
 	"torrent-stream-hub/internal/repository"
 	"torrent-stream-hub/internal/usecase"
+
+	"github.com/anacrolix/torrent/bencode"
+	"github.com/anacrolix/torrent/metainfo"
 )
 
 const torrserverTestInfoHash = "0123456789abcdef0123456789abcdef01234567"
@@ -315,5 +322,169 @@ func TestTorrentsInvalidJSONReturnsJSONError(t *testing.T) {
 	}
 	if body.Error != "Invalid JSON" {
 		t.Fatalf("expected Invalid JSON error, got %q", body.Error)
+	}
+}
+
+func createTorrserverTestTorrent(pieceLength int64, name string, files []metainfo.FileInfo, fileData [][]byte) []byte {
+	var allData []byte
+	for _, d := range fileData {
+		allData = append(allData, d...)
+	}
+	numPieces := int((int64(len(allData)) + pieceLength - 1) / pieceLength)
+	if numPieces == 0 {
+		numPieces = 1
+	}
+
+	pieces := make([]byte, 0, numPieces*20)
+	for i := 0; i < numPieces; i++ {
+		start := int64(i) * pieceLength
+		end := start + pieceLength
+		if end > int64(len(allData)) {
+			end = int64(len(allData))
+		}
+		var chunk []byte
+		if start < int64(len(allData)) {
+			chunk = allData[start:end]
+		}
+		h := sha1.Sum(chunk)
+		pieces = append(pieces, h[:]...)
+	}
+
+	info := metainfo.Info{
+		Name:        name,
+		PieceLength: pieceLength,
+		Pieces:      pieces,
+		Files:       files,
+	}
+	if len(files) == 1 && len(files[0].Path) == 0 {
+		info.Length = files[0].Length
+		info.Files = nil
+	}
+
+	infoBytes, err := bencode.Marshal(info)
+	if err != nil {
+		panic(err)
+	}
+	mi := metainfo.MetaInfo{
+		InfoBytes: infoBytes,
+	}
+	var buf bytes.Buffer
+	if err := mi.Write(&buf); err != nil {
+		panic(err)
+	}
+	return buf.Bytes()
+}
+
+func TestPreload_CompletedFileReturnsFastPath(t *testing.T) {
+	dir, _, h, cleanup := setupTorrServerIntegration(t)
+	defer cleanup()
+
+	fileData := [][]byte{bytes.Repeat([]byte("F"), 4096)}
+	torrentBytes := createTorrserverTestTorrent(1024, "test_preload_fast", []metainfo.FileInfo{
+		{Length: 4096, Path: []string{"video.mp4"}},
+	}, fileData)
+
+	tor, err := h.uc.AddTorrentFile(bytes.NewReader(torrentBytes))
+	if err != nil {
+		t.Fatalf("failed to add torrent: %v", err)
+	}
+	hash := tor.Hash
+
+	filePath := filepath.Join(dir, "test_preload_fast", "video.mp4")
+	if err := os.MkdirAll(filepath.Dir(filePath), 0o755); err != nil {
+		t.Fatalf("failed to create dir: %v", err)
+	}
+	if err := os.WriteFile(filePath, fileData[0], 0o644); err != nil {
+		t.Fatalf("failed to write file: %v", err)
+	}
+
+	// Verify pieces in engine
+	tf, err := h.uc.GetTorrentFile(hash, 0)
+	if err != nil {
+		t.Fatalf("failed to get torrent file: %v", err)
+	}
+	tRaw := tf.Torrent()
+	for i := 0; i < tRaw.NumPieces(); i++ {
+		_ = tRaw.Piece(i).VerifyData()
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for i := 0; i < tRaw.NumPieces(); i++ {
+		p := tRaw.Piece(i)
+		for p.State().Marking && time.Now().Before(deadline) {
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+
+	// Send GET /stream?link=HASH&index=1&preload (torrserver uses 1-based index with link)
+	req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/stream?link=%s&index=1&preload", hash), nil)
+	rr := httptest.NewRecorder()
+	h.Stream(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var resp torrentResponse
+	if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+
+	if resp.PreloadSize != 4096 {
+		t.Fatalf("expected PreloadSize 4096, got %d", resp.PreloadSize)
+	}
+	if resp.PreloadedBytes != 4096 {
+		t.Fatalf("expected PreloadedBytes 4096, got %d", resp.PreloadedBytes)
+	}
+
+	// Also poll stat: GET /stream?link=HASH&index=1&stat
+	statReq := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/stream?link=%s&index=1&stat", hash), nil)
+	statRr := httptest.NewRecorder()
+	h.Stream(statRr, statReq)
+
+	if statRr.Code != http.StatusOK {
+		t.Fatalf("expected stat status 200, got %d", statRr.Code)
+	}
+
+	var statResp torrentResponse
+	if err := json.NewDecoder(statRr.Body).Decode(&statResp); err != nil {
+		t.Fatalf("failed to decode stat response: %v", err)
+	}
+	if statResp.PreloadedBytes != 4096 {
+		t.Fatalf("expected stat PreloadedBytes 4096, got %d", statResp.PreloadedBytes)
+	}
+}
+
+func TestPreload_UnverifiedFileDoesNotTakeFastPath(t *testing.T) {
+	_, _, h, cleanup := setupTorrServerIntegration(t)
+	defer cleanup()
+
+	fileData := [][]byte{bytes.Repeat([]byte("U"), 4096)}
+	torrentBytes := createTorrserverTestTorrent(1024, "test_preload_unverified", []metainfo.FileInfo{
+		{Length: 4096, Path: []string{"video.mp4"}},
+	}, fileData)
+
+	tor, err := h.uc.AddTorrentFile(bytes.NewReader(torrentBytes))
+	if err != nil {
+		t.Fatalf("failed to add torrent: %v", err)
+	}
+	hash := tor.Hash
+
+	// Request preload for unverified file without writing to disk
+	req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/stream?link=%s&index=1&preload", hash), nil)
+	rr := httptest.NewRecorder()
+	h.Stream(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var resp torrentResponse
+	if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+
+	// Should NOT be immediately 100% preloaded
+	if resp.PreloadedBytes == 4096 {
+		t.Fatalf("expected unverified file not to be instantly preloaded, got %d", resp.PreloadedBytes)
 	}
 }

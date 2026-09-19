@@ -17,11 +17,13 @@ import (
 	"time"
 
 	"torrent-stream-hub/internal/delivery/http/response"
+	"torrent-stream-hub/internal/engine"
 	"torrent-stream-hub/internal/logging"
 	"torrent-stream-hub/internal/models"
 	"torrent-stream-hub/internal/usecase"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/go-chi/chi/v5/middleware"
 )
 
 type TorrServerHandler struct {
@@ -480,7 +482,20 @@ func (h *TorrServerHandler) servePreload(w http.ResponseWriter, r *http.Request,
 		response.Error(w, http.StatusNotFound, "Torrent not found")
 		return
 	}
-	target := h.preloadTarget(hash, index, fileSize(t, index))
+	fSize := fileSize(t, index)
+	target := h.preloadTarget(hash, index, fSize)
+
+	// Check if file is already completed and verified on disk
+	if ready, _, checkErr := h.uc.CheckFileDirectReady(hash, index); checkErr == nil && ready {
+		logging.Debugf("preload fast path for completed file hash=%s file_index=%d target=%d", hash, index, target)
+		h.setPreload(hash, index, preloadState{TargetBytes: target, ReadBytes: target, StartedAt: time.Now()})
+		res := toTorrentResponse(t, true)
+		res.PreloadSize = target
+		res.PreloadedBytes = target
+		response.JSON(w, http.StatusOK, res)
+		return
+	}
+
 	h.setPreload(hash, index, preloadState{TargetBytes: target, StartedAt: time.Now()})
 
 	go func() {
@@ -528,6 +543,9 @@ func (h *TorrServerHandler) preloadedBytes(hash string, index int, t *models.Tor
 	if target <= 0 {
 		return 0
 	}
+	if ready, _, checkErr := h.uc.CheckFileDirectReady(hash, index); checkErr == nil && ready {
+		return target
+	}
 	size := fileSize(t, index)
 	if size > 0 && fileDownloaded(t, index) >= size {
 		return target
@@ -555,62 +573,80 @@ func (h *TorrServerHandler) PlayAlias(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *TorrServerHandler) serveStream(w http.ResponseWriter, r *http.Request, hash string, index int) {
-	logging.Infof("stream request hash=%s file_index=%d range=%q remote=%s", hash, index, r.Header.Get("Range"), r.RemoteAddr)
-	// 1. Get file from engine
-	file, err := h.uc.GetTorrentFile(hash, index)
+	reqStart := time.Now()
+	reqID := middleware.GetReqID(r.Context())
+	rawRange := r.Header.Get("Range")
+	logging.Infof("stream request started req_id=%s hash=%s file_index=%d method=%s range=%q remote=%s",
+		reqID, hash, index, r.Method, rawRange, r.RemoteAddr)
+
+	ctx := r.Context()
+	prepStart := time.Now()
+	source, err := h.uc.OpenStreamSource(ctx, hash, index, r.Method == http.MethodHead)
+	prepDuration := time.Since(prepStart)
 	if err != nil {
 		status := http.StatusNotFound
 		message := "File not found"
 		if !errors.Is(err, usecase.ErrTorrentNotFound) {
 			message = err.Error()
 		}
-		logging.Warnf("stream file lookup failed hash=%s file_index=%d status=%d: %v", hash, index, status, err)
+		logging.Warnf("stream source open failed req_id=%s hash=%s file_index=%d status=%d: %v",
+			reqID, hash, index, status, err)
 		response.Error(w, status, message)
 		return
 	}
-	parsedRange := parseStreamRange(r.Header.Get("Range"), file.Length())
-	streamOpts := usecase.StreamOptions{
-		RangeStart: parsedRange.Start,
-		RangeEnd:   parsedRange.End,
-		HasRange:   parsedRange.HasRange,
-		IsHEAD:     r.Method == http.MethodHead,
-		SkipQoS:    !parsedRange.Valid,
-	}
-	logging.Debugf("stream range parsed hash=%s file_index=%d start=%d end=%d has_range=%t valid=%t multi=%t head=%t", hash, index, parsedRange.Start, parsedRange.End, parsedRange.HasRange, parsedRange.Valid, parsedRange.Multi, streamOpts.IsHEAD)
+	defer func() {
+		if closeErr := source.Close(); closeErr != nil {
+			logging.Debugf("stream source close error req_id=%s hash=%s file_index=%d: %v", reqID, hash, index, closeErr)
+		}
+	}()
 
-	// 2. Register stream reference counting with context
-	// This applies range-aware QoS and automatically removes it when request ends.
-	ctx := r.Context()
+	parsedRange := parseStreamRange(rawRange, source.Length)
+	streamOpts := usecase.StreamOptions{
+		RangeStart:     parsedRange.Start,
+		RangeEnd:       parsedRange.End,
+		HasRange:       parsedRange.HasRange,
+		IsHEAD:         r.Method == http.MethodHead,
+		SkipQoS:        !parsedRange.Valid,
+		AccountingOnly: source.Type == engine.StreamSourceDisk,
+	}
+	logging.Debugf("stream range parsed req_id=%s hash=%s file_index=%d start=%d end=%d has_range=%t valid=%t multi=%t head=%t source=%s",
+		reqID, hash, index, parsedRange.Start, parsedRange.End, parsedRange.HasRange, parsedRange.Valid, parsedRange.Multi, streamOpts.IsHEAD, source.Type)
+
+	// Register stream reference counting with context
 	if !streamOpts.IsHEAD && !streamOpts.SkipQoS {
 		err = h.uc.AddStream(ctx, hash, index, streamOpts)
 		if err != nil {
-			logging.Warnf("stream QoS registration failed hash=%s file_index=%d: %v", hash, index, err)
+			logging.Warnf("stream QoS registration failed req_id=%s hash=%s file_index=%d: %v", reqID, hash, index, err)
 		}
 	} else {
-		logging.Debugf("stream QoS registration skipped hash=%s file_index=%d head=%t skip=%t", hash, index, streamOpts.IsHEAD, streamOpts.SkipQoS)
+		logging.Debugf("stream QoS registration skipped req_id=%s hash=%s file_index=%d head=%t skip=%t",
+			reqID, hash, index, streamOpts.IsHEAD, streamOpts.SkipQoS)
 	}
 
-	// 3. Set headers for streaming
+	// Set headers for streaming
 	w.Header().Set("Accept-Ranges", "bytes")
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("transferMode.dlna.org", "Streaming")
 	if r.Header.Get("getcontentFeatures.dlna.org") != "" || r.Header.Get("GetContentFeatures.DLNA.ORG") != "" {
 		w.Header().Set("contentFeatures.dlna.org", "DLNA.ORG_OP=01;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000")
 	}
-	if contentType := streamContentType(file.DisplayPath()); contentType != "" {
+	if contentType := streamContentType(source.DisplayName); contentType != "" {
 		w.Header().Set("Content-Type", contentType)
 	}
 
-	// Create reader for the torrent file.
-	// anacrolix/torrent provides an io.ReadSeeker which http.ServeContent uses natively to handle Range requests.
-	reader := file.NewReader()
-	reader.SetContext(ctx)
-	defer reader.Close()
-	reader.SetReadahead(defaultPreloadSize)
-	reader.SetResponsive() // Better performance for streaming
+	wrappedWriter := newStreamResponseWriter(w, reqStart, prepDuration)
+	logging.Debugf("stream serving req_id=%s hash=%s file_index=%d file=%q size=%d source=%s",
+		reqID, hash, index, source.DisplayName, source.Length, source.Type)
+	http.ServeContent(wrappedWriter, r, source.DisplayName, time.Time{}, source.Reader)
 
-	logging.Debugf("stream serving hash=%s file_index=%d file=%q size=%d", hash, index, file.DisplayPath(), file.Length())
-	http.ServeContent(w, r, file.DisplayPath(), time.Time{}, reader)
+	totalDuration := time.Since(reqStart)
+	timeToFirstWrite := wrappedWriter.TimeToFirstWrite()
+	bytesWritten := wrappedWriter.BytesWritten()
+	statusCode := wrappedWriter.StatusCode()
+
+	logging.Infof("stream request finished req_id=%s hash=%s file_index=%d method=%s source=%s fallback_reason=%s status=%d written=%d prep_duration=%s first_write_duration=%s total_duration=%s ctx_err=%v",
+		reqID, hash, index, r.Method, source.Type, source.FallbackReason, statusCode, bytesWritten,
+		prepDuration, timeToFirstWrite, totalDuration, ctx.Err())
 }
 
 type cacheRequest struct {

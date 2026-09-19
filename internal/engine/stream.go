@@ -71,7 +71,7 @@ type streamFileBounds struct {
 
 type directStreamHandle struct {
 	id         int64
-	hash       string
+	torrent    *ManagedTorrent
 	closer     io.Closer
 	cancelChan chan struct{}
 }
@@ -82,6 +82,7 @@ type StreamManager struct {
 	states        map[FileKey]*StreamState
 	directStreams map[int64]*directStreamHandle
 	nextDirectID  int64
+	closed        bool
 }
 
 func NewStreamManager(e *Engine) *StreamManager {
@@ -132,16 +133,28 @@ func (sm *StreamManager) ActiveStreamsTotal() int {
 	return active
 }
 
-func (sm *StreamManager) RegisterDirectStream(hash string, closer io.Closer) (<-chan struct{}, func()) {
+// RegisterDirectStream validates the torrent generation while holding the engine
+// read lock, so Delete cannot remove it between validation and registration.
+// The caller retains ownership of closer if registration fails.
+func (sm *StreamManager) RegisterDirectStream(hash string, expected *ManagedTorrent, closer io.Closer) (<-chan struct{}, func(), error) {
+	sm.engine.mu.RLock()
+	defer sm.engine.mu.RUnlock()
+	if current, ok := sm.engine.managedTorrents[hash]; !ok || current != expected {
+		return nil, nil, TorrentNotFoundError{Hash: hash}
+	}
+
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
+	if sm.closed {
+		return nil, nil, fmt.Errorf("stream manager closed")
+	}
 
 	sm.nextDirectID++
 	id := sm.nextDirectID
 	ch := make(chan struct{})
 	handle := &directStreamHandle{
 		id:         id,
-		hash:       hash,
+		torrent:    expected,
 		closer:     closer,
 		cancelChan: ch,
 	}
@@ -155,14 +168,14 @@ func (sm *StreamManager) RegisterDirectStream(hash string, closer io.Closer) (<-
 			sm.mu.Unlock()
 		})
 	}
-	return ch, unregister
+	return ch, unregister, nil
 }
 
-func (sm *StreamManager) CloseStreamsForTorrent(hash string) {
+func (sm *StreamManager) CloseStreamsForTorrent(mt *ManagedTorrent) {
 	sm.mu.Lock()
 	var toClose []*directStreamHandle
 	for id, handle := range sm.directStreams {
-		if handle.hash == hash {
+		if handle.torrent == mt {
 			toClose = append(toClose, handle)
 			delete(sm.directStreams, id)
 		}
@@ -179,6 +192,7 @@ func (sm *StreamManager) CloseStreamsForTorrent(hash string) {
 
 func (sm *StreamManager) CloseAllStreams() {
 	sm.mu.Lock()
+	sm.closed = true
 	toClose := make([]*directStreamHandle, 0, len(sm.directStreams))
 	for id, handle := range sm.directStreams {
 		toClose = append(toClose, handle)

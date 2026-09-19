@@ -3,6 +3,7 @@ package engine
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -13,6 +14,119 @@ import (
 
 	"github.com/anacrolix/torrent/metainfo"
 )
+
+type directStreamCloseSignal chan struct{}
+
+func (s directStreamCloseSignal) Close() error {
+	close(s)
+	return nil
+}
+
+func setupCompletedLifecycleTorrent(t *testing.T) (*Engine, *models.Torrent) {
+	t.Helper()
+	data := bytes.Repeat([]byte("X"), 2048)
+	e, tor, dir := setupEngineWithTorrent(t, 1024, "lifecycle", []metainfo.FileInfo{
+		{Length: int64(len(data)), Path: []string{"video.mp4"}},
+	}, [][]byte{data})
+	path := filepath.Join(dir, "lifecycle", "video.mp4")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	verifyEngineTorrentPieces(t, e, tor.Hash, 0, 2)
+	return e, tor
+}
+
+func TestEngineLifecycle_RejectDirectStreamDuringClose(t *testing.T) {
+	e, tor := setupCompletedLifecycleTorrent(t)
+	e.mu.RLock()
+	mt := e.managedTorrents[tor.Hash]
+	e.mu.RUnlock()
+	signal := make(directStreamCloseSignal)
+	_, unregister, err := e.streamManager.RegisterDirectStream(tor.Hash, mt, signal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unregister()
+
+	// Pause shutdown after it drains direct streams but before it closes the
+	// torrent client. Readiness alone still succeeds in this window.
+	e.wg.Add(1)
+	done := make(chan struct{})
+	go func() {
+		e.Close()
+		close(done)
+	}()
+	defer func() {
+		e.wg.Done()
+		<-done
+	}()
+	select {
+	case <-signal:
+	case <-time.After(2 * time.Second):
+		t.Fatal("shutdown did not drain direct streams")
+	}
+	src, err := e.OpenStreamSource(context.Background(), tor.Hash, 0, false)
+	if src != nil {
+		defer src.Close()
+	}
+	if err == nil {
+		t.Fatal("direct stream accepted after shutdown drained existing streams")
+	}
+	e.streamManager.mu.Lock()
+	remaining := len(e.streamManager.directStreams)
+	e.streamManager.mu.Unlock()
+	if remaining != 0 {
+		t.Fatalf("shutdown left %d registered streams", remaining)
+	}
+}
+
+func TestEngineLifecycle_RejectStaleDirectStreamAfterDeleteAndReadd(t *testing.T) {
+	e, tor := setupCompletedLifecycleTorrent(t)
+	e.mu.RLock()
+	old := e.managedTorrents[tor.Hash]
+	e.mu.RUnlock()
+	if err := e.Delete(tor.Hash); err != nil {
+		t.Fatal(err)
+	}
+	// Emulate a request that obtained the old torrent before Delete and reached
+	// registration after the close sweep, including after the same hash is added.
+	assertRejected := func() {
+		t.Helper()
+		_, unregister, err := e.streamManager.RegisterDirectStream(tor.Hash, old, nil)
+		if unregister != nil {
+			unregister()
+		}
+		if !errors.Is(err, ErrTorrentNotFound) {
+			t.Fatalf("expected stale torrent rejection, got %v", err)
+		}
+	}
+	assertRejected()
+	data := bytes.Repeat([]byte("X"), 2048)
+	metainfoBytes := createTestTorrentBytes(1024, "lifecycle", []metainfo.FileInfo{
+		{Length: int64(len(data)), Path: []string{"video.mp4"}},
+	}, [][]byte{data})
+	if _, err := e.AddTorrentFile(bytes.NewReader(metainfoBytes)); err != nil {
+		t.Fatal(err)
+	}
+	assertRejected()
+	verifyEngineTorrentPieces(t, e, tor.Hash, 0, 2)
+	src, err := e.OpenStreamSource(context.Background(), tor.Hash, 0, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer src.Close()
+	if src.Type != StreamSourceDisk {
+		t.Fatalf("expected disk source for re-added torrent, got %s", src.Type)
+	}
+	// A delayed close for the old instance must not affect its replacement.
+	e.streamManager.CloseStreamsForTorrent(old)
+	if _, err := src.Reader.Read(make([]byte, 10)); err != nil {
+		t.Fatalf("old torrent cleanup closed the new stream: %v", err)
+	}
+}
 
 func TestEngineLifecycle(t *testing.T) {
 	cfg := &config.Config{

@@ -291,7 +291,11 @@ func (e *Engine) OpenStreamSource(ctx context.Context, hash string, index int, i
 	var cancelChan <-chan struct{}
 	var unregister func()
 	if e.streamManager != nil {
-		cancelChan, unregister = e.streamManager.RegisterDirectStream(hash, f)
+		cancelChan, unregister, err = e.streamManager.RegisterDirectStream(hash, mt, f)
+		if err != nil {
+			_ = f.Close()
+			return nil, err
+		}
 	}
 
 	reader := &directDiskReader{

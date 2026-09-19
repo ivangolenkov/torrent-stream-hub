@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -75,6 +76,39 @@ func TestFileReadyForDirectRead_ZeroLength(t *testing.T) {
 	assert.True(t, files[0].ReadyForDirectRead())
 	// Non-completed second file should report false
 	assert.False(t, files[1].ReadyForDirectRead())
+}
+
+func TestFileReadyForDirectRead_V2AlignedFiles(t *testing.T) {
+	cl := newTestingClient(t)
+	tor := cl.newTorrentForTesting()
+	info := &metainfo.Info{
+		MetaVersion: 2,
+		PieceLength: 16384,
+		Name:        "aligned",
+		FileTree: metainfo.FileTree{Dir: map[string]metainfo.FileTree{
+			"a": {File: metainfo.FileTreeFile{Length: 1000, PiecesRoot: strings.Repeat("a", 32)}},
+			"b": {File: metainfo.FileTreeFile{Length: 1000, PiecesRoot: strings.Repeat("b", 32)}},
+			"c": {File: metainfo.FileTreeFile{Length: 0}},
+		}},
+	}
+	require.NoError(t, tor.setInfoUnlocked(info))
+	files := tor.Files()
+	require.EqualValues(t, 16384, files[1].Offset())
+	require.Greater(t, files[1].Offset(), info.TotalLength())
+	markPieceComplete(tor, 0)
+	assert.True(t, files[0].ReadyForDirectRead())
+	assert.False(t, files[1].ReadyForDirectRead(), "alignment must not bypass piece completion")
+	markPieceComplete(tor, 1)
+	assert.True(t, files[1].ReadyForDirectRead())
+	assert.True(t, files[2].ReadyForDirectRead(), "empty trailing file also has an aligned offset")
+
+	tor.cl.lock()
+	tor.pieces[1].hashing = true
+	tor.cl.unlock()
+	assert.False(t, files[1].ReadyForDirectRead(), "rechecking still blocks direct reads")
+	tor.cl.lock()
+	tor.pieces[1].hashing = false
+	tor.cl.unlock()
 }
 
 func TestFileReadyForDirectRead_CompleteAndIncomplete(t *testing.T) {

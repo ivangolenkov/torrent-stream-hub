@@ -550,7 +550,7 @@ func (e *Engine) Delete(hash string) error {
 
 	logging.Infof("deleting torrent hash=%s", hash)
 	if e.streamManager != nil {
-		e.streamManager.CloseStreamsForTorrent(hash)
+		e.streamManager.CloseStreamsForTorrent(mt)
 	}
 	mt.t.Drop()
 	return nil

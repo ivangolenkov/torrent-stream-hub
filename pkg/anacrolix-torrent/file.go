@@ -258,7 +258,15 @@ func (f *File) ReadyForDirectRead() bool {
 	if !f.t.haveInfo() || f.t.info == nil {
 		return false
 	}
-	if f.offset < 0 || f.length < 0 || f.offset+f.length > f.t.info.TotalLength() {
+	if f.t.files == nil || len(*f.t.files) == 0 {
+		return false
+	}
+	// Runtime file offsets include v2 piece alignment; TotalLength only sums
+	// payload bytes and therefore cannot bound offsets in a multi-file v2 torrent.
+	files := *f.t.files
+	last := files[len(files)-1]
+	endOffset := last.offset + last.length
+	if f.offset < 0 || f.length < 0 || f.offset > endOffset || f.length > endOffset-f.offset {
 		return false
 	}
 	if f.length == 0 {

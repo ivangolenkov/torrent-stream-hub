@@ -1,6 +1,7 @@
 package usecase
 
 import (
+	"context"
 	"encoding/json"
 	"sync"
 	"time"
@@ -42,11 +43,20 @@ func (sw *SyncWorker) RemoveClient(ch chan []byte) {
 }
 
 func (sw *SyncWorker) Start() {
+	sw.StartContext(context.Background())
+}
+
+func (sw *SyncWorker) StartContext(ctx context.Context) {
 	logging.Infof("sync worker started interval=2s")
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
 
-	for range ticker.C {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
 		// Get all torrents from engine
 		activeTorrents := sw.engine.GetAllTorrents()
 

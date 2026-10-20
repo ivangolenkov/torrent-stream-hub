@@ -141,8 +141,38 @@ The service can be configured with command-line flags or environment variables. 
 | `HUB_AUTH_USER` | `admin` | Basic Auth user. |
 | `HUB_AUTH_PASSWORD` | `admin` | Basic Auth password. |
 | `HUB_LOG_LEVEL` | `debug` | Log level. |
+| `HUB_LOG_DIR` | `logs` beside the database | Daily log directory (`--log-dir`). |
+| `HUB_LOG_RETENTION_DAYS` | `3` | Previous calendar days to keep, in addition to today (`--log-retention-days`). `0` keeps today only; valid range: 0–36500. |
 
 BitTorrent-related options are also available, including DHT/PEX/UPnP toggles, retracker configuration and swarm watchdog tuning. See `internal/config/config.go` for the full list.
+
+## Saved Logs And REST Access
+
+Application, standard Go log, HTTP access and torrent library logs go to the console and daily files such as `hub-2026-10-20.log`. Library debug tracing is not enabled. Files use the process's local timezone, matching their timestamps; Docker commonly uses UTC. Restarting appends to the existing file.
+
+With the standard database path, files live in `/config/logs` (host directory `./config/logs` in Compose), so they survive container restarts. The service user must be able to write there. New directories use permissions `0700`, new files `0600`; existing permissions are not changed.
+
+Retention `3` keeps today plus the previous three calendar dates: on October 20, October 17–20 are retained. Cleanup runs on startup, on rotation and hourly even without new messages. It only removes matching regular daily files, excluding the active writer and files being downloaded. A completed download releases its retention pin; removal occurs at the next cleanup. Retention does **not** limit the size of today's file. File errors (including a full disk) are reported to stderr at most once a minute; console logging continues and file writes are retried after a minute.
+
+```bash
+# Today; optional last N physical lines
+curl 'http://localhost:8080/api/v1/logs'
+curl 'http://localhost:8080/api/v1/logs?tail=200'
+
+# A single date, or an inclusive date range
+curl 'http://localhost:8080/api/v1/logs?date=2026-10-19&tail=200'
+curl 'http://localhost:8080/api/v1/logs?from=2026-10-18&to=2026-10-20&tail=500'
+```
+
+The response is plain UTF-8 text with `Cache-Control: no-store` and CORS `*`. Without dates it selects today. `date` cannot be combined with `from`/`to`; both range boundaries are required. Dates must strictly match `YYYY-MM-DD`. Duplicate/empty parameters and invalid combinations return `400`. `tail` accepts 1–100000 and selects the last N lines across all selected files, returned oldest first. Stack traces count as multiple lines. Fewer than N available lines returns all of them.
+
+Missing days inside a range are skipped. No matching file returns `404`; an empty existing file returns `200` with an empty body. Other read failures return a generic JSON `500` before transfer starts; a transfer error never appends JSON to the log text.
+
+Responses are finite size-bounded snapshots, not live-follow (`tail -f`). Bytes appended after opening are excluded; an unfinished last line is included as it was captured. When combining files, a newline is inserted between nonempty files if the preceding file lacks one, preventing lines from different dates merging. A trailing newline is not counted as an extra empty line. Reading/tail uses bounded buffers, including for very long lines.
+
+Sensitive query parameters are masked before console/file output. Access logs omit query strings and headers. Handled HTTP panics include their stack trace, but arbitrary direct writes to stdout/stderr and fatal Go runtime dumps are **not** captured in daily files.
+
+**Security:** management routes currently do not enforce Basic Auth, even when `HUB_AUTH_ENABLED` is set. Anyone with network access to the service can read its logs. Keep it on a trusted LAN or protect it with an authenticated reverse proxy; permissive CORS is intentional for Smart TV compatibility. Masking known parameters is not a guarantee that all log content is free of sensitive data.
 
 ## Build Locally
 

@@ -42,3 +42,12 @@ func TestParseLevelDefaultsToDebug(t *testing.T) {
 		t.Fatalf("expected invalid level to default to debug, got %v", got)
 	}
 }
+
+func TestSanitizeQuotedAndGroupedSecrets(t *testing.T) {
+	got := SanitizeText(`source.token="secret with spaces" group=[password=hidden] access_token='private value'`)
+	for _, secret := range []string{"secret with spaces", "hidden", "private value"} {
+		if strings.Contains(got, secret) {
+			t.Fatal(got)
+		}
+	}
+}

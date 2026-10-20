@@ -49,6 +49,7 @@ func (e *Engine) newTorrentClient() (*torrent.Client, storage.ClientImplCloser, 
 func buildClientConfig(cfg *config.Config) *torrent.ClientConfig {
 	config.ApplyDefaults(cfg)
 	clientConfig := torrent.NewDefaultClientConfig()
+	clientConfig.Slogger = logging.SlogLogger()
 	clientConfig.DataDir = cfg.DownloadDir
 	clientConfig.ListenPort = cfg.TorrentPort
 	clientConfig.Seed = cfg.BTSeed

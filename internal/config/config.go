@@ -2,8 +2,10 @@ package config
 
 import (
 	"flag"
+	"fmt"
 	"net"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 )
@@ -23,6 +25,9 @@ type Config struct {
 	AuthUser                           string
 	AuthPassword                       string
 	LogLevel                           string
+	LogDir                             string
+	LogRetentionDays                   int
+	logConfigError                     error
 	BTSeed                             bool
 	BTSeedConfigured                   bool
 	BTNoUpload                         bool
@@ -82,11 +87,14 @@ type Config struct {
 
 func Load() *Config {
 	cfg := &Config{}
+	var logRetention string
 
 	flag.StringVar(&cfg.Port, "port", getEnv("HUB_PORT", "8080"), "Server port")
 	flag.IntVar(&cfg.TorrentPort, "torrent-port", getEnvAsInt("HUB_TORRENT_PORT", 50007), "BitTorrent protocol port")
 	flag.StringVar(&cfg.DownloadDir, "download-dir", getEnv("HUB_DOWNLOAD_DIR", "/downloads"), "Directory to save downloaded files")
 	flag.StringVar(&cfg.DBPath, "db-path", getEnv("HUB_DB_PATH", "/config/hub.db"), "Path to SQLite database file")
+	flag.StringVar(&cfg.LogDir, "log-dir", getEnv("HUB_LOG_DIR", ""), "Log directory (default: logs beside database)")
+	flag.StringVar(&logRetention, "log-retention-days", getEnv("HUB_LOG_RETENTION_DAYS", "3"), "Previous calendar days of logs to retain (0 = today only)")
 	flag.IntVar(&cfg.MaxActiveStreams, "max-streams", getEnvAsInt("HUB_MAX_ACTIVE_STREAMS", 4), "Maximum number of active streams")
 	flag.IntVar(&cfg.MaxActiveDownloads, "max-downloads", getEnvAsInt("HUB_MAX_ACTIVE_DOWNLOADS", 5), "Maximum number of active background downloads")
 	flag.IntVar(&cfg.MinFreeSpaceGB, "min-free-space", getEnvAsInt("HUB_MIN_FREE_SPACE_GB", 5), "Minimum free space in GB to allow downloading")
@@ -147,6 +155,11 @@ func Load() *Config {
 	flag.IntVar(&cfg.BTClientRecycleMaxPerHour, "bt-client-recycle-max-per-hour", getEnvAsInt("HUB_BT_CLIENT_RECYCLE_MAX_PER_HOUR", 2), "Maximum BitTorrent client recycle attempts per hour")
 
 	flag.Parse()
+	var retentionErr error
+	cfg.LogRetentionDays, retentionErr = strconv.Atoi(logRetention)
+	if retentionErr != nil {
+		cfg.logConfigError = fmt.Errorf("log retention days must be an integer between 0 and 36500")
+	}
 	cfg.BTSeedConfigured = true
 	cfg.BTSwarmWatchdogConfigured = true
 	cfg.BTSwarmHardRefreshConfigured = true
@@ -160,6 +173,9 @@ func Load() *Config {
 func ApplyDefaults(cfg *Config) {
 	if cfg == nil {
 		return
+	}
+	if cfg.LogDir == "" {
+		cfg.LogDir = filepath.Join(filepath.Dir(cfg.DBPath), "logs")
 	}
 	if !cfg.BTSeedConfigured {
 		cfg.BTSeed = true
@@ -273,6 +289,16 @@ func ApplyDefaults(cfg *Config) {
 	if cfg.BTClientRecycleMaxPerHour <= 0 {
 		cfg.BTClientRecycleMaxPerHour = 2
 	}
+}
+
+func (cfg *Config) ValidateLogging() error {
+	if cfg.logConfigError != nil {
+		return cfg.logConfigError
+	}
+	if cfg.LogRetentionDays < 0 || cfg.LogRetentionDays > 36500 {
+		return fmt.Errorf("log retention days must be between 0 and 36500")
+	}
+	return nil
 }
 
 func applyDownloadProfileDefaults(cfg *Config) {

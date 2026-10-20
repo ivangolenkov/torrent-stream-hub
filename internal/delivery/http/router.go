@@ -8,6 +8,7 @@ import (
 	"path"
 	"runtime/debug"
 	"strings"
+	"time"
 
 	"torrent-stream-hub/internal/delivery/http/api"
 	"torrent-stream-hub/internal/delivery/http/response"
@@ -21,6 +22,10 @@ import (
 )
 
 func NewRouter(uc *usecase.TorrentUseCase, sw *usecase.SyncWorker, staticFS ...http.FileSystem) http.Handler {
+	return NewRouterWithLogs(uc, sw, nil, staticFS...)
+}
+
+func NewRouterWithLogs(uc *usecase.TorrentUseCase, sw *usecase.SyncWorker, logs logging.LogReader, staticFS ...http.FileSystem) http.Handler {
 	r := chi.NewRouter()
 
 	// Configure CORS to allow all origins as per requirements for Smart TV/Local network
@@ -35,7 +40,7 @@ func NewRouter(uc *usecase.TorrentUseCase, sw *usecase.SyncWorker, staticFS ...h
 
 	r.Use(middleware.RequestID)
 	r.Use(middleware.RealIP)
-	r.Use(middleware.Logger)
+	r.Use(accessLogger)
 	r.Use(jsonRecoverer)
 
 	// TorrServer Layer
@@ -47,6 +52,7 @@ func NewRouter(uc *usecase.TorrentUseCase, sw *usecase.SyncWorker, staticFS ...h
 	// Management REST API for Web GUI
 	apiHandler := api.NewAPIHandler(uc, sw)
 	r.Route("/api/v1", func(r chi.Router) {
+		r.Get("/logs", api.LogsHandler(logs))
 		apiHandler.RegisterRoutes(r)
 	})
 
@@ -57,6 +63,22 @@ func NewRouter(uc *usecase.TorrentUseCase, sw *usecase.SyncWorker, staticFS ...h
 	}
 
 	return r
+}
+
+func accessLogger(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		started := time.Now()
+		ww := middleware.NewWrapResponseWriter(w, r.ProtoMajor)
+		defer func() {
+			status := ww.Status()
+			if status == 0 {
+				status = http.StatusOK
+			}
+			// Deliberately omit query and headers: they may contain credentials.
+			logging.Infof("http request_id=%s method=%s path=%q status=%d bytes=%d duration=%s", middleware.GetReqID(r.Context()), r.Method, r.URL.Path, status, ww.BytesWritten(), time.Since(started))
+		}()
+		next.ServeHTTP(ww, r)
+	})
 }
 
 func jsonRecoverer(next http.Handler) http.Handler {

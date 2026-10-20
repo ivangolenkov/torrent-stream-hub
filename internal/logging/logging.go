@@ -25,7 +25,7 @@ var (
 		level:  LevelDebug,
 		logger: log.New(os.Stdout, "", log.LstdFlags),
 	}
-	sensitiveQueryRe = regexp.MustCompile(`(?i)(^|[?&\s])(passkey|token|apikey|api_key|key|auth|secret|sid|session|signature)=([^&\s]+)`)
+	sensitiveQueryRe = regexp.MustCompile(`(?i)(^|[?&\s.\[{])(passkey|token|access_token|apikey|api_key|key|auth|authorization|password|secret|sid|session|signature)=("(?:\\.|[^"\\])*"|'[^']*'|[^&\s]+)`)
 )
 
 type Logger struct {

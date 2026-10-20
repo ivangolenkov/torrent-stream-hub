@@ -3,7 +3,7 @@ package main
 import (
 	"context"
 	"errors"
-	"log"
+	"fmt"
 	"net/http"
 	"os"
 	"os/signal"
@@ -21,57 +21,90 @@ import (
 )
 
 func main() {
+	if err := run(); err != nil {
+		_, _ = fmt.Fprintln(os.Stderr, logging.SanitizeText(err.Error()))
+		os.Exit(1)
+	}
+}
+
+func run() (runErr error) {
 	cfg := config.Load()
+	if err := cfg.ValidateLogging(); err != nil {
+		return err
+	}
+	files, err := logging.NewFiles(logging.FileOptions{Dir: cfg.LogDir, RetentionDays: cfg.LogRetentionDays})
+	if err != nil {
+		return err
+	}
+	defer files.Close()
+	restoreLogging := logging.UseFiles(files)
+	defer restoreLogging()
 	logging.Configure(cfg.LogLevel)
+	defer func() {
+		if runErr != nil {
+			logging.Errorf("server stopped: %v", runErr)
+		}
+	}()
 	logging.Infof("logging initialized level=%s", logging.CurrentLevel())
 
 	if err := ensureRuntimeDirs(cfg.DownloadDir, cfg.DBPath); err != nil {
-		log.Fatalf("failed to prepare runtime directories: %v", err)
+		return fmt.Errorf("failed to prepare runtime directories: %w", err)
 	}
 
 	db, err := repository.NewSQLiteDB(cfg.DBPath)
 	if err != nil {
-		log.Fatalf("failed to initialize database: %v", err)
+		return fmt.Errorf("failed to initialize database: %w", err)
 	}
 	defer db.Close()
 
 	eng, err := engine.New(cfg)
 	if err != nil {
-		log.Fatalf("failed to initialize torrent engine: %v", err)
+		return fmt.Errorf("failed to initialize torrent engine: %w", err)
 	}
 	defer eng.Close()
 
 	repo := repository.NewTorrentRepo(db)
 	uc := usecase.NewTorrentUseCase(eng, repo)
 	if err := uc.RestoreTorrents(); err != nil {
-		log.Printf("failed to restore persisted torrents: %v", err)
+		logging.Warnf("failed to restore persisted torrents: %v", err)
 	}
 	syncWorker := usecase.NewSyncWorker(eng, repo)
-	go syncWorker.Start()
+	workerCtx, stopWorker := context.WithCancel(context.Background())
+	workerDone := make(chan struct{})
+	go func() { defer close(workerDone); syncWorker.StartContext(workerCtx) }()
+	defer func() { stopWorker(); <-workerDone }()
 
 	server := &http.Server{
 		Addr:              ":" + cfg.Port,
-		Handler:           deliveryhttp.NewRouter(uc, syncWorker, web.DistFS()),
+		Handler:           deliveryhttp.NewRouterWithLogs(uc, syncWorker, files, web.DistFS()),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
+	serverErrors := make(chan error, 1)
 	go func() {
-		log.Printf("Torrent-Stream-Hub listening on :%s", cfg.Port)
+		logging.Infof("Torrent-Stream-Hub listening on :%s", cfg.Port)
 		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Fatalf("server failed: %v", err)
+			serverErrors <- err
 		}
 	}()
 
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
-	<-stop
+	defer signal.Stop(stop)
+	select {
+	case <-stop:
+	case err := <-serverErrors:
+		return fmt.Errorf("server failed: %w", err)
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	if err := server.Shutdown(ctx); err != nil {
-		log.Printf("server shutdown failed: %v", err)
+		logging.Errorf("server shutdown failed: %v", err)
+		_ = server.Close()
 	}
+	return nil
 }
 
 func ensureRuntimeDirs(downloadDir, dbPath string) error {

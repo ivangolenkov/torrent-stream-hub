@@ -6,6 +6,7 @@ import { ArrowDownTrayIcon, ClockIcon } from '@heroicons/vue/24/outline';
 import { apiClient } from '../api/client';
 import VideoPlayer from './VideoPlayer.vue';
 import PieceProgressBar from './PieceProgressBar.vue';
+import TemporaryTorrentControl from './TemporaryTorrentControl.vue';
 
 const store = useTorrentStore();
 const activeVideo = ref<{ hash: string, index: number, path: string } | null>(null);
@@ -116,6 +117,8 @@ const fetchPieces = async () => {
   }
 };
 
+watch(() => store.selectedHash, () => { activeVideo.value = null; });
+
 watch([() => store.selectedHash, activeTab], ([newHash, newTab]) => {
   piecesString.value = '';
   if (piecesInterval) {
@@ -149,6 +152,9 @@ watch([() => store.selectedHash, activeTab], ([newHash, newTab]) => {
       </div>
 
       <!-- Header / Tabs -->
+      <div v-if="currentTorrent.is_temporary" class="px-4 py-2 border-b border-gray-200">
+        <TemporaryTorrentControl :torrent="currentTorrent" />
+      </div>
       <div class="px-4 bg-gray-50 border-b border-gray-200 flex justify-between items-end flex-shrink-0 pt-0 md:pt-2">
         <div class="flex items-center gap-4">
           <h3 class="text-sm font-bold text-gray-900 pb-2 mr-4 max-w-[150px] sm:max-w-xs truncate" :title="currentTorrent.name">

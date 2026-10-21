@@ -11,6 +11,8 @@ import (
 )
 
 type Config struct {
+	MaxTemporaryTorrents               int
+	temporaryConfigError               error
 	Port                               string
 	TorrentPort                        int
 	DownloadDir                        string
@@ -88,6 +90,7 @@ type Config struct {
 func Load() *Config {
 	cfg := &Config{}
 	var logRetention string
+	var maxTemporary string
 
 	flag.StringVar(&cfg.Port, "port", getEnv("HUB_PORT", "8080"), "Server port")
 	flag.IntVar(&cfg.TorrentPort, "torrent-port", getEnvAsInt("HUB_TORRENT_PORT", 50007), "BitTorrent protocol port")
@@ -95,6 +98,7 @@ func Load() *Config {
 	flag.StringVar(&cfg.DBPath, "db-path", getEnv("HUB_DB_PATH", "/config/hub.db"), "Path to SQLite database file")
 	flag.StringVar(&cfg.LogDir, "log-dir", getEnv("HUB_LOG_DIR", ""), "Log directory (default: logs beside database)")
 	flag.StringVar(&logRetention, "log-retention-days", getEnv("HUB_LOG_RETENTION_DAYS", "3"), "Previous calendar days of logs to retain (0 = today only)")
+	flag.StringVar(&maxTemporary, "max-temporary-torrents", getEnv("HUB_MAX_TEMPORARY_TORRENTS", "3"), "Maximum temporary torrents (positive integer)")
 	flag.IntVar(&cfg.MaxActiveStreams, "max-streams", getEnvAsInt("HUB_MAX_ACTIVE_STREAMS", 4), "Maximum number of active streams")
 	flag.IntVar(&cfg.MaxActiveDownloads, "max-downloads", getEnvAsInt("HUB_MAX_ACTIVE_DOWNLOADS", 5), "Maximum number of active background downloads")
 	flag.IntVar(&cfg.MinFreeSpaceGB, "min-free-space", getEnvAsInt("HUB_MIN_FREE_SPACE_GB", 5), "Minimum free space in GB to allow downloading")
@@ -155,6 +159,7 @@ func Load() *Config {
 	flag.IntVar(&cfg.BTClientRecycleMaxPerHour, "bt-client-recycle-max-per-hour", getEnvAsInt("HUB_BT_CLIENT_RECYCLE_MAX_PER_HOUR", 2), "Maximum BitTorrent client recycle attempts per hour")
 
 	flag.Parse()
+	cfg.MaxTemporaryTorrents, cfg.temporaryConfigError = strconv.Atoi(maxTemporary)
 	var retentionErr error
 	cfg.LogRetentionDays, retentionErr = strconv.Atoi(logRetention)
 	if retentionErr != nil {
@@ -297,6 +302,13 @@ func (cfg *Config) ValidateLogging() error {
 	}
 	if cfg.LogRetentionDays < 0 || cfg.LogRetentionDays > 36500 {
 		return fmt.Errorf("log retention days must be between 0 and 36500")
+	}
+	return nil
+}
+
+func (cfg *Config) ValidateTemporaryTorrents() error {
+	if cfg.temporaryConfigError != nil || cfg.MaxTemporaryTorrents < 1 {
+		return fmt.Errorf("max temporary torrents must be a positive integer")
 	}
 	return nil
 }

@@ -103,6 +103,8 @@ func (h *APIHandler) TorrentAction(w http.ResponseWriter, r *http.Request) {
 	logging.Infof("api torrent action hash=%s action=%s delete_files=%t", hash, req.Action, req.DeleteFiles)
 	var err error
 	switch req.Action {
+	case "make_permanent":
+		err = h.uc.MakePermanent(hash)
 	case "pause":
 		err = h.uc.Pause(hash)
 	case "resume":

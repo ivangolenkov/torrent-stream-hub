@@ -133,6 +133,7 @@ The service can be configured with command-line flags or environment variables. 
 | `HUB_DB_PATH` | `/config/hub.db` | SQLite database path. |
 | `HUB_MAX_ACTIVE_STREAMS` | `4` | Maximum active streams. |
 | `HUB_MAX_ACTIVE_DOWNLOADS` | `5` | Maximum active background downloads. |
+| `HUB_MAX_TEMPORARY_TORRENTS` | `3` | Maximum temporary torrents (`--max-temporary-torrents`); positive integer, restart required. |
 | `HUB_MIN_FREE_SPACE_GB` | `5` | Minimum free disk space required for downloading. |
 | `HUB_DOWNLOAD_LIMIT` | `0` | Download limit in bytes per second, `0` means unlimited. |
 | `HUB_UPLOAD_LIMIT` | `0` | Upload limit in bytes per second, `0` means unlimited. |
@@ -145,6 +146,30 @@ The service can be configured with command-line flags or environment variables. 
 | `HUB_LOG_RETENTION_DAYS` | `3` | Previous calendar days to keep, in addition to today (`--log-retention-days`). `0` keeps today only; valid range: 0–36500. |
 
 BitTorrent-related options are also available, including DHT/PEX/UPnP toggles, retracker configuration and swarm watchdog tuning. See `internal/config/config.go` for the full list.
+
+## Temporary Torrents And Automatic Cleanup
+
+**Warning:** TorrServer-compatible `POST /torrents` with `action: "add"` and `save_to_db: false` **or without `save_to_db`** now adds a temporary torrent. Exceeding the configured limit automatically removes the oldest temporary torrent **and its downloaded files**, including `.part` files. This is FIFO by first successful addition, not by last playback. Repeating an add does not move the torrent to the end of the queue.
+
+Temporary torrents are still saved in SQLite and survive restarts. The default limit is **3**, configurable through `HUB_MAX_TEMPORARY_TORRENTS` or `--max-temporary-torrents` (CLI wins). Only positive integers are accepted; `0` does not disable cleanup. Reducing the limit takes effect at startup after restarting the service.
+
+Permanent torrents do not count toward the limit and are never selected for automatic cleanup. All pre-existing records are migrated as permanent. Native Web GUI/API additions and `/torrent/upload` additions are permanent, and also promote an existing temporary torrent. Repeating TorrServer `add` with `save_to_db: true` promotes the same infohash permanently; a later `false` cannot undo that promotion. There is no conversion back to temporary in this version.
+
+The GUI displays **«Временный»** with **«Сделать постоянным»** in desktop/mobile lists and torrent details. Alternatively:
+
+```bash
+curl -X POST 'http://localhost:8080/api/v1/torrent/HASH/action' \
+  -H 'Content-Type: application/json' \
+  -d '{"action":"make_permanent"}'
+```
+
+Promotion is idempotent (`200`), with `404` for a missing torrent and `500` if persistence fails. Native REST lists and SSE include `is_temporary` explicitly.
+
+Cleanup runs after a successful **new** temporary addition, at startup and every five seconds for deferred work. Playback (both torrent-reader and direct-file paths), preload and HTTP downloads protect the oldest torrent; protection includes the ten-second debounce after a transfer ends. While protected, it blocks the FIFO queue: newer torrents are not removed instead, and the limit may temporarily be exceeded. No global lifecycle lock is held during video/file transmission or HTTP-link resolution.
+
+Cleanup errors do not roll back a successful addition or stop the service. A failed deletion stays visible, is logged and retried; the candidate is marked paused when deletion intent is saved. Exact payload paths are finalized after stopping the engine and persisted before unlinking, permitting retry after partial deletion/restart. An interrupted, incomplete manifest requires known metadata before retry, rather than guessing that there were no files. Unsafe paths, symlinks, application storage, shared/aliased payload paths, or inability to establish ownership cause cleanup to stop rather than guess. A metadata-pending torrent can therefore postpone deletion of another torrent's files until non-overlap can be established. Only confirmed payload files and empty parent directories are removed; arbitrary orphan files and metainfo caches are not swept.
+
+Keep the service on a trusted LAN or behind an authenticated proxy: the existing management API does not enforce Basic Auth, and CORS `*` intentionally permits Smart TV clients.
 
 ## Saved Logs And REST Access
 

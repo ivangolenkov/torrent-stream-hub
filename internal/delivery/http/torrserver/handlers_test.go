@@ -167,7 +167,7 @@ func TestResolveHTTPLinkSupportsMagnetRedirect(t *testing.T) {
 	}
 }
 
-func TestTorrentsAddPersistsEvenWhenSaveToDBFalse(t *testing.T) {
+func TestTorrentsAddPersistsAsTemporaryWhenSaveToDBFalse(t *testing.T) {
 	_, repo, h, cleanup := setupTorrServerIntegration(t)
 	defer cleanup()
 
@@ -192,6 +192,9 @@ func TestTorrentsAddPersistsEvenWhenSaveToDBFalse(t *testing.T) {
 	}
 	if fetched == nil {
 		t.Fatalf("expected torrent to be persisted despite save_to_db=false")
+	}
+	if !fetched.IsTemporary {
+		t.Fatal("save_to_db=false must mark torrent temporary")
 	}
 	if fetched.Title != "[LAMPA] Test" || fetched.Poster != "https://example.com/poster.jpg" {
 		t.Fatalf("expected metadata to be persisted, got %+v", fetched)

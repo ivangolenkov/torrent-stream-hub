@@ -8,13 +8,54 @@ export const useTorrentStore = defineStore('torrents', () => {
   const selectedHash = ref<string | null>(null);
   const files = ref<Record<string, File[]>>({});
   const pieces = ref<Record<string, string>>({});
+  const pinning = ref<Record<string, boolean>>({});
+  const pinErrors = ref<Record<string, string>>({});
+  // Protect a confirmed pin from an older SSE event already in flight.
+  const confirmedPermanent = new Set<string>();
+
+  const applyTorrents = (data: Torrent[]) => {
+    const hashes = new Set(data.map(t => t.hash));
+    for (const hash of confirmedPermanent) {
+      if (!hashes.has(hash)) confirmedPermanent.delete(hash);
+    }
+    for (const torrent of data) {
+      if (!torrent.is_temporary) confirmedPermanent.delete(torrent.hash);
+    }
+    for (const hash of Object.keys(files.value)) {
+      if (!hashes.has(hash)) delete files.value[hash];
+    }
+    for (const hash of Object.keys(pieces.value)) {
+      if (!hashes.has(hash)) delete pieces.value[hash];
+    }
+    for (const hash of Object.keys(pinErrors.value)) {
+      if (!hashes.has(hash)) delete pinErrors.value[hash];
+    }
+    if (selectedHash.value && !hashes.has(selectedHash.value)) selectedHash.value = null;
+    torrents.value = data.map(t => confirmedPermanent.has(t.hash) ? { ...t, is_temporary: false } : t);
+  };
+
+  const makePermanent = async (hash: string) => {
+    if (pinning.value[hash]) return;
+    pinning.value[hash] = true;
+    delete pinErrors.value[hash];
+    try {
+      await apiClient.action(hash, 'make_permanent');
+      confirmedPermanent.add(hash);
+      const torrent = torrents.value.find(t => t.hash === hash);
+      if (torrent) torrent.is_temporary = false;
+    } catch (e) {
+      pinErrors.value[hash] = e instanceof Error ? e.message : 'Не удалось сохранить торрент';
+    } finally {
+      delete pinning.value[hash];
+    }
+  };
   
   let sseCleanup: (() => void) | null = null;
 
   const initSSE = () => {
     if (sseCleanup) return;
     sseCleanup = setupSSE((newData) => {
-      torrents.value = newData || [];
+      applyTorrents(newData || []);
     });
   };
 
@@ -27,7 +68,7 @@ export const useTorrentStore = defineStore('torrents', () => {
 
   const loadTorrents = async () => {
     try {
-      torrents.value = await apiClient.getTorrents();
+      applyTorrents(await apiClient.getTorrents());
     } catch (e) {
       console.error(e);
     }
@@ -37,7 +78,8 @@ export const useTorrentStore = defineStore('torrents', () => {
     selectedHash.value = hash;
     if (!files.value[hash]) {
       try {
-        files.value[hash] = await apiClient.getFiles(hash);
+        const data = await apiClient.getFiles(hash);
+        if (torrents.value.some(t => t.hash === hash)) files.value[hash] = data;
       } catch (e) {
         console.error(e);
       }
@@ -63,6 +105,7 @@ export const useTorrentStore = defineStore('torrents', () => {
       closeInspector();
     }
     if (action === 'delete') {
+      confirmedPermanent.delete(hash);
       delete files.value[hash];
     }
     await loadTorrents();
@@ -93,6 +136,9 @@ export const useTorrentStore = defineStore('torrents', () => {
   };
 
   return {
+    makePermanent,
+    pinning,
+    pinErrors,
     torrents,
     selectedHash,
     files,

@@ -24,6 +24,12 @@ import (
 
 func (h *APIHandler) DownloadTorrentFile(w http.ResponseWriter, r *http.Request) {
 	hash := chi.URLParam(r, "hash")
+	release, err := h.uc.AcquireTransfer(hash)
+	if err != nil {
+		h.handleDownloadError(w, hash, err)
+		return
+	}
+	defer release()
 	index, err := strconv.Atoi(chi.URLParam(r, "index"))
 	if err != nil {
 		response.Error(w, http.StatusBadRequest, "Invalid file index")
@@ -40,6 +46,12 @@ func (h *APIHandler) DownloadTorrentFile(w http.ResponseWriter, r *http.Request)
 
 func (h *APIHandler) DownloadTorrent(w http.ResponseWriter, r *http.Request) {
 	hash := chi.URLParam(r, "hash")
+	release, err := h.uc.AcquireTransfer(hash)
+	if err != nil {
+		h.handleDownloadError(w, hash, err)
+		return
+	}
+	defer release()
 	t, files, err := h.uc.GetDownloadedTorrentFiles(hash)
 	if err != nil {
 		h.handleDownloadError(w, hash, err)

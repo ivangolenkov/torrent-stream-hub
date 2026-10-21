@@ -6,6 +6,7 @@ import { ArrowDownTrayIcon, FolderMinusIcon } from '@heroicons/vue/24/outline';
 import { apiClient } from '../api/client';
 import type { Torrent } from '../types';
 import ConfirmDialog from './ConfirmDialog.vue';
+import TemporaryTorrentControl from './TemporaryTorrentControl.vue';
 
 const store = useTorrentStore();
 const emit = defineEmits(['add-torrent']);
@@ -208,6 +209,7 @@ const confirmDelete = async () => {
                   {{ torrentLabel(t) }}
                 </div>
               </div>
+              <TemporaryTorrentControl :torrent="t" />
             </td>
             <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
               {{ formatSize(t.size) }}
@@ -304,6 +306,7 @@ const confirmDelete = async () => {
           </div>
           
           <!-- Status tag + Size + Priority -->
+          <TemporaryTorrentControl :torrent="t" />
           <div class="flex items-center gap-2 mb-2 text-xs">
             <span :class="['px-2 py-0.5 inline-flex leading-4 font-semibold rounded border', getStateColor(t.state)]">
               {{ t.state }}

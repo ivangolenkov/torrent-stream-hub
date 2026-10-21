@@ -57,59 +57,68 @@ func (sw *SyncWorker) StartContext(ctx context.Context) {
 			return
 		case <-ticker.C:
 		}
-		// Get all torrents from engine
-		activeTorrents := sw.engine.GetAllTorrents()
+		sw.syncOnce()
+	}
+}
 
-		// Save state to DB
-		for _, t := range activeTorrents {
-			if err := sw.repo.SaveTorrent(t); err != nil {
-				logging.Warnf("failed to sync torrent state to DB hash=%s: %v", t.Hash, err)
-			}
-		}
+func (sw *SyncWorker) syncOnce() {
+	// Take the snapshot under the same lock as add/delete/policy changes.
+	// Never reinsert a DB-missing engine entry (including a failed add).
+	sw.repo.Lifecycle.Lock()
+	defer sw.repo.Lifecycle.Unlock()
+	// Get all torrents from engine
+	activeTorrents := sw.engine.GetAllTorrents()
 
-		// Also get ALL torrents from DB to send complete state to UI
-		// Since engine might not have paused torrents in memory after restart (we haven't implemented restore yet)
-		// But let's assume for now UI gets state from Engine + DB.
-		// A proper way is merging DB list with Engine list.
-		dbTorrents, err := sw.repo.GetAllTorrents()
-		var stateToSend []*models.Torrent
-
-		if err == nil {
-			engineMap := make(map[string]*models.Torrent)
-			for _, t := range activeTorrents {
-				engineMap[t.Hash] = t
-			}
-
-			for _, dbT := range dbTorrents {
-				if engT, ok := engineMap[dbT.Hash]; ok {
-					mergePersistedMetadata(engT, dbT)
-					// Use engine's updated stats with persisted compatibility metadata.
-					stateToSend = append(stateToSend, engT)
-				} else {
-					stateToSend = append(stateToSend, dbT)
-				}
-			}
-		} else {
-			logging.Warnf("failed to load DB torrents for sync: %v", err)
-			stateToSend = activeTorrents
-		}
-
-		// Serialize to JSON
-		data, err := json.Marshal(stateToSend)
-		if err != nil {
-			logging.Warnf("failed to marshal sync state: %v", err)
+	// Save state to DB
+	for _, t := range activeTorrents {
+		persisted, err := sw.repo.GetTorrent(t.Hash)
+		if err != nil || persisted == nil {
 			continue
 		}
+		if err := sw.repo.SaveTorrent(t); err != nil {
+			logging.Warnf("failed to sync torrent state to DB hash=%s: %v", t.Hash, err)
+		}
+	}
 
-		// Broadcast to all SSE clients
-		sw.mu.RLock()
-		for ch := range sw.clients {
-			select {
-			case ch <- data:
-			default:
-				logging.Debugf("sync worker skipped slow SSE client")
+	// Include DB-only torrents and authoritative storage policy in the SSE snapshot.
+	dbTorrents, err := sw.repo.GetAllTorrents()
+	var stateToSend []*models.Torrent
+
+	if err == nil {
+		engineMap := make(map[string]*models.Torrent)
+		for _, t := range activeTorrents {
+			engineMap[t.Hash] = t
+		}
+
+		for _, dbT := range dbTorrents {
+			if engT, ok := engineMap[dbT.Hash]; ok {
+				mergePersistedMetadata(engT, dbT)
+				// Use engine's updated stats with persisted compatibility metadata.
+				stateToSend = append(stateToSend, engT)
+			} else {
+				stateToSend = append(stateToSend, dbT)
 			}
 		}
-		sw.mu.RUnlock()
+	} else {
+		logging.Warnf("failed to load DB torrents for sync: %v", err)
+		return // Never publish guessed policy or a falsely empty list on DB failure.
 	}
+
+	// Serialize to JSON
+	data, err := json.Marshal(stateToSend)
+	if err != nil {
+		logging.Warnf("failed to marshal sync state: %v", err)
+		return
+	}
+
+	// Broadcast to all SSE clients
+	sw.mu.RLock()
+	for ch := range sw.clients {
+		select {
+		case ch <- data:
+		default:
+			logging.Debugf("sync worker skipped slow SSE client")
+		}
+	}
+	sw.mu.RUnlock()
 }

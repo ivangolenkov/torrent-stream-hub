@@ -39,6 +39,7 @@ export interface PeerSummary {
 }
 
 export interface Torrent {
+  is_temporary: boolean;
   hash: string;
   name: string;
   title?: string;

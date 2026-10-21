@@ -4,11 +4,14 @@ import (
 	"database/sql"
 	"fmt"
 	"strings"
+	"sync"
 	"torrent-stream-hub/internal/models"
 )
 
 type TorrentRepo struct {
 	db *SQLiteDB
+	// Lifecycle serializes application mutations and sync snapshots, not network I/O.
+	Lifecycle sync.Mutex
 }
 
 func NewTorrentRepo(db *SQLiteDB) *TorrentRepo {
@@ -16,6 +19,16 @@ func NewTorrentRepo(db *SQLiteDB) *TorrentRepo {
 }
 
 func (r *TorrentRepo) SaveTorrent(t *models.Torrent) error {
+	return r.saveTorrent(t, nil)
+}
+
+// SaveTorrentWithPolicy initializes policy on insert; only explicit permanence
+// may change it afterwards. Ordinary statistics saves never change policy.
+func (r *TorrentRepo) SaveTorrentWithPolicy(t *models.Torrent, temporary bool) error {
+	return r.saveTorrent(t, &temporary)
+}
+
+func (r *TorrentRepo) saveTorrent(t *models.Torrent, policy *bool) error {
 	tx, err := r.db.DB().Begin()
 	if err != nil {
 		return err
@@ -24,8 +37,8 @@ func (r *TorrentRepo) SaveTorrent(t *models.Torrent) error {
 
 	// Insert or replace torrent metadata
 	_, err = tx.Exec(`
-		INSERT INTO torrents (hash, name, title, data, poster, category, size, downloaded, state, error, source_uri, updated_at) 
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+		INSERT INTO torrents (hash, name, title, data, poster, category, size, downloaded, state, error, source_uri, is_temporary, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
 		ON CONFLICT(hash) DO UPDATE SET 
 			name=excluded.name, 
 			title=CASE WHEN excluded.title != '' THEN excluded.title ELSE torrents.title END,
@@ -38,9 +51,14 @@ func (r *TorrentRepo) SaveTorrent(t *models.Torrent) error {
 			error=excluded.error,
 			source_uri=CASE WHEN excluded.source_uri != '' THEN excluded.source_uri ELSE torrents.source_uri END,
 			updated_at=CURRENT_TIMESTAMP
-	`, t.Hash, t.Name, t.Title, t.Data, t.Poster, t.Category, t.Size, t.Downloaded, string(t.State), string(t.Error), t.SourceURI)
+	`, t.Hash, t.Name, t.Title, t.Data, t.Poster, t.Category, t.Size, t.Downloaded, string(t.State), string(t.Error), t.SourceURI, policy != nil && *policy)
 	if err != nil {
 		return fmt.Errorf("failed to save torrent: %w", err)
+	}
+	if policy != nil && !*policy {
+		if _, err := tx.Exec(`UPDATE torrents SET is_temporary = 0 WHERE hash = ?`, t.Hash); err != nil {
+			return err
+		}
 	}
 
 	// Insert or update files
@@ -70,12 +88,12 @@ func (r *TorrentRepo) SaveTorrent(t *models.Torrent) error {
 }
 
 func (r *TorrentRepo) GetTorrent(hash string) (*models.Torrent, error) {
-	row := r.db.DB().QueryRow(`SELECT hash, name, title, data, poster, category, size, downloaded, state, error, source_uri FROM torrents WHERE hash = ?`, hash)
+	row := r.db.DB().QueryRow(`SELECT hash, name, title, data, poster, category, size, downloaded, state, error, source_uri, is_temporary FROM torrents WHERE hash = ?`, hash)
 
 	t := &models.Torrent{}
 	var stateStr, errorStr string
 
-	if err := row.Scan(&t.Hash, &t.Name, &t.Title, &t.Data, &t.Poster, &t.Category, &t.Size, &t.Downloaded, &stateStr, &errorStr, &t.SourceURI); err != nil {
+	if err := row.Scan(&t.Hash, &t.Name, &t.Title, &t.Data, &t.Poster, &t.Category, &t.Size, &t.Downloaded, &stateStr, &errorStr, &t.SourceURI, &t.IsTemporary); err != nil {
 		if err == sql.ErrNoRows {
 			return nil, nil // not found
 		}
@@ -93,7 +111,7 @@ func (r *TorrentRepo) GetTorrent(hash string) (*models.Torrent, error) {
 }
 
 func (r *TorrentRepo) GetAllTorrents() ([]*models.Torrent, error) {
-	rows, err := r.db.DB().Query(`SELECT hash, name, title, data, poster, category, size, downloaded, state, error, source_uri FROM torrents ORDER BY created_at DESC`)
+	rows, err := r.db.DB().Query(`SELECT hash, name, title, data, poster, category, size, downloaded, state, error, source_uri, is_temporary FROM torrents ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, err
 	}
@@ -104,7 +122,7 @@ func (r *TorrentRepo) GetAllTorrents() ([]*models.Torrent, error) {
 	for rows.Next() {
 		t := &models.Torrent{}
 		var stateStr, errorStr string
-		if err := rows.Scan(&t.Hash, &t.Name, &t.Title, &t.Data, &t.Poster, &t.Category, &t.Size, &t.Downloaded, &stateStr, &errorStr, &t.SourceURI); err != nil {
+		if err := rows.Scan(&t.Hash, &t.Name, &t.Title, &t.Data, &t.Poster, &t.Category, &t.Size, &t.Downloaded, &stateStr, &errorStr, &t.SourceURI, &t.IsTemporary); err != nil {
 			return nil, err
 		}
 		t.State = models.TorrentState(stateStr)
@@ -170,8 +188,49 @@ func (r *TorrentRepo) loadFilesForTorrents(torrents map[string]*models.Torrent) 
 }
 
 func (r *TorrentRepo) DeleteTorrent(hash string) error {
-	_, err := r.db.DB().Exec(`DELETE FROM torrents WHERE hash = ?`, hash)
-	return err
+	tx, err := r.db.DB().Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	// Explicit deletes also cover legacy history without a foreign key and
+	// connections created by older SQLite pool configurations.
+	for _, query := range []string{
+		`DELETE FROM viewed_history WHERE hash = ?`,
+		`DELETE FROM files WHERE hash = ?`,
+		`DELETE FROM torrents WHERE hash = ?`,
+	} {
+		if _, err := tx.Exec(query, hash); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func (r *TorrentRepo) MakePermanent(hash string) (bool, error) {
+	res, err := r.db.DB().Exec(`UPDATE torrents SET is_temporary = 0 WHERE hash = ?`, hash)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
+}
+
+func (r *TorrentRepo) TemporaryQueue() ([]string, error) {
+	rows, err := r.db.DB().Query(`SELECT t.hash FROM torrents t JOIN torrent_order q ON q.hash = t.hash WHERE t.is_temporary = 1 ORDER BY q.id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var hashes []string
+	for rows.Next() {
+		var hash string
+		if err := rows.Scan(&hash); err != nil {
+			return nil, err
+		}
+		hashes = append(hashes, hash)
+	}
+	return hashes, rows.Err()
 }
 
 func (r *TorrentRepo) UpdateFilePriority(hash string, fileIndex int, priority models.FilePriority) error {

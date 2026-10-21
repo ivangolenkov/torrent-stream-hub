@@ -223,15 +223,11 @@ func (h *TorrServerHandler) addTorrent(req TorrentsReq) (*models.Torrent, error)
 			return nil, err
 		}
 		if len(torrentData) > 0 {
-			t, err := h.uc.AddTorrentFile(bytes.NewReader(torrentData))
-			if err != nil {
-				return nil, err
-			}
-			return h.uc.UpdateMetadata(t.Hash, metadata)
+			return h.uc.AddTorrentFileWithPolicy(bytes.NewReader(torrentData), metadata, !req.SaveToDB)
 		}
 		link = normalizeTorrentLink(resolved)
 	}
-	return h.uc.AddMagnetWithMetadata(link, metadata)
+	return h.uc.AddMagnetWithPolicy(link, metadata, !req.SaveToDB)
 }
 
 func (h *TorrServerHandler) Settings(w http.ResponseWriter, r *http.Request) {
@@ -477,6 +473,18 @@ func (h *TorrServerHandler) serveTorrentStatus(w http.ResponseWriter, r *http.Re
 }
 
 func (h *TorrServerHandler) servePreload(w http.ResponseWriter, r *http.Request, hash string, index int) {
+	release, err := h.uc.AcquireTransfer(hash)
+	if err != nil {
+		response.Error(w, http.StatusNotFound, "Torrent not found")
+		return
+	}
+	// The asynchronous warmup takes ownership of the lease below.
+	async := false
+	defer func() {
+		if !async {
+			release()
+		}
+	}()
 	t, err := h.uc.GetTorrent(hash)
 	if err != nil || t == nil {
 		response.Error(w, http.StatusNotFound, "Torrent not found")
@@ -498,7 +506,9 @@ func (h *TorrServerHandler) servePreload(w http.ResponseWriter, r *http.Request,
 
 	h.setPreload(hash, index, preloadState{TargetBytes: target, StartedAt: time.Now()})
 
+	async = true
 	go func() {
+		defer release()
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cancel()
 		read, _, err := h.uc.Warmup(ctx, hash, index, target)
@@ -573,6 +583,12 @@ func (h *TorrServerHandler) PlayAlias(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *TorrServerHandler) serveStream(w http.ResponseWriter, r *http.Request, hash string, index int) {
+	release, err := h.uc.AcquireTransfer(hash)
+	if err != nil {
+		response.Error(w, http.StatusNotFound, "Torrent not found")
+		return
+	}
+	defer release()
 	reqStart := time.Now()
 	reqID := middleware.GetReqID(r.Context())
 	rawRange := r.Header.Get("Range")

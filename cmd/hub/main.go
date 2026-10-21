@@ -29,6 +29,9 @@ func main() {
 
 func run() (runErr error) {
 	cfg := config.Load()
+	if err := cfg.ValidateTemporaryTorrents(); err != nil {
+		return err
+	}
 	if err := cfg.ValidateLogging(); err != nil {
 		return err
 	}
@@ -65,14 +68,20 @@ func run() (runErr error) {
 
 	repo := repository.NewTorrentRepo(db)
 	uc := usecase.NewTorrentUseCase(eng, repo)
+	if err := uc.SetTemporaryLimit(cfg.MaxTemporaryTorrents); err != nil {
+		return err
+	}
 	if err := uc.RestoreTorrents(); err != nil {
 		logging.Warnf("failed to restore persisted torrents: %v", err)
 	}
+	uc.CleanupTemporary("startup")
 	syncWorker := usecase.NewSyncWorker(eng, repo)
 	workerCtx, stopWorker := context.WithCancel(context.Background())
 	workerDone := make(chan struct{})
+	cleanupDone := make(chan struct{})
+	go func() { defer close(cleanupDone); uc.RunTemporaryCleanup(workerCtx) }()
 	go func() { defer close(workerDone); syncWorker.StartContext(workerCtx) }()
-	defer func() { stopWorker(); <-workerDone }()
+	defer func() { stopWorker(); <-workerDone; <-cleanupDone }()
 
 	server := &http.Server{
 		Addr:              ":" + cfg.Port,

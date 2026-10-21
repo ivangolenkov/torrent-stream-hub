@@ -97,13 +97,13 @@ func (fs *fileClientImpl) OpenTorrent(
 		}
 	}
 	t := &fileTorrentImpl{
-		info,
-		files,
-		metainfoFileInfos,
-		info.FileSegmentsIndex(),
-		infoHash,
-		defaultFileIo(),
-		fs,
+		info:              info,
+		files:             files,
+		metainfoFileInfos: metainfoFileInfos,
+		segmentLocater:    info.FileSegmentsIndex(),
+		infoHash:          infoHash,
+		io:                defaultFileIo(),
+		client:            fs,
 	}
 	if t.partFiles() {
 		err = t.setCompletionFromPartFiles()

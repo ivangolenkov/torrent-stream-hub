@@ -326,7 +326,7 @@ torrent-stream-hub/
 │   │   ├── torrent_uc.go       
 │   │   └── sync_worker.go      
 │   └── delivery/http/          
-│       ├── router.go           # Настройка роутов, CORS и Auth
+│       ├── router.go           # Настройка роутов и CORS
 │       ├── api/handlers.go     
 │       └── torrserver/         
 ├── storage/                    
@@ -424,9 +424,6 @@ services:
       - HUB_BT_CLIENT_RECYCLE_MIN_TORRENTS=1
       - HUB_BT_CLIENT_RECYCLE_MAX_PER_HOUR=2
       # Безопасность (опционально)
-      - HUB_AUTH_ENABLED=false
-      - HUB_AUTH_USER=admin
-      - HUB_AUTH_PASSWORD=admin
       # Права доступа
       - PUID=1000
       - PGID=1000

@@ -23,6 +23,11 @@ func (uc *TorrentUseCase) AcquireTransfer(hash string) (func(), error) {
 	if t == nil {
 		return nil, TorrentNotFoundError{Hash: hash}
 	}
+	if _, pending, err := uc.repo.CleanupPaths(hash); err != nil {
+		return nil, err
+	} else if pending {
+		return nil, ErrStorageConflict
+	}
 	uc.transfers[hash]++
 	var once sync.Once
 	return func() {
@@ -118,7 +123,7 @@ func (uc *TorrentUseCase) cleanupLocked(reason string) {
 	}
 	for len(queue) > uc.maxTemporary {
 		hash := queue[0]
-		if uc.transfers[hash] > 0 || time.Now().Before(uc.protectedUntil[hash]) || uc.engine.StreamManager().ActiveStreamsForTorrent(hash) > 0 {
+		if uc.transferProtected(hash) {
 			logging.Debugf("temporary cleanup deferred reason=%s hash=%s active transfer or debounce", reason, hash)
 			return
 		}
@@ -130,4 +135,8 @@ func (uc *TorrentUseCase) cleanupLocked(reason string) {
 		logging.Infof("temporary cleanup removed reason=%s hash=%s", reason, hash)
 		queue = queue[1:]
 	}
+}
+
+func (uc *TorrentUseCase) transferProtected(hash string) bool {
+	return uc.transfers[hash] > 0 || time.Now().Before(uc.protectedUntil[hash]) || uc.engine.StreamManager().ActiveStreamsForTorrent(hash) > 0
 }

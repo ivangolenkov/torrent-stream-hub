@@ -192,7 +192,14 @@ func (h *TorrServerHandler) Torrents(w http.ResponseWriter, r *http.Request) {
 	if req.Action == "rem" {
 		if err := h.uc.Delete(req.Hash, false); err != nil {
 			logging.Warnf("torrserver rem failed hash=%s: %v", req.Hash, err)
-			response.Error(w, http.StatusInternalServerError, err.Error())
+			status := http.StatusInternalServerError
+			if errors.Is(err, usecase.ErrStorageConflict) {
+				status = http.StatusConflict
+			}
+			if errors.Is(err, usecase.ErrTorrentNotFound) {
+				status = http.StatusNotFound
+			}
+			response.Error(w, status, "Torrent removal failed")
 			return
 		}
 		response.JSON(w, http.StatusOK, map[string]string{"status": "ok"})

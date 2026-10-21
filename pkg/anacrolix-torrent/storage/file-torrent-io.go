@@ -4,6 +4,7 @@ import (
 	"errors"
 	"io"
 	"io/fs"
+	"os"
 
 	"github.com/anacrolix/missinggo/v2/panicif"
 
@@ -76,6 +77,10 @@ func (fst fileTorrentImplIO) ReadAt(b []byte, off int64) (n int, err error) {
 }
 
 func (fst fileTorrentImplIO) WriteAt(p []byte, off int64) (n int, err error) {
+	if !fst.fts.beginOperation() {
+		return 0, os.ErrClosed
+	}
+	defer fst.fts.lifecycle.RUnlock()
 	for i, e := range fst.fts.segmentLocater.LocateIter(
 		segments.Extent{off, int64(len(p))},
 	) {

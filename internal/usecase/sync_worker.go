@@ -75,6 +75,9 @@ func (sw *SyncWorker) syncOnce() {
 		if err != nil || persisted == nil {
 			continue
 		}
+		if _, pending, err := sw.repo.CleanupPaths(t.Hash); err != nil || pending {
+			continue
+		}
 		if err := sw.repo.SaveTorrent(t); err != nil {
 			logging.Warnf("failed to sync torrent state to DB hash=%s: %v", t.Hash, err)
 		}

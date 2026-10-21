@@ -169,10 +169,8 @@ func TestDeleteTorrentFilesRemovesSingleFileAndPartFile(t *testing.T) {
 		t.Fatalf("failed to create part file: %v", err)
 	}
 
-	err := uc.deleteTorrentFiles(&models.Torrent{
-		Name:  "movie.mkv",
-		Files: []*models.File{{Path: "movie.mkv"}},
-	})
+	tor := temporaryFile(t, uc, "movie.mkv", false)
+	err := uc.Delete(tor.Hash, true)
 	if err != nil {
 		t.Fatalf("delete files failed: %v", err)
 	}
@@ -189,7 +187,7 @@ func TestDeleteTorrentFilesRemovesMultiFileStorageLayout(t *testing.T) {
 	defer cleanup()
 
 	downloadDir := uc.engine.DownloadDir()
-	filePath := filepath.Join(downloadDir, "Torrent Root", "Season 1", "episode.mkv")
+	filePath := filepath.Join(downloadDir, "Torrent Root", "nested", "video.bin")
 	if err := os.MkdirAll(filepath.Dir(filePath), 0o700); err != nil {
 		t.Fatalf("failed to create dir: %v", err)
 	}
@@ -197,10 +195,8 @@ func TestDeleteTorrentFilesRemovesMultiFileStorageLayout(t *testing.T) {
 		t.Fatalf("failed to create file: %v", err)
 	}
 
-	err := uc.deleteTorrentFiles(&models.Torrent{
-		Name:  "Torrent Root",
-		Files: []*models.File{{Path: "Season 1/episode.mkv"}},
-	})
+	tor := temporaryFile(t, uc, "Torrent Root", true)
+	err := uc.Delete(tor.Hash, true)
 	if err != nil {
 		t.Fatalf("delete files failed: %v", err)
 	}
@@ -213,13 +209,17 @@ func TestDeleteTorrentFilesRemovesMultiFileStorageLayout(t *testing.T) {
 }
 
 func TestDeleteTorrentFilesRejectsUnsafePath(t *testing.T) {
-	uc, _, cleanup := setupTorrentUseCase(t)
+	uc, repo, cleanup := setupTorrentUseCase(t)
 	defer cleanup()
 
-	err := uc.deleteTorrentFiles(&models.Torrent{
+	if err := repo.SaveTorrent(&models.Torrent{
+		Hash:  testInfoHash,
 		Name:  "unsafe",
 		Files: []*models.File{{Path: "../outside.mkv"}},
-	})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	err := uc.Delete(testInfoHash, true)
 	if err == nil {
 		t.Fatal("expected unsafe path error")
 	}
@@ -269,7 +269,7 @@ func TestOpenStreamSource_OldSQLiteProgressIgnored(t *testing.T) {
 	}
 }
 
-func TestGetDownloadedFile_PreservesContract(t *testing.T) {
+func TestGetDownloadedFileRejectsUnconfirmedDBLayout(t *testing.T) {
 	uc, repo, cleanup := setupTorrentUseCase(t)
 	defer cleanup()
 
@@ -293,19 +293,7 @@ func TestGetDownloadedFile_PreservesContract(t *testing.T) {
 	}
 
 	tor, diskFile, err := uc.GetDownloadedFile(hash, 0)
-	if err != nil {
-		t.Fatalf("GetDownloadedFile failed: %v", err)
-	}
-	if tor.Hash != hash {
-		t.Fatalf("expected hash %s, got %s", hash, tor.Hash)
-	}
-	if diskFile.Size != 18 {
-		t.Fatalf("expected size 18, got %d", diskFile.Size)
-	}
-	if diskFile.Path != "test.mkv" {
-		t.Fatalf("expected relative path test.mkv, got %s", diskFile.Path)
-	}
-	if diskFile.DiskPath != filePath {
-		t.Fatalf("expected disk path %s, got %s", filePath, diskFile.DiskPath)
+	if !errors.Is(err, ErrStorageConflict) || tor != nil || diskFile.open != nil {
+		t.Fatalf("DB-only guessed layout must be rejected: %v", err)
 	}
 }

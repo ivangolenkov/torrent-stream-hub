@@ -7,14 +7,12 @@ import (
 	"io"
 	"io/fs"
 	"os"
-	"path/filepath"
-	"strings"
 	"sync"
 	"sync/atomic"
 
 	"torrent-stream-hub/internal/logging"
 
-	"github.com/anacrolix/torrent/storage"
+	"torrent-stream-hub/internal/payload"
 )
 
 type StreamSourceType string
@@ -149,11 +147,7 @@ func (s *emptySeeker) Close() error {
 }
 
 func isSafeRelativePath(rel string) bool {
-	clean := filepath.Clean(rel)
-	if clean == "." || clean == ".." || filepath.IsAbs(clean) || strings.HasPrefix(clean, ".."+string(os.PathSeparator)) {
-		return false
-	}
-	return true
+	return payload.ValidateRelative(rel) == nil
 }
 
 // OpenStreamSource prepares a stream source for the given torrent and file.
@@ -231,7 +225,7 @@ func (e *Engine) OpenStreamSource(ctx context.Context, hash string, index int, i
 	// 3. Compute relative path from layout
 	info := mt.t.Info()
 	fi := file.FileInfo()
-	relPath := storage.DefaultFilePathMaker(storage.FilePathMakerOpts{Info: info, File: &fi})
+	relPath := payload.Path(info, &fi)
 	if !isSafeRelativePath(relPath) {
 		return makeTorrentFallback(FallbackReasonPathOutsideRoot)
 	}
@@ -249,8 +243,11 @@ func (e *Engine) OpenStreamSource(ctx context.Context, hash string, index int, i
 		return makeTorrentFallback(FallbackReasonPartFileExists)
 	}
 
-	f, err := root.Open(relPath)
+	f, err := payload.Open(root, relPath)
 	if err != nil {
+		if errors.Is(err, payload.ErrNotRegular) {
+			return makeTorrentFallback(FallbackReasonNotRegularFile)
+		}
 		if errors.Is(err, fs.ErrNotExist) {
 			return makeTorrentFallback(FallbackReasonFinalFileNotFound)
 		}
@@ -348,7 +345,7 @@ func (e *Engine) CheckFileDirectReady(hash string, index int) (bool, int64, erro
 
 	info := mt.t.Info()
 	fi := file.FileInfo()
-	relPath := storage.DefaultFilePathMaker(storage.FilePathMakerOpts{Info: info, File: &fi})
+	relPath := payload.Path(info, &fi)
 	if !isSafeRelativePath(relPath) {
 		return false, fileLength, nil
 	}
@@ -363,7 +360,12 @@ func (e *Engine) CheckFileDirectReady(hash string, index int) (bool, int64, erro
 		return false, fileLength, nil
 	}
 
-	st, err := root.Stat(relPath)
+	f, err := payload.Open(root, relPath)
+	if err != nil {
+		return false, fileLength, nil
+	}
+	defer f.Close()
+	st, err := f.Stat()
 	if err != nil || !st.Mode().IsRegular() || st.Size() != fileLength {
 		return false, fileLength, nil
 	}

@@ -8,17 +8,18 @@ import (
 	"strings"
 
 	"torrent-stream-hub/internal/models"
+	"torrent-stream-hub/internal/payload"
 
+	"github.com/anacrolix/torrent"
 	"github.com/anacrolix/torrent/metainfo"
-	"github.com/anacrolix/torrent/storage"
 )
 
 func storagePaths(info *metainfo.Info) ([]string, error) {
 	var paths []string
 	for _, file := range info.UpvertedFiles() {
-		path := storage.DefaultFilePathMaker(storage.FilePathMakerOpts{Info: info, File: &file})
+		path := payload.Path(info, &file)
 		if err := validateRelativeDownloadPath(path); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("%w: invalid storage layout", ErrStorageConflict)
 		}
 		paths = append(paths, path)
 	}
@@ -40,29 +41,45 @@ func (uc *TorrentUseCase) knownStoragePaths(t *models.Torrent) ([]string, error)
 }
 
 func (uc *TorrentUseCase) metadataStoragePaths(t *models.Torrent) ([]string, bool, error) {
+	info, err := uc.metadataStorageInfo(t)
+	if err != nil || info == nil {
+		return nil, false, err
+	}
+	paths, err := storagePaths(info)
+	return paths, true, err
+}
+
+func (uc *TorrentUseCase) metadataStorageInfo(t *models.Torrent) (*metainfo.Info, error) {
 	if raw := uc.engine.GetRawTorrent(t.Hash); raw != nil && raw.Info() != nil {
-		paths, err := storagePaths(raw.Info())
-		return paths, true, err
+		return raw.Info(), nil
 	}
 	mi, err := metainfo.LoadFromFile(filepath.Join(uc.engine.ConfigDir(), "metainfo", strings.ToLower(t.Hash)+".torrent"))
 	if err == nil {
-		if mi.HashInfoBytes().HexString() != t.Hash {
-			return nil, false, fmt.Errorf("metainfo hash mismatch")
+		spec, err := torrent.TorrentSpecFromMetaInfoErr(mi)
+		if err != nil {
+			return nil, err
+		}
+		matches := spec.InfoHash.HexString() == t.Hash
+		if spec.InfoHashV2.Ok {
+			v2 := spec.InfoHashV2.Value
+			matches = matches || v2.ToShort().HexString() == t.Hash
+		}
+		if !matches {
+			return nil, fmt.Errorf("%w: metainfo hash mismatch", ErrStorageConflict)
 		}
 		info, err := mi.UnmarshalInfo()
 		if err != nil {
-			return nil, false, err
+			return nil, err
 		}
-		paths, err := storagePaths(&info)
-		return paths, true, err
+		return &info, nil
 	}
 	if !errors.Is(err, os.ErrNotExist) {
-		return nil, false, err
+		return nil, err
 	}
 	if len(t.Files) != 0 {
-		return nil, false, fmt.Errorf("cannot prove storage layout without metainfo")
+		return nil, fmt.Errorf("%w: cannot prove storage layout without metainfo", ErrStorageConflict)
 	}
-	return nil, false, nil // No metadata and therefore no known data files.
+	return nil, nil // No metadata and therefore no known data files.
 }
 
 func (uc *TorrentUseCase) deleteTemporaryLocked(hash string) error {
@@ -73,6 +90,12 @@ func (uc *TorrentUseCase) deleteTemporaryLocked(hash string) error {
 	if t == nil || !t.IsTemporary {
 		return fmt.Errorf("cleanup candidate is no longer temporary")
 	}
+	return uc.deletePayloadLocked(t)
+}
+
+// Caller holds Lifecycle. Both manual deletion and FIFO use this workflow.
+func (uc *TorrentUseCase) deletePayloadLocked(t *models.Torrent) error {
+	hash := t.Hash
 	paths, pending, err := uc.repo.CleanupPaths(hash)
 	if err != nil {
 		return err
@@ -90,7 +113,10 @@ func (uc *TorrentUseCase) deleteTemporaryLocked(hash string) error {
 			return err
 		}
 		if pending && !known {
-			return fmt.Errorf("incomplete cleanup manifest requires metadata before retry")
+			return fmt.Errorf("%w: incomplete cleanup manifest requires metadata before retry", ErrStorageConflict)
+		}
+		if !known && raw == nil {
+			return fmt.Errorf("%w: cannot prove storage layout", ErrStorageConflict)
 		}
 		if err := uc.repo.BeginCleanup(hash, paths); err != nil {
 			return err
@@ -109,7 +135,7 @@ func (uc *TorrentUseCase) deleteTemporaryLocked(hash string) error {
 			return err
 		}
 	} else {
-		// A failed cleanup can have been explicitly resumed by the user.
+		// Idempotently stop any remaining runtime before retrying the manifest.
 		if err := uc.engine.Delete(hash); err != nil {
 			return err
 		}
@@ -127,7 +153,33 @@ func (uc *TorrentUseCase) deleteTemporaryLocked(hash string) error {
 		return err
 	}
 	defer root.Close()
+	if err := uc.validateOwnership(root, hash, owned, all); err != nil {
+		return err
+	}
+	// Validate the entire manifest before removing any entry.
 	for _, path := range owned {
+		if err := validateCleanupPath(root, path); err != nil {
+			return fmt.Errorf("%w: %v", ErrStorageConflict, err)
+		}
+	}
+	for _, path := range owned {
+		if err := root.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		for dir := filepath.Dir(path); dir != "."; dir = filepath.Dir(dir) {
+			if err := root.Remove(dir); err != nil {
+				break
+			} // Empty directories only.
+		}
+	}
+	return uc.repo.DeleteTorrent(hash)
+}
+
+func (uc *TorrentUseCase) validateOwnership(root *os.Root, hash string, owned []string, all []*models.Torrent) error {
+	for _, path := range owned {
+		if err := validateRelativeDownloadPath(path); err != nil {
+			return fmt.Errorf("%w: invalid manifest", ErrStorageConflict)
+		}
 		absolute, err := filepath.Abs(filepath.Join(uc.engine.DownloadDir(), path))
 		if err != nil {
 			return err
@@ -138,14 +190,14 @@ func (uc *TorrentUseCase) deleteTemporaryLocked(hash string) error {
 				return err
 			}
 			if pathsOverlap(absolute, reserved) {
-				return fmt.Errorf("torrent path overlaps application storage")
+				return fmt.Errorf("%w: torrent path overlaps application storage", ErrStorageConflict)
 			}
 			// SameFile also detects case/unicode aliases on macOS/Windows,
 			// including a payload nested in an aliased application directory.
 			if reservedInfo, err := os.Stat(reserved); err == nil {
 				for part := path; part != "."; part = filepath.Dir(part) {
 					if info, err := root.Stat(part); err == nil && os.SameFile(info, reservedInfo) {
-						return fmt.Errorf("torrent path aliases application storage")
+						return fmt.Errorf("%w: torrent path aliases application storage", ErrStorageConflict)
 					}
 				}
 			}
@@ -160,42 +212,26 @@ func (uc *TorrentUseCase) deleteTemporaryLocked(hash string) error {
 			return fmt.Errorf("cannot verify other torrent %s: %w", other.Hash, err)
 		}
 		if len(owned) > 0 && len(others) == 0 {
-			return fmt.Errorf("cannot prove non-overlap with metadata-pending torrent %s", other.Hash)
+			return fmt.Errorf("%w: cannot prove non-overlap with metadata-pending torrent %s", ErrStorageConflict, other.Hash)
 		}
 		for _, p := range others {
 			for _, q := range []string{p, p + ".part"} {
 				for _, own := range owned {
 					if pathsOverlap(own, q) {
-						return fmt.Errorf("shared storage path with torrent %s", other.Hash)
+						return fmt.Errorf("%w: shared storage path with torrent %s", ErrStorageConflict, other.Hash)
 					}
 					alias, err := storagePathsAlias(root, own, q)
 					if err != nil {
 						return err
 					}
 					if alias {
-						return fmt.Errorf("aliased storage path with torrent %s", other.Hash)
+						return fmt.Errorf("%w: aliased storage path with torrent %s", ErrStorageConflict, other.Hash)
 					}
 				}
 			}
 		}
 	}
-	// Validate the entire manifest before removing any entry.
-	for _, path := range owned {
-		if err := validateCleanupPath(root, path); err != nil {
-			return err
-		}
-	}
-	for _, path := range owned {
-		if err := root.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return err
-		}
-		for dir := filepath.Dir(path); dir != "."; dir = filepath.Dir(dir) {
-			if err := root.Remove(dir); err != nil {
-				break
-			} // Empty directories only.
-		}
-	}
-	return uc.repo.DeleteTorrent(hash)
+	return nil
 }
 
 func storagePathsAlias(root *os.Root, a, b string) (bool, error) {
@@ -222,24 +258,47 @@ func pathsOverlap(a, b string) bool {
 }
 
 func validateCleanupPath(root *os.Root, path string) error {
-	if err := validateRelativeDownloadPath(path); err != nil {
-		return err
+	return payload.Validate(root, path)
+}
+
+// openPayloadLocked is also used on every ZIP entry open after preflight. The
+// lease protects against deletion; Lifecycle serializes ownership checks with add.
+func (uc *TorrentUseCase) openPayloadLocked(hash, path string, size int64) (*os.File, error) {
+	if _, pending, err := uc.repo.CleanupPaths(hash); err != nil {
+		return nil, err
+	} else if pending {
+		return nil, ErrStorageConflict
 	}
-	parts := strings.Split(filepath.Clean(path), string(os.PathSeparator))
-	for i := range parts {
-		stat, err := root.Lstat(filepath.Join(parts[:i+1]...))
-		if errors.Is(err, os.ErrNotExist) {
-			return nil
-		}
+	all, err := uc.repo.GetAllTorrents()
+	if err != nil {
+		return nil, err
+	}
+	root, err := os.OpenRoot(uc.engine.DownloadDir())
+	if err != nil {
+		// A missing/unmounted storage root is a server failure, not a missing file.
+		return nil, fmt.Errorf("payload root unavailable: %v", err)
+	}
+	defer root.Close()
+	if err := uc.validateOwnership(root, hash, []string{path, path + ".part"}, all); err != nil {
+		return nil, err
+	}
+	if _, err := root.Lstat(path + ".part"); !errors.Is(err, os.ErrNotExist) {
 		if err != nil {
-			return err
+			return nil, err
 		}
-		if stat.Mode()&os.ModeSymlink != 0 {
-			return fmt.Errorf("refusing cleanup through symlink")
-		}
-		if i == len(parts)-1 && !stat.Mode().IsRegular() {
-			return fmt.Errorf("refusing cleanup of non-regular file")
-		}
+		return nil, ErrDownloadNotReady
 	}
-	return nil
+	if err := payload.Validate(root, path); err != nil {
+		return nil, fmt.Errorf("%w: invalid payload", ErrStorageConflict)
+	}
+	f, err := payload.Open(root, path)
+	if err != nil {
+		return nil, err
+	}
+	st, err := f.Stat()
+	if err != nil || st.Size() != size {
+		_ = f.Close()
+		return nil, ErrDownloadNotReady
+	}
+	return f, nil
 }

@@ -2,6 +2,7 @@ package api
 
 import (
 	"archive/zip"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -74,6 +75,13 @@ func (h *APIHandler) DownloadTorrent(w http.ResponseWriter, r *http.Request) {
 		archiveName = hash
 	}
 	archiveName += ".zip"
+	// Validate ALL entry names before committing response headers.
+	for _, file := range files {
+		if _, err := safeZipEntryName(file.Path); err != nil {
+			h.handleDownloadError(w, hash, usecase.ErrStorageConflict)
+			return
+		}
+	}
 
 	w.Header().Set("Content-Type", "application/zip")
 	setAttachment(w, archiveName)
@@ -84,7 +92,6 @@ func (h *APIHandler) DownloadTorrent(w http.ResponseWriter, r *http.Request) {
 	}
 
 	zipWriter := zip.NewWriter(w)
-	defer zipWriter.Close()
 
 	for _, file := range files {
 		if err := r.Context().Err(); err != nil {
@@ -97,9 +104,9 @@ func (h *APIHandler) DownloadTorrent(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		in, err := os.Open(file.DiskPath)
+		in, err := file.Open()
 		if err != nil {
-			logging.Warnf("zip file open failed hash=%s path=%q: %v", hash, file.DiskPath, err)
+			logging.Warnf("zip file open failed hash=%s entry=%q: %v", hash, file.Path, err)
 			return
 		}
 
@@ -114,23 +121,26 @@ func (h *APIHandler) DownloadTorrent(w http.ResponseWriter, r *http.Request) {
 			logging.Warnf("zip entry create failed hash=%s entry=%q: %v", hash, entryName, err)
 			return
 		}
-		_, copyErr := io.CopyBuffer(entry, in, make([]byte, 1024*1024))
+		_, copyErr := io.CopyBuffer(entry, contextReader{ctx: r.Context(), reader: in}, make([]byte, 1024*1024))
 		closeErr := in.Close()
 		if copyErr != nil {
-			logging.Warnf("zip file copy failed hash=%s path=%q: %v", hash, file.DiskPath, copyErr)
+			logging.Warnf("zip file copy failed hash=%s entry=%q: %v", hash, file.Path, copyErr)
 			return
 		}
 		if closeErr != nil {
-			logging.Warnf("zip file close failed hash=%s path=%q: %v", hash, file.DiskPath, closeErr)
+			logging.Warnf("zip file close failed hash=%s entry=%q: %v", hash, file.Path, closeErr)
 			return
 		}
 	}
+	// Only complete the central directory after every entry succeeded. A failed
+	// transfer must not masquerade as a valid ZIP with silently missing files.
+	_ = zipWriter.Close()
 }
 
 func (h *APIHandler) serveDiskFile(w http.ResponseWriter, r *http.Request, file usecase.DownloadedDiskFile) {
-	in, err := os.Open(file.DiskPath)
+	in, err := file.Open()
 	if err != nil {
-		response.Error(w, http.StatusConflict, "Downloaded file is not available on disk")
+		h.handleDownloadError(w, "", err)
 		return
 	}
 	defer in.Close()
@@ -165,15 +175,27 @@ func (h *APIHandler) serveDiskFile(w http.ResponseWriter, r *http.Request, file 
 		return
 	}
 
-	_, _ = io.CopyBuffer(w, in, make([]byte, 1024*1024))
+	_, _ = io.CopyBuffer(w, contextReader{ctx: r.Context(), reader: in}, make([]byte, 1024*1024))
+}
+
+type contextReader struct {
+	ctx    context.Context
+	reader io.Reader
+}
+
+func (r contextReader) Read(p []byte) (int, error) {
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return r.reader.Read(p)
 }
 
 func (h *APIHandler) handleDownloadError(w http.ResponseWriter, hash string, err error) {
-	if errors.Is(err, usecase.ErrTorrentNotFound) {
+	if errors.Is(err, usecase.ErrTorrentNotFound) || errors.Is(err, os.ErrNotExist) {
 		response.Error(w, http.StatusNotFound, "Torrent not found")
 		return
 	}
-	if errors.Is(err, usecase.ErrDownloadNotReady) {
+	if errors.Is(err, usecase.ErrDownloadNotReady) || errors.Is(err, usecase.ErrStorageConflict) {
 		response.Error(w, http.StatusConflict, "Download is not ready")
 		return
 	}
@@ -186,7 +208,7 @@ func (h *APIHandler) handleDownloadError(w http.ResponseWriter, hash string, err
 		return
 	}
 	logging.Warnf("download failed hash=%s: %v", hash, err)
-	response.Error(w, http.StatusInternalServerError, err.Error())
+	response.Error(w, http.StatusInternalServerError, "Download storage operation failed")
 }
 
 func setAttachment(w http.ResponseWriter, filename string) {
@@ -217,7 +239,7 @@ func safeAttachmentName(filename string) string {
 func safeZipEntryName(name string) (string, error) {
 	entry := filepath.ToSlash(strings.TrimSpace(name))
 	entry = path.Clean(entry)
-	if entry == "." || entry == ".." || strings.HasPrefix(entry, "../") || strings.HasPrefix(entry, "/") {
+	if entry == "." || entry == ".." || strings.Contains(entry, "\\") || strings.Contains(entry, ":") || strings.HasPrefix(entry, "../") || strings.HasPrefix(entry, "/") {
 		return "", fmt.Errorf("unsafe zip entry path: %s", name)
 	}
 	return entry, nil

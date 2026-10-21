@@ -120,13 +120,17 @@ func (h *APIHandler) TorrentAction(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err != nil {
+		if errors.Is(err, usecase.ErrStorageConflict) {
+			response.Error(w, http.StatusConflict, "Torrent is in use or storage ownership is unconfirmed")
+			return
+		}
 		if errors.Is(err, usecase.ErrTorrentNotFound) {
 			logging.Debugf("api torrent action not found hash=%s action=%s", hash, req.Action)
 			response.Error(w, http.StatusNotFound, err.Error())
 			return
 		}
 		logging.Warnf("api torrent action failed hash=%s action=%s: %v", hash, req.Action, err)
-		response.Error(w, http.StatusInternalServerError, err.Error())
+		response.Error(w, http.StatusInternalServerError, "Torrent action failed")
 		return
 	}
 

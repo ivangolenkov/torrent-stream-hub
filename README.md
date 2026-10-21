@@ -65,7 +65,6 @@ services:
       HUB_DOWNLOAD_DIR: /downloads
       HUB_DB_PATH: /config/hub.db
       HUB_MIN_FREE_SPACE_GB: "5"
-      HUB_AUTH_ENABLED: "false"
 ```
 
 Start it:
@@ -138,9 +137,6 @@ The service can be configured with command-line flags or environment variables. 
 | `HUB_DOWNLOAD_LIMIT` | `0` | Download limit in bytes per second, `0` means unlimited. |
 | `HUB_UPLOAD_LIMIT` | `0` | Upload limit in bytes per second, `0` means unlimited. |
 | `HUB_STREAM_CACHE_SIZE` | `209715200` | Streaming sliding-window cache size in bytes. |
-| `HUB_AUTH_ENABLED` | `false` | Enable Basic Auth. |
-| `HUB_AUTH_USER` | `admin` | Basic Auth user. |
-| `HUB_AUTH_PASSWORD` | `admin` | Basic Auth password. |
 | `HUB_LOG_LEVEL` | `debug` | Log level. |
 | `HUB_LOG_DIR` | `logs` beside the database | Daily log directory (`--log-dir`). |
 | `HUB_LOG_RETENTION_DAYS` | `3` | Previous calendar days to keep, in addition to today (`--log-retention-days`). `0` keeps today only; valid range: 0–36500. |
@@ -169,7 +165,17 @@ Cleanup runs after a successful **new** temporary addition, at startup and every
 
 Cleanup errors do not roll back a successful addition or stop the service. A failed deletion stays visible, is logged and retried; the candidate is marked paused when deletion intent is saved. Exact payload paths are finalized after stopping the engine and persisted before unlinking, permitting retry after partial deletion/restart. An interrupted, incomplete manifest requires known metadata before retry, rather than guessing that there were no files. Unsafe paths, symlinks, application storage, shared/aliased payload paths, or inability to establish ownership cause cleanup to stop rather than guess. A metadata-pending torrent can therefore postpone deletion of another torrent's files until non-overlap can be established. Only confirmed payload files and empty parent directories are removed; arbitrary orphan files and metainfo caches are not swept.
 
-Keep the service on a trusted LAN or behind an authenticated proxy: the existing management API does not enforce Basic Auth, and CORS `*` intentionally permits Smart TV clients.
+Keep the service on a trusted LAN or behind an authenticated proxy: there is no built-in authentication, and CORS `*` intentionally permits Smart TV clients.
+
+### File Safety And Upgrade Notes (Phase 34)
+
+Manual deletion and automatic cleanup use the same exact metadata-derived paths, including `.part`, and remove only empty parent directories. They never guess a second path or recursively delete a directory by torrent name. Active transfers and the ten-second debounce also block manual deletion (`409`). A pending deletion is paused and cannot be resumed, re-added or used for a new transfer; retry Delete after fixing the reported storage conflict, or explicitly remove only the record to retain the files. Automatic cleanup retries within its FIFO/limit policy; manual deletion is retried explicitly.
+
+File/ZIP downloads open inside the download root and reject symlinks, service storage, shared/aliased paths and unconfirmed layouts (`409`). Missing files return `404`; storage failures return generic `500` errors. Legacy records without matching metainfo must not be served or deleted by guessing from their name/size. Restore their original metainfo from backup before retrying. Keep a backup before manipulating legacy data. Filesystem operations are not a sandbox against a local administrator or external writer: hardlinks outside registered storage and same-size content changes are not cryptographically detected. Verified completion and isolated payload layout are planned separately.
+
+Removed nonfunctional authentication options are no longer supported: remove old authentication CLI flags (now rejected) and environment entries (no longer read) from deployment scripts. There is no built-in access control; management API and logs are accessible to anyone who can reach the service. Use a trusted network or protected reverse proxy.
+
+SQLite uses WAL for file databases, with foreign keys and a 5000 ms busy timeout on every pooled connection. In-memory databases use a single connection and SQLite's memory journal instead of WAL.
 
 ## Saved Logs And REST Access
 
@@ -197,7 +203,7 @@ Responses are finite size-bounded snapshots, not live-follow (`tail -f`). Bytes 
 
 Sensitive query parameters are masked before console/file output. Access logs omit query strings and headers. Handled HTTP panics include their stack trace, but arbitrary direct writes to stdout/stderr and fatal Go runtime dumps are **not** captured in daily files.
 
-**Security:** management routes currently do not enforce Basic Auth, even when `HUB_AUTH_ENABLED` is set. Anyone with network access to the service can read its logs. Keep it on a trusted LAN or protect it with an authenticated reverse proxy; permissive CORS is intentional for Smart TV compatibility. Masking known parameters is not a guarantee that all log content is free of sensitive data.
+**Security:** there is no built-in authentication. Anyone with network access to the service can read its logs. Keep it on a trusted LAN or protect it with an authenticated reverse proxy; permissive CORS is intentional for Smart TV compatibility. Masking known parameters is not a guarantee that all log content is free of sensitive data.
 
 ## Build Locally
 

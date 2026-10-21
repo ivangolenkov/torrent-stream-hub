@@ -23,9 +23,6 @@ type Config struct {
 	DownloadLimit                      int
 	UploadLimit                        int
 	StreamCacheSize                    int64
-	AuthEnabled                        bool
-	AuthUser                           string
-	AuthPassword                       string
 	LogLevel                           string
 	LogDir                             string
 	LogRetentionDays                   int
@@ -105,9 +102,6 @@ func Load() *Config {
 	flag.IntVar(&cfg.DownloadLimit, "download-limit", getEnvAsInt("HUB_DOWNLOAD_LIMIT", 0), "Download speed limit in bytes/sec (0 = unlimited)")
 	flag.IntVar(&cfg.UploadLimit, "upload-limit", getEnvAsInt("HUB_UPLOAD_LIMIT", 0), "Upload speed limit in bytes/sec (0 = unlimited)")
 	flag.Int64Var(&cfg.StreamCacheSize, "stream-cache-size", getEnvAsInt64("HUB_STREAM_CACHE_SIZE", 209715200), "Stream sliding window cache size in bytes")
-	flag.BoolVar(&cfg.AuthEnabled, "auth-enabled", getEnvAsBool("HUB_AUTH_ENABLED", false), "Enable basic authentication")
-	flag.StringVar(&cfg.AuthUser, "auth-user", getEnv("HUB_AUTH_USER", "admin"), "Basic auth username")
-	flag.StringVar(&cfg.AuthPassword, "auth-password", getEnv("HUB_AUTH_PASSWORD", "admin"), "Basic auth password")
 	flag.BoolVar(&cfg.BTSeed, "bt-seed", getEnvAsBool("HUB_BT_SEED", true), "Enable altruistic seeding after download completion")
 	flag.BoolVar(&cfg.BTNoUpload, "bt-no-upload", getEnvAsBool("HUB_BT_NO_UPLOAD", false), "Disable BitTorrent uploads")
 	flag.StringVar(&cfg.BTClientProfile, "bt-client-profile", getEnv("HUB_BT_CLIENT_PROFILE", "qbittorrent"), "BitTorrent client profile: qbittorrent or default")

@@ -4,7 +4,9 @@ import (
 	"database/sql"
 	"embed"
 	"fmt"
+	"net/url"
 	"sort"
+	"strings"
 
 	_ "modernc.org/sqlite"
 )
@@ -16,33 +18,48 @@ type SQLiteDB struct {
 	db *sql.DB
 }
 
-func NewSQLiteDB(dsn string) (*SQLiteDB, error) {
-	// Enable WAL mode via DSN parameters if not already present
-	// or we can execute PRAGMA directly.
-	// dsn might be just file path, so let's append params
-	// A simple approach is just opening it and running pragmas.
-
-	db, err := sql.Open("sqlite", dsn+"?_journal=WAL&_busy_timeout=5000&_foreign_keys=on")
+func NewSQLiteDB(dsn string) (_ *SQLiteDB, retErr error) {
+	// modernc applies _pragma on EVERY connection, including pool replacements.
+	base, query, _ := strings.Cut(dsn, "?")
+	params, err := url.ParseQuery(query)
+	if err != nil {
+		return nil, fmt.Errorf("invalid SQLite DSN: %w", err)
+	}
+	memory := base == ":memory:" || base == "file::memory:" || params.Get("mode") == "memory"
+	params.Add("_pragma", "busy_timeout(5000)")
+	params.Add("_pragma", "foreign_keys(1)")
+	if !memory {
+		params.Add("_pragma", "journal_mode(WAL)")
+	}
+	db, err := sql.Open("sqlite", base+"?"+params.Encode())
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
+	defer func() {
+		if retErr != nil {
+			_ = db.Close()
+		}
+	}()
 
 	// Set connection pool limits
 	db.SetMaxOpenConns(10)
 	db.SetMaxIdleConns(5)
+	if memory {
+		// Private in-memory databases are connection-local; also keep named memory
+		// databases alive until Close, without relying on shared-cache semantics.
+		db.SetMaxOpenConns(1)
+		db.SetMaxIdleConns(1)
+	}
 
 	if err := db.Ping(); err != nil {
 		return nil, fmt.Errorf("failed to ping database: %w", err)
 	}
 
-	// Enforce WAL mode
-	if _, err := db.Exec("PRAGMA journal_mode=WAL;"); err != nil {
-		return nil, fmt.Errorf("failed to enable WAL mode: %w", err)
-	}
-
-	// Ensure foreign keys are enforced
-	if _, err := db.Exec("PRAGMA foreign_keys=ON;"); err != nil {
-		return nil, fmt.Errorf("failed to enable foreign keys: %w", err)
+	if !memory {
+		var mode string
+		if err := db.QueryRow("PRAGMA journal_mode").Scan(&mode); err != nil || !strings.EqualFold(mode, "wal") {
+			return nil, fmt.Errorf("SQLite WAL unavailable (mode=%q): %v", mode, err)
+		}
 	}
 
 	sqliteDB := &SQLiteDB{db: db}

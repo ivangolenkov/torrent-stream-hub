@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"os"
+	"sync"
 
 	"github.com/anacrolix/missinggo/v2"
 	"github.com/anacrolix/missinggo/v2/panicif"
@@ -16,6 +17,10 @@ import (
 )
 
 type fileTorrentImpl struct {
+	// Close is a filesystem-mutation barrier. A hash result may reach storage
+	// after Torrent.Drop; it must not rename payload after application cleanup.
+	lifecycle         sync.RWMutex
+	closed            bool
 	info              *metainfo.Info
 	files             []fileExtra
 	metainfoFileInfos []metainfo.FileInfo
@@ -112,7 +117,19 @@ func (fts *fileTorrentImpl) Piece(p metainfo.Piece) PieceImpl {
 }
 
 func (fs *fileTorrentImpl) Close() error {
+	fs.lifecycle.Lock()
+	defer fs.lifecycle.Unlock()
+	fs.closed = true
 	return nil
+}
+
+func (fs *fileTorrentImpl) beginOperation() bool {
+	fs.lifecycle.RLock()
+	if fs.closed {
+		fs.lifecycle.RUnlock()
+		return false
+	}
+	return true
 }
 
 func (fts *fileTorrentImpl) file(index int) file {

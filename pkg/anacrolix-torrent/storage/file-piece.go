@@ -79,6 +79,10 @@ func (me *filePieceImpl) pieceCompletion() PieceCompletion {
 }
 
 func (me *filePieceImpl) Completion() (c Completion) {
+	if !me.t.beginOperation() {
+		return Completion{Err: os.ErrClosed}
+	}
+	defer me.t.lifecycle.RUnlock()
 	c = me.t.getCompletion(me.p.Index())
 	if !c.Ok || c.Err != nil {
 		return c
@@ -167,6 +171,10 @@ func (me *filePieceImpl) markIncompletePieces(file *file, size int64) {
 }
 
 func (me *filePieceImpl) MarkComplete() (err error) {
+	if !me.t.beginOperation() {
+		return os.ErrClosed
+	}
+	defer me.t.lifecycle.RUnlock()
 	err = me.pieceCompletion().Set(me.pieceKey(), true)
 	if err != nil {
 		return
@@ -221,6 +229,10 @@ func (me *filePieceImpl) allFilePiecesComplete(f file) (ret g.Result[bool]) {
 }
 
 func (me *filePieceImpl) MarkNotComplete() (err error) {
+	if !me.t.beginOperation() {
+		return os.ErrClosed
+	}
+	defer me.t.lifecycle.RUnlock()
 	err = me.pieceCompletion().Set(me.pieceKey(), false)
 	if err != nil {
 		return

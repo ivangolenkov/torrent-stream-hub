@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, onMounted, onUnmounted, nextTick } from 'vue';
+import { computed, ref, onMounted, onUnmounted, nextTick, watch } from 'vue';
 import { useTorrentStore } from '../stores/torrentStore';
 import { PlayIcon, PauseIcon, TrashIcon, EllipsisVerticalIcon, FolderOpenIcon, PlusIcon } from '@heroicons/vue/24/solid';
 import { ArrowDownTrayIcon, FolderMinusIcon } from '@heroicons/vue/24/outline';
@@ -30,13 +30,16 @@ const handleClickOutside = (event: MouseEvent) => {
 
 const toggleMenu = async (hash: string, event: MouseEvent) => {
   event.stopPropagation();
+  // DOM dispatch clears currentTarget before nextTick resolves.
+  const button = event.currentTarget;
+  if (!(button instanceof HTMLElement)) return;
   if (activeMenu.value === hash) {
     activeMenu.value = null;
   } else {
     activeMenu.value = hash;
-    await nextTick();
-    const button = event.currentTarget as HTMLElement;
     buttonRef.value = button;
+    await nextTick();
+    if (activeMenu.value !== hash || buttonRef.value !== button || !button.isConnected) return;
     const rect = button.getBoundingClientRect();
     
     const spaceBelow = window.innerHeight - rect.bottom;
@@ -55,6 +58,10 @@ const toggleMenu = async (hash: string, event: MouseEvent) => {
     }
   }
 };
+
+watch(activeTorrent, (torrent) => {
+  if (!torrent) activeMenu.value = null;
+});
 
 onMounted(() => {
   document.addEventListener('click', handleClickOutside);

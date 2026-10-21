@@ -18,6 +18,8 @@ import (
 	"torrent-stream-hub/internal/repository"
 	"torrent-stream-hub/internal/usecase"
 
+	"github.com/anacrolix/torrent/bencode"
+	"github.com/anacrolix/torrent/metainfo"
 	"github.com/go-chi/chi/v5"
 )
 
@@ -195,6 +197,7 @@ func TestDownloadTorrentFileServesCompletedFileWithRange(t *testing.T) {
 	defer cleanup()
 
 	content := []byte("hello downloaded file")
+	apiTestInfoHash := writeDownloadMetainfo(t, downloadDir, "movie.mkv", []metainfo.FileInfo{{Length: int64(len(content))}})
 	filePath := filepath.Join(downloadDir, "movie.mkv")
 	if err := os.WriteFile(filePath, content, 0o600); err != nil {
 		t.Fatalf("failed to create downloaded file: %v", err)
@@ -271,6 +274,7 @@ func TestDownloadSingleFileTorrentServesFileNotZip(t *testing.T) {
 	defer cleanup()
 
 	content := []byte("single file torrent")
+	apiTestInfoHash := writeDownloadMetainfo(t, downloadDir, "single.txt", []metainfo.FileInfo{{Length: int64(len(content))}})
 	if err := os.WriteFile(filepath.Join(downloadDir, "single.txt"), content, 0o600); err != nil {
 		t.Fatalf("failed to create downloaded file: %v", err)
 	}
@@ -332,6 +336,11 @@ func TestDownloadMultiFileTorrentStreamsZip(t *testing.T) {
 		total += int64(len(content))
 		index++
 	}
+	var metadataFiles []metainfo.FileInfo
+	for _, file := range modelFiles {
+		metadataFiles = append(metadataFiles, metainfo.FileInfo{Length: file.Size, Path: strings.Split(file.Path, "/")})
+	}
+	apiTestInfoHash := writeDownloadMetainfo(t, downloadDir, "Torrent Root", metadataFiles)
 	if err := repo.SaveTorrent(&models.Torrent{
 		Hash:       apiTestInfoHash,
 		Name:       "Torrent Root",
@@ -397,6 +406,7 @@ func TestDownloadMultiFileTorrentRejectsRangeForZip(t *testing.T) {
 			t.Fatalf("failed to create file %s: %v", name, err)
 		}
 	}
+	apiTestInfoHash := writeDownloadMetainfo(t, downloadDir, "Torrent Root", []metainfo.FileInfo{{Length: 5, Path: []string{"a.txt"}}, {Length: 5, Path: []string{"b.txt"}}})
 	if err := repo.SaveTorrent(&models.Torrent{
 		Hash:       apiTestInfoHash,
 		Name:       "Torrent Root",
@@ -451,7 +461,40 @@ func TestDownloadTorrentRejectsUnsafePath(t *testing.T) {
 
 	router.ServeHTTP(rr, req)
 
-	assertJSONError(t, rr, http.StatusBadRequest, "Unsafe download path")
+	assertJSONError(t, rr, http.StatusConflict, "Download is not ready")
+}
+
+// Completed legacy fixtures must carry real metainfo, not guessed DB paths.
+func writeDownloadMetainfo(t *testing.T, dir, name string, files []metainfo.FileInfo) string {
+	t.Helper()
+	info := metainfo.Info{Name: name, PieceLength: 1024}
+	var size int64
+	for _, f := range files {
+		size += f.Length
+	}
+	if len(files) == 1 && len(files[0].Path) == 0 {
+		info.Length = size
+	} else {
+		info.Files = files
+	}
+	info.Pieces = make([]byte, ((size+1023)/1024)*20)
+	data, err := bencode.Marshal(info)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mi := metainfo.MetaInfo{InfoBytes: data}
+	if err := os.MkdirAll(filepath.Join(dir, "metainfo"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Create(filepath.Join(dir, "metainfo", mi.HashInfoBytes().HexString()+".torrent"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if err := mi.Write(f); err != nil {
+		t.Fatal(err)
+	}
+	return mi.HashInfoBytes().HexString()
 }
 
 func setupAPITestUseCase(t *testing.T) (*usecase.TorrentUseCase, *repository.TorrentRepo, string, func()) {

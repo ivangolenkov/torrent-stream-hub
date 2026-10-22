@@ -22,9 +22,29 @@ Stream mutation and reconcile use admissionMu; StreamManager.mu protects readers
 of bookkeeping as well. Session IDs are manager-wide monotonic tokens. State
 identity and timer version invalidate old debounce callbacks. Reconcile holds
 stream lock through library apply and publication, protecting cross-file pieces.
-Direct descriptor registration uses Engine.mu -> StreamManager.mu to validate
-identity atomically against Delete; it never applies priorities or grants payload
-admission. The engine's Delete uses the already-admission-locked close helper.
+Direct descriptor registration now uses admissionMu -> Engine.mu ->
+StreamManager.mu -> ManagedTorrent.mu to validate identity and verification gates
+atomically against Delete/recheck. It never grants payload download admission.
+The engine's Delete uses the already-admission-locked close helper.
+
+The periodic speed sampler is the only statistics-baseline writer; API and
+watchdog reads cannot change sample time/deltas. Scheduler candidates are sorted
+by persisted queue position, then deterministic fallback keys. Selection completion
+is reconciled under admissionMu and is distinct from whole-payload completion.
+
+Explicit/automatic rechecks share one admitted verifier per generation. Operation
+status, rechecking and verificationUncertain are owned by ManagedTorrent.mu.
+Failed verification keeps application read/cache/activation gates revoked until
+a successful check; it never restores a pre-Pause snapshot. Local inactive read
+verification is serialized by application Lifecycle and accounted as engine work.
+The library's initial DisableNetworking flag is only enabled by explicit Resume;
+it is not a mechanism for cancelling discovery of an already online torrent.
+
+Preload coordinator state is protected by its own mutex, never held while taking
+application Lifecycle/admission locks. Capacity tokens survive state replacement
+and are released only after task/lease cleanup. Generation contexts invalidate
+results; engine task admission owns warmup and TTL-sweeper shutdown. SSE mailbox
+publication/close share their own subscription lock and never block on a client.
 
 storageTaskMu guards task admission and WaitGroup.Add against Close cancellation.
 Tasks inherit Engine context and optionally runtime context. Close cancels first,

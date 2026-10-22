@@ -76,6 +76,7 @@ func run() (runErr error) {
 	}
 	uc.CleanupTemporary("startup")
 	syncWorker := usecase.NewSyncWorker(eng, repo)
+	syncWorker.Refresh()
 	workerCtx, stopWorker := context.WithCancel(context.Background())
 	workerDone := make(chan struct{})
 	cleanupDone := make(chan struct{})
@@ -108,6 +109,9 @@ func run() (runErr error) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+	// Close long-lived SSE subscriptions before waiting for HTTP handlers.
+	syncWorker.Close()
+	stopWorker()
 
 	if err := server.Shutdown(ctx); err != nil {
 		logging.Errorf("server shutdown failed: %v", err)

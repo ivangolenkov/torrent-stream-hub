@@ -64,7 +64,6 @@ func (e *Engine) BTHealth() *models.BTHealth {
 		stats := mt.t.Stats()
 
 		mt.mu.Lock()
-		e.updateSpeedsLocked(mt, stats)
 		maxEstablishedConns := mt.normalMaxEstablishedConns
 		if maxEstablishedConns == 0 {
 			maxEstablishedConns = e.cfg.BTEstablishedConns
@@ -192,6 +191,7 @@ func trackerCounts(mt *ManagedTorrent) (int, int) {
 }
 
 func (e *Engine) mapManagedTorrent(mt *ManagedTorrent) *models.Torrent {
+	observedAt := time.Now().UnixNano()
 	t := mt.t
 	info := t.Info()
 	size := int64(0)
@@ -199,10 +199,9 @@ func (e *Engine) mapManagedTorrent(mt *ManagedTorrent) *models.Torrent {
 		size = info.TotalLength()
 	}
 
-	downloaded := t.BytesCompleted()
-	progress := float64(0)
-	if size > 0 {
-		progress = float64(downloaded) / float64(size) * 100
+	var prefix func(int64) int64
+	if info != nil {
+		prefix = verifiedPrefix(t.PieceStateRuns(), info.PieceLength)
 	}
 
 	stats := t.Stats()
@@ -219,50 +218,73 @@ func (e *Engine) mapManagedTorrent(mt *ManagedTorrent) *models.Torrent {
 		TrackerError:  mt.trackerError,
 		DHTStatus:     e.dhtStatus(),
 	}
-	e.updateSpeedsLocked(mt, stats)
 	e.logPeerSummaryLocked(t.InfoHash().HexString(), peerSummary, mt)
 
 	model := &models.Torrent{
-		Hash:          mt.hash,
-		Name:          t.Name(),
-		Size:          size,
-		Downloaded:    downloaded,
-		Progress:      progress,
-		State:         mt.state,
-		Error:         mt.err,
-		DownloadBlock: mt.downloadBlock,
+		Hash:           mt.hash,
+		Name:           t.Name(),
+		Size:           size,
+		ProgressSource: "unknown",
+		MetadataKnown:  info != nil,
+		State:          mt.state,
+		Error:          mt.err,
+		DownloadBlock:  mt.downloadBlock,
 
-		DownloadSpeed: mt.downloadSpeed,
-		UploadSpeed:   mt.uploadSpeed,
-		Peers:         peerSummary.Connected,
-		Seeds:         peerSummary.Seeds,
-		PeerSummary:   peerSummary,
-		SourceURI:     mt.sourceURI,
+		DownloadSpeed:     mt.downloadSpeed,
+		UploadSpeed:       mt.uploadSpeed,
+		Peers:             peerSummary.Connected,
+		Seeds:             peerSummary.Seeds,
+		PeerSummary:       peerSummary,
+		SourceURI:         mt.sourceURI,
+		QueuePosition:     mt.queuePosition,
+		SelectionComplete: mt.selectionComplete,
+	}
+	if mt.recheckOperation != nil {
+		operation := *mt.recheckOperation
+		model.Recheck = &operation
 	}
 	mt.mu.Unlock()
 
 	if info != nil {
 		model.PieceLength = info.PieceLength
 		model.NumPieces = info.NumPieces()
+		model.ProgressSource = "verified"
+		model.ProgressObservedAt = observedAt
 
 		mt.mu.Lock()
+		checking := mt.rechecking || mt.initializing
+		uncertain := mt.verificationUncertain
 		for i, file := range t.Files() {
 			prio := models.PriorityNormal
 			if p, ok := mt.filePriorities[i]; ok {
 				prio = p
 			}
+			downloaded := prefix(file.Offset()+file.Length()) - prefix(file.Offset())
+			if checking || uncertain {
+				downloaded = 0
+			}
+			model.Downloaded += downloaded
 			model.Files = append(model.Files, &models.File{
-				Index:      i,
-				Path:       file.DisplayPath(),
-				Size:       file.Length(),
-				Offset:     file.Offset(),
-				Downloaded: file.BytesCompleted(),
-				Priority:   prio,
-				IsMedia:    isMediaFile(file.DisplayPath()),
+				Index:       i,
+				Path:        file.DisplayPath(),
+				Size:        file.Length(),
+				Offset:      file.Offset(),
+				OffsetKnown: true,
+				Downloaded:  downloaded,
+				Priority:    prio,
+				IsMedia:     isMediaFile(file.DisplayPath()),
 			})
+		}
+		if checking {
+			model.ProgressSource = "checking"
+			model.ProgressObservedAt = 0
+		} else if uncertain {
+			model.ProgressSource = "unknown"
+			model.ProgressObservedAt = 0
 		}
 		mt.mu.Unlock()
 	}
+	model.Progress = models.ProgressPercent(model.Downloaded, model.Size)
 
 	return model
 }
@@ -290,8 +312,10 @@ func maxInt64(a, b int64) int64 {
 	return b
 }
 
-func (e *Engine) updateSpeedsLocked(mt *ManagedTorrent, stats torrent.TorrentStats) {
-	now := time.Now()
+func (e *Engine) sampleSpeedsLocked(mt *ManagedTorrent, stats torrent.TorrentStats, now time.Time) {
+	if !mt.lastStatsAt.IsZero() && !now.After(mt.lastStatsAt) {
+		return
+	}
 	rawReadBytes := stats.BytesRead.Int64()
 	dataReadBytes := stats.BytesReadData.Int64()
 	readBytes := stats.BytesReadUsefulData.Int64()

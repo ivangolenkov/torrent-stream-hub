@@ -52,6 +52,7 @@ type Engine struct {
 	diskProbe         func(string) (uint64, error)
 	saveDownloadBlock func(string, string) error
 	verifyTorrent     func(context.Context, *torrent.Torrent) error
+	nextRecheckID     uint64
 	managedTorrents   map[string]*ManagedTorrent
 	// Independent generation registry for callbacks under the library lock.
 	statusTorrents            sync.Map
@@ -114,6 +115,10 @@ type ManagedTorrent struct {
 	ctx                    context.Context
 	cancel                 context.CancelFunc
 	rechecking             bool
+	queuePosition          int64
+	selectionComplete      bool
+	recheckOperation       *models.RecheckOperation
+	verificationUncertain  bool
 }
 
 func New(cfg *config.Config) (*Engine, error) {
@@ -186,6 +191,7 @@ func New(cfg *config.Config) (*Engine, error) {
 	eng.streamManager = NewStreamManager(eng)
 
 	eng.startBackground(eng.resourceMonitor)
+	eng.startBackground(eng.speedSampler)
 	if cfg.BTSwarmWatchdogEnabled {
 		eng.startBackground(eng.swarmRefreshMonitor)
 	}
@@ -194,13 +200,29 @@ func New(cfg *config.Config) (*Engine, error) {
 }
 
 func (e *Engine) startBackground(fn func(context.Context)) {
+	e.StartTask(fn)
+}
+
+// StartTask admits service-owned work atomically against Close.
+func (e *Engine) StartTask(fn func(context.Context)) bool {
 	if !e.beginWork() {
-		return
+		return false
 	}
 	go func() {
 		defer e.wg.Done()
 		fn(e.ctx)
 	}()
+	return true
+}
+
+func (e *Engine) GenerationContext(hash string) (context.Context, error) {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	mt := e.managedTorrents[hash]
+	if mt == nil {
+		return nil, TorrentNotFoundError{Hash: hash}
+	}
+	return mt.ctx, nil
 }
 
 func (e *Engine) beginWork() bool {
@@ -472,46 +494,18 @@ func (e *Engine) ScheduleRecheckIfProgressBehind(hash string, persistedDownloade
 			e.admissionMu.Unlock()
 			return
 		}
-		mt.mu.Lock()
-		if mt.rechecking {
-			mt.mu.Unlock()
-			e.admissionMu.Unlock()
-			return
-		}
-		mt.rechecking = true
-		mt.downloadAllStarted = false
-		mt.mu.Unlock()
-		t.DisallowDataDownload()
-		for _, f := range t.Files() {
-			f.SetPriority(torrent.PiecePriorityNone)
-		}
-		t.CancelPieces(0, t.NumPieces())
-		if e.streamManager != nil {
-			_ = e.streamManager.refreshTorrentOverlayLocked(mt)
-		}
-		verify := e.verifyTorrent
+		_, err := e.startRecheckLocked(mt)
 		e.admissionMu.Unlock()
-		if verify == nil {
-			verify = func(ctx context.Context, t *torrent.Torrent) error { return t.VerifyDataContext(ctx) }
+		if err != nil {
+			logging.Debugf("deferred recheck not admitted hash=%s: %v", hash, err)
 		}
-		if err := verify(mt.ctx, t); err != nil {
-			logging.Warnf("torrent data recheck failed hash=%s: %v", hash, err)
-		}
-		e.finishRecheck(mt)
 	})
 }
 
 func (e *Engine) finishRecheck(mt *ManagedTorrent) {
-	e.admissionMu.Lock()
-	defer e.admissionMu.Unlock()
-	if !e.currentTorrent(mt) {
-		return
+	if e.currentTorrent(mt) {
+		e.finishVerification(mt, nil, nil)
 	}
-	mt.mu.Lock()
-	mt.rechecking = false
-	mt.mu.Unlock()
-	// Re-evaluate current intent; never restore the pre-recheck snapshot.
-	_ = e.admitPayloadLocked(mt)
 }
 
 func (e *Engine) addTorrent(t *torrent.Torrent) (*models.Torrent, error) {
@@ -577,6 +571,7 @@ func (e *Engine) registerTorrent(t *torrent.Torrent, sourceURI string, restored 
 	mt.payloadCtx, mt.payloadCancel = context.WithCancelCause(e.ctx)
 	mt.ctx, mt.cancel = context.WithCancel(e.ctx)
 	if restored != nil {
+		mt.queuePosition = restored.QueuePosition
 		mt.initializing = true
 		mt.state = restored.State
 		mt.err = restored.Error
@@ -693,6 +688,10 @@ func (e *Engine) resumeLocked(hash string) error {
 	}
 
 	mt.mu.Lock()
+	if mt.rechecking || mt.verificationUncertain {
+		mt.mu.Unlock()
+		return ErrOperationConflict
+	}
 	if mt.initializing {
 		mt.mu.Unlock()
 		return fmt.Errorf("torrent initialization is not complete")

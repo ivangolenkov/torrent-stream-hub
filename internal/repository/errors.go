@@ -1,0 +1,10 @@
+package repository
+
+import "errors"
+
+var (
+	ErrTorrentNotFound = errors.New("torrent not found")
+	ErrFileNotFound    = errors.New("file not found")
+	ErrInvalidPriority = errors.New("invalid file priority")
+	ErrMetadataPending = errors.New("file metadata is not available")
+)

@@ -13,7 +13,7 @@ const wrapperRef = ref<HTMLElement | null>(null);
 let resizeObserver: ResizeObserver | null = null;
 
 const drawPieces = () => {
-  if (!canvasRef.value || !wrapperRef.value || !props.torrent.piece_length || !props.piecesString) {
+  if (!canvasRef.value || !wrapperRef.value) {
     return;
   }
 
@@ -25,6 +25,8 @@ const drawPieces = () => {
   const rect = wrapperRef.value.getBoundingClientRect();
   canvas.width = rect.width;
   canvas.height = rect.height;
+	ctx.clearRect(0, 0, canvas.width, canvas.height);
+	if (!props.file.offset_known || props.torrent.progress_source !== 'verified' || !props.torrent.piece_length || !props.piecesString) return;
 
   const fileOffset = props.file.offset;
   const fileSize = props.file.size;
@@ -91,6 +93,7 @@ const drawPieces = () => {
 
 watch(() => props.piecesString, drawPieces);
 watch(() => props.file.downloaded, drawPieces); // Fallback redraw if downloaded changes
+watch(() => [props.file.offset_known, props.file.offset, props.file.size, props.torrent.progress_source, props.torrent.piece_length], drawPieces);
 
 onMounted(() => {
   drawPieces();

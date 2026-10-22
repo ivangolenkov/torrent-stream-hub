@@ -67,13 +67,17 @@ func (e *Engine) checkSwarms() {
 	e.mu.RUnlock()
 
 	for _, mt := range torrents {
-		stats := mt.t.Stats()
 		var refreshTorrent *torrent.Torrent
 		var refreshReason string
 		refreshDownloadAll := false
 
 		mt.mu.Lock()
-		e.updateSpeedsLocked(mt, stats)
+		if mt.lastStatsAt.IsZero() || now.Before(mt.lastStatsAt) || now.Sub(mt.lastStatsAt) > 3*time.Second {
+			// Lack of a fresh sample is not evidence of a stalled swarm.
+			mt.stallStartedAt = time.Time{}
+			mt.mu.Unlock()
+			continue
+		}
 
 		info := mt.t.Info()
 		complete := info != nil && mt.t.BytesCompleted() == info.TotalLength()

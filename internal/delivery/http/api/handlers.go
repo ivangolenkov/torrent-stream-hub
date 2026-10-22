@@ -4,8 +4,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strconv"
+	"time"
 	"torrent-stream-hub/internal/engine"
 
 	"torrent-stream-hub/internal/delivery/http/response"
@@ -17,14 +19,16 @@ import (
 )
 
 type APIHandler struct {
-	uc         *usecase.TorrentUseCase
-	syncWorker *usecase.SyncWorker
+	uc              *usecase.TorrentUseCase
+	syncWorker      *usecase.SyncWorker
+	sseWriteTimeout time.Duration
 }
 
 func NewAPIHandler(uc *usecase.TorrentUseCase, sw *usecase.SyncWorker) *APIHandler {
 	return &APIHandler{
-		uc:         uc,
-		syncWorker: sw,
+		uc:              uc,
+		syncWorker:      sw,
+		sseWriteTimeout: 10 * time.Second,
 	}
 }
 
@@ -117,7 +121,12 @@ func (h *APIHandler) TorrentAction(w http.ResponseWriter, r *http.Request) {
 	case "delete":
 		err = h.uc.Delete(hash, req.DeleteFiles)
 	case "recheck":
-		// TODO: implement recheck
+		operation, opErr := h.uc.Recheck(hash)
+		if opErr == nil {
+			response.JSON(w, http.StatusAccepted, operation)
+			return
+		}
+		err = opErr
 	default:
 		logging.Debugf("api torrent action unknown hash=%s action=%s", hash, req.Action)
 		response.Error(w, http.StatusBadRequest, "Unknown action")
@@ -125,6 +134,10 @@ func (h *APIHandler) TorrentAction(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err != nil {
+		if errors.Is(err, engine.ErrOperationConflict) || errors.Is(err, usecase.ErrMetadataPending) {
+			response.Error(w, http.StatusConflict, err.Error())
+			return
+		}
 		if errors.Is(err, engine.ErrDownloadBlocked) {
 			response.Error(w, http.StatusConflict, err.Error())
 			return
@@ -143,11 +156,11 @@ func (h *APIHandler) TorrentAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	response.Status(w, http.StatusOK, "ok")
+	commandStatus(w)
 }
 
 type PriorityReq struct {
-	Priority int `json:"priority"`
+	Priority *int `json:"priority"`
 }
 
 func (h *APIHandler) SetTorrentPriority(w http.ResponseWriter, r *http.Request) {
@@ -158,8 +171,15 @@ func (h *APIHandler) SetTorrentPriority(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	err := h.uc.SetTorrentFilesPriority(hash, models.FilePriority(req.Priority))
+	if req.Priority == nil {
+		response.Error(w, http.StatusBadRequest, "Priority is required")
+		return
+	}
+	err := h.uc.SetTorrentFilesPriority(hash, models.FilePriority(*req.Priority))
 	if err != nil {
+		if priorityError(w, err) {
+			return
+		}
 		if errors.Is(err, usecase.ErrTorrentNotFound) {
 			response.Error(w, http.StatusNotFound, "Torrent not found")
 			return
@@ -167,7 +187,7 @@ func (h *APIHandler) SetTorrentPriority(w http.ResponseWriter, r *http.Request) 
 		response.Error(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	response.Status(w, http.StatusOK, "ok")
+	commandStatus(w)
 }
 
 func (h *APIHandler) SetFilePriority(w http.ResponseWriter, r *http.Request) {
@@ -186,8 +206,15 @@ func (h *APIHandler) SetFilePriority(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	err = h.uc.SetFilePriority(hash, index, models.FilePriority(req.Priority))
+	if req.Priority == nil {
+		response.Error(w, http.StatusBadRequest, "Priority is required")
+		return
+	}
+	err = h.uc.SetFilePriority(hash, index, models.FilePriority(*req.Priority))
 	if err != nil {
+		if priorityError(w, err) {
+			return
+		}
 		if errors.Is(err, usecase.ErrTorrentNotFound) {
 			response.Error(w, http.StatusNotFound, "Torrent not found")
 			return
@@ -195,7 +222,28 @@ func (h *APIHandler) SetFilePriority(w http.ResponseWriter, r *http.Request) {
 		response.Error(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	response.Status(w, http.StatusOK, "ok")
+	commandStatus(w)
+}
+
+func commandStatus(w http.ResponseWriter) {
+	response.JSON(w, http.StatusOK, map[string]any{"status": "ok", "command_at_ns": time.Now().UnixNano()})
+}
+
+func priorityError(w http.ResponseWriter, err error) bool {
+	status := 0
+	switch {
+	case errors.Is(err, usecase.ErrInvalidPriority):
+		status = http.StatusBadRequest
+	case errors.Is(err, usecase.ErrFileNotFound), errors.Is(err, usecase.ErrTorrentNotFound):
+		status = http.StatusNotFound
+	case errors.Is(err, usecase.ErrMetadataPending), errors.Is(err, usecase.ErrStorageConflict), errors.Is(err, engine.ErrDownloadBlocked):
+		status = http.StatusConflict
+	}
+	if status == 0 {
+		return false
+	}
+	response.Error(w, status, err.Error())
+	return true
 }
 
 func (h *APIHandler) GetTorrentFiles(w http.ResponseWriter, r *http.Request) {
@@ -241,14 +289,37 @@ func (h *APIHandler) BTHealth(w http.ResponseWriter, r *http.Request) {
 
 // SSEEvents handles Server-Sent Events connection for UI updates
 func (h *APIHandler) SSEEvents(w http.ResponseWriter, r *http.Request) {
+	controller := http.NewResponseController(w)
+	// A bounded writer is required; reject unsupported middleware/writers rather
+	// than pretending that shutdown can interrupt an arbitrary blocking Write.
+	if err := controller.SetWriteDeadline(time.Now().Add(h.sseWriteTimeout)); err != nil {
+		response.Error(w, http.StatusServiceUnavailable, "SSE write deadlines are unavailable")
+		return
+	}
+	defer controller.SetWriteDeadline(time.Time{})
+	if _, ok := w.(http.Flusher); !ok {
+		response.Error(w, http.StatusServiceUnavailable, "SSE flushing is unavailable")
+		return
+	}
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 
-	ch := make(chan []byte, 10)
+	ch := make(chan []byte, 1)
 	h.syncWorker.AddClient(ch)
 	defer h.syncWorker.RemoveClient(ch)
 	logging.Infof("api sse client connected remote=%s", r.RemoteAddr)
+	heartbeat := time.NewTicker(15 * time.Second)
+	defer heartbeat.Stop()
+	write := func(message string) bool {
+		if err := controller.SetWriteDeadline(time.Now().Add(h.sseWriteTimeout)); err != nil {
+			return false
+		}
+		if _, err := io.WriteString(w, message); err != nil {
+			return false
+		}
+		return controller.Flush() == nil
+	}
 
 	for {
 		select {
@@ -256,10 +327,15 @@ func (h *APIHandler) SSEEvents(w http.ResponseWriter, r *http.Request) {
 			if !ok {
 				return
 			}
-			fmt.Fprintf(w, "data: %s\n\n", data)
-			if f, ok := w.(http.Flusher); ok {
-				f.Flush()
+			if !write(fmt.Sprintf("data: %s\n\n", data)) {
+				return
 			}
+		case <-heartbeat.C:
+			if !write(": heartbeat\n\n") {
+				return
+			}
+		case <-h.syncWorker.Done():
+			return
 		case <-r.Context().Done():
 			logging.Infof("api sse client disconnected remote=%s", r.RemoteAddr)
 			return

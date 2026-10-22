@@ -173,6 +173,10 @@ func ApplyDefaults(cfg *Config) {
 	if cfg == nil {
 		return
 	}
+	// Zero disables the emulated cache window; negative inputs normalize to it.
+	if cfg.StreamCacheSize < 0 {
+		cfg.StreamCacheSize = 0
+	}
 	if cfg.LogDir == "" {
 		cfg.LogDir = filepath.Join(filepath.Dir(cfg.DBPath), "logs")
 	}

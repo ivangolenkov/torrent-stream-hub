@@ -140,6 +140,8 @@ func (sm *StreamManager) ActiveStreamsTotal() int {
 // read lock, so Delete cannot remove it between validation and registration.
 // The caller retains ownership of closer if registration fails.
 func (sm *StreamManager) RegisterDirectStream(hash string, expected *ManagedTorrent, closer io.Closer) (<-chan struct{}, func(), error) {
+	sm.engine.admissionMu.Lock()
+	defer sm.engine.admissionMu.Unlock()
 	sm.engine.mu.RLock()
 	defer sm.engine.mu.RUnlock()
 	if current, ok := sm.engine.managedTorrents[hash]; !ok || current != expected {
@@ -150,6 +152,12 @@ func (sm *StreamManager) RegisterDirectStream(hash string, expected *ManagedTorr
 	defer sm.mu.Unlock()
 	if sm.closed {
 		return nil, nil, fmt.Errorf("stream manager closed")
+	}
+	expected.mu.Lock()
+	checking := expected.rechecking || expected.initializing || expected.verificationUncertain
+	expected.mu.Unlock()
+	if checking {
+		return nil, nil, ErrOperationConflict
 	}
 
 	sm.nextDirectID++
@@ -172,6 +180,22 @@ func (sm *StreamManager) RegisterDirectStream(hash string, expected *ManagedTorr
 		})
 	}
 	return ch, unregister, nil
+}
+
+func (sm *StreamManager) hasReaders(hash string) bool {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	for key, state := range sm.states {
+		if key.Hash == hash && (state.ActiveStreams > 0 || state.ActivePreloads > 0 || state.DebounceTimer != nil) {
+			return true
+		}
+	}
+	for _, handle := range sm.directStreams {
+		if handle.torrent.hash == hash {
+			return true
+		}
+	}
+	return false
 }
 
 func (sm *StreamManager) CloseStreamsForTorrent(mt *ManagedTorrent) {

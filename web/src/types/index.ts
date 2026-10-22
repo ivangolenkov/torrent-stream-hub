@@ -21,6 +21,8 @@ export interface File {
   path: string;
   size: number;
   offset: number;
+	 offset_known?: boolean;
+	 legacy_downloaded?: number;
   downloaded: number;
   priority: number;
   is_media: boolean;
@@ -54,6 +56,13 @@ export interface Torrent {
   size: number;
   downloaded: number;
   progress: number;
+	progress_source?: 'verified' | 'last_known' | 'legacy' | 'unknown' | 'checking';
+	progress_observed_at_ns?: number;
+	legacy_downloaded?: number;
+	metadata_known?: boolean;
+	selection_complete?: boolean;
+	snapshot_at_ns?: number;
+	recheck?: { id: number; status: 'pending' | 'running' | 'succeeded' | 'failed' | 'cancelled'; error?: string };
   state: TorrentState;
   error?: ErrorReason;
   files?: File[];

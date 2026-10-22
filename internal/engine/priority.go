@@ -63,6 +63,7 @@ func (e *Engine) applyFilePrioritiesAndDownload(mt *ManagedTorrent) error {
 }
 
 func (e *Engine) SetFilePriority(hash string, fileIndex int, priority models.FilePriority) error {
+	defer e.manageResources()
 	e.admissionMu.Lock()
 	defer e.admissionMu.Unlock()
 	if e.ctx.Err() != nil {
@@ -102,6 +103,7 @@ func (e *Engine) SetFilePriority(hash string, fileIndex int, priority models.Fil
 }
 
 func (e *Engine) SetTorrentFilesPriority(hash string, priority models.FilePriority) error {
+	defer e.manageResources()
 	e.admissionMu.Lock()
 	defer e.admissionMu.Unlock()
 	if e.ctx.Err() != nil {
@@ -137,6 +139,7 @@ func (e *Engine) SetTorrentFilesPriority(hash string, priority models.FilePriori
 // SetFilePriorities applies a committed bulk selection as one runtime command,
 // including known file indices whose metadata is still pending.
 func (e *Engine) SetFilePriorities(hash string, priorities map[int]models.FilePriority) error {
+	defer e.manageResources()
 	e.admissionMu.Lock()
 	defer e.admissionMu.Unlock()
 	if e.ctx.Err() != nil {

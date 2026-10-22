@@ -3,7 +3,6 @@ package repository
 import (
 	"database/sql"
 	"fmt"
-	"strings"
 	"sync"
 	"torrent-stream-hub/internal/models"
 )
@@ -29,29 +28,57 @@ func (r *TorrentRepo) SaveTorrentWithPolicy(t *models.Torrent, temporary bool) e
 }
 
 func (r *TorrentRepo) saveTorrent(t *models.Torrent, policy *bool) error {
+	if t == nil || t.Hash == "" {
+		return fmt.Errorf("invalid torrent snapshot")
+	}
+	indices := make(map[int]bool, len(t.Files))
+	for _, f := range t.Files {
+		if f == nil || f.Index < 0 || f.Size < 0 || !models.ValidFilePriority(f.Priority) || indices[f.Index] {
+			return fmt.Errorf("invalid file snapshot")
+		}
+		indices[f.Index] = true
+	}
 	tx, err := r.db.DB().Begin()
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
+	var previousObservation int64
+	err = tx.QueryRow(`SELECT progress_observed_at FROM torrents WHERE hash=?`, t.Hash).Scan(&previousObservation)
+	if err != nil && err != sql.ErrNoRows {
+		return err
+	}
+	if t.ProgressSource == "verified" && t.ProgressObservedAt <= 0 {
+		return fmt.Errorf("verified snapshot requires observation time")
+	}
+	writeProgress := t.ProgressSource == "verified" && t.ProgressObservedAt > previousObservation ||
+		(t.ProgressSource == "" || t.ProgressSource == "legacy") && previousObservation == 0
+	writeMetadata := t.MetadataKnown || t.ProgressSource == "" || t.ProgressSource == "legacy"
+	initialSource := t.ProgressSource
+	if initialSource == "" {
+		initialSource = "legacy"
+	}
+	if initialSource != "verified" && initialSource != "legacy" && initialSource != "last_known" {
+		initialSource = "unknown"
+	}
 
 	// Insert or replace torrent metadata
 	_, err = tx.Exec(`
-		INSERT INTO torrents (hash, name, title, data, poster, category, size, downloaded, state, error, source_uri, is_temporary, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+		INSERT INTO torrents (hash, name, title, data, poster, category, size, downloaded, state, error, source_uri, is_temporary, progress_source, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
 		ON CONFLICT(hash) DO UPDATE SET 
-			name=excluded.name, 
+			name=CASE WHEN ? OR torrents.name='' THEN excluded.name ELSE torrents.name END,
 			title=CASE WHEN excluded.title != '' THEN excluded.title ELSE torrents.title END,
 			data=CASE WHEN excluded.data != '' THEN excluded.data ELSE torrents.data END,
 			poster=CASE WHEN excluded.poster != '' THEN excluded.poster ELSE torrents.poster END,
 			category=CASE WHEN excluded.category != '' THEN excluded.category ELSE torrents.category END,
-			size=excluded.size, 
-			downloaded=MAX(torrents.downloaded, excluded.downloaded), 
+			size=CASE WHEN ? THEN excluded.size ELSE torrents.size END,
+			downloaded=CASE WHEN ? THEN excluded.downloaded ELSE torrents.downloaded END,
 			state=CASE WHEN torrents.deletion_mode != '' THEN torrents.state ELSE excluded.state END,
 			error=CASE WHEN torrents.deletion_mode != '' THEN torrents.error ELSE excluded.error END,
 			source_uri=CASE WHEN excluded.source_uri != '' THEN excluded.source_uri ELSE torrents.source_uri END,
 			updated_at=CURRENT_TIMESTAMP
-	`, t.Hash, t.Name, t.Title, t.Data, t.Poster, t.Category, t.Size, t.Downloaded, string(t.State), string(t.Error), t.SourceURI, policy != nil && *policy)
+	`, t.Hash, t.Name, t.Title, t.Data, t.Poster, t.Category, t.Size, max(int64(0), t.Downloaded), string(t.State), string(t.Error), t.SourceURI, policy != nil && *policy, initialSource, writeMetadata, writeMetadata, writeProgress)
 	if err != nil {
 		return fmt.Errorf("failed to save torrent: %w", err)
 	}
@@ -60,26 +87,44 @@ func (r *TorrentRepo) saveTorrent(t *models.Torrent, policy *bool) error {
 			return err
 		}
 	}
+	if writeProgress {
+		source := "legacy"
+		if t.ProgressSource == "verified" {
+			source = "verified"
+		}
+		if _, err := tx.Exec(`UPDATE torrents SET progress_source=?, progress_observed_at=?, legacy_downloaded=CASE WHEN ?='legacy' THEN MAX(legacy_downloaded,?) ELSE legacy_downloaded END WHERE hash=?`, source, t.ProgressObservedAt, source, max(int64(0), t.Downloaded), t.Hash); err != nil {
+			return err
+		}
+	}
+	if t.MetadataKnown {
+		if _, err := tx.Exec(`UPDATE torrents SET piece_length=?,num_pieces=?,metadata_known=1 WHERE hash=?`, t.PieceLength, t.NumPieces, t.Hash); err != nil {
+			return err
+		}
+	}
 
 	// Insert or update files
 	if len(t.Files) > 0 {
-		var values []interface{}
-		var placeholders []string
-
-		for _, f := range t.Files {
-			placeholders = append(placeholders, "(?, ?, ?, ?, ?, ?, ?)")
-			values = append(values, t.Hash, f.Index, f.Path, f.Size, f.Downloaded, f.Priority, f.IsMedia)
-		}
-
-		query := fmt.Sprintf(`
-			INSERT INTO files (hash, "index", path, size, downloaded, priority, is_media)
-			VALUES %s
+		stmt, err := tx.Prepare(`
+			INSERT INTO files (hash, "index", path, size, downloaded, priority, is_media, file_offset, offset_known, legacy_downloaded)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			ON CONFLICT(hash, "index") DO UPDATE SET 
-				downloaded=MAX(files.downloaded, excluded.downloaded)
-		`, strings.Join(placeholders, ", "))
-
-		if _, err := tx.Exec(query, values...); err != nil {
-			return fmt.Errorf("failed to save files: %w", err)
+				downloaded=CASE WHEN ? THEN excluded.downloaded ELSE files.downloaded END,
+				file_offset=CASE WHEN excluded.offset_known THEN excluded.file_offset ELSE files.file_offset END,
+				offset_known=MAX(files.offset_known, excluded.offset_known),
+				legacy_downloaded=MAX(files.legacy_downloaded,excluded.legacy_downloaded)
+		`)
+		if err != nil {
+			return fmt.Errorf("failed to prepare files: %w", err)
+		}
+		defer stmt.Close()
+		for _, f := range t.Files {
+			legacy := int64(0)
+			if t.ProgressSource == "" || t.ProgressSource == "legacy" {
+				legacy = max(int64(0), f.Downloaded)
+			}
+			if _, err := stmt.Exec(t.Hash, f.Index, f.Path, f.Size, max(int64(0), f.Downloaded), f.Priority, f.IsMedia, f.Offset, f.OffsetKnown, legacy, writeProgress); err != nil {
+				return fmt.Errorf("failed to save file %d: %w", f.Index, err)
+			}
 		}
 	}
 
@@ -111,6 +156,9 @@ func (r *TorrentRepo) GetTorrent(hash string) (*models.Torrent, error) {
 	}
 	t.DownloadBlock = block
 	if err := r.loadDeletionIntents(map[string]*models.Torrent{hash: t}); err != nil {
+		return nil, err
+	}
+	if err := r.loadProgressObservations(map[string]*models.Torrent{hash: t}); err != nil {
 		return nil, err
 	}
 
@@ -149,12 +197,15 @@ func (r *TorrentRepo) GetAllTorrents() ([]*models.Torrent, error) {
 	if err := r.loadDeletionIntents(byHash); err != nil {
 		return nil, err
 	}
+	if err := r.loadProgressObservations(byHash); err != nil {
+		return nil, err
+	}
 
 	return torrents, nil
 }
 
 func (r *TorrentRepo) loadFiles(t *models.Torrent) error {
-	rows, err := r.db.DB().Query(`SELECT "index", path, size, downloaded, priority, is_media FROM files WHERE hash = ? ORDER BY "index" ASC`, t.Hash)
+	rows, err := r.db.DB().Query(`SELECT "index", path, size, downloaded, priority, is_media, file_offset, offset_known, legacy_downloaded FROM files WHERE hash = ? ORDER BY "index" ASC`, t.Hash)
 	if err != nil {
 		return err
 	}
@@ -163,7 +214,7 @@ func (r *TorrentRepo) loadFiles(t *models.Torrent) error {
 	t.Files = nil
 	for rows.Next() {
 		f := &models.File{}
-		if err := rows.Scan(&f.Index, &f.Path, &f.Size, &f.Downloaded, &f.Priority, &f.IsMedia); err != nil {
+		if err := rows.Scan(&f.Index, &f.Path, &f.Size, &f.Downloaded, &f.Priority, &f.IsMedia, &f.Offset, &f.OffsetKnown, &f.LegacyDownloaded); err != nil {
 			return err
 		}
 		t.Files = append(t.Files, f)
@@ -177,7 +228,7 @@ func (r *TorrentRepo) loadFilesForTorrents(torrents map[string]*models.Torrent) 
 	}
 
 	rows, err := r.db.DB().Query(`
-		SELECT f.hash, f."index", f.path, f.size, f.downloaded, f.priority, f.is_media
+		SELECT f.hash, f."index", f.path, f.size, f.downloaded, f.priority, f.is_media, f.file_offset, f.offset_known, f.legacy_downloaded
 		FROM files f
 		JOIN torrents t ON t.hash = f.hash
 		ORDER BY f.hash ASC, f."index" ASC
@@ -190,7 +241,7 @@ func (r *TorrentRepo) loadFilesForTorrents(torrents map[string]*models.Torrent) 
 	for rows.Next() {
 		var hash string
 		f := &models.File{}
-		if err := rows.Scan(&hash, &f.Index, &f.Path, &f.Size, &f.Downloaded, &f.Priority, &f.IsMedia); err != nil {
+		if err := rows.Scan(&hash, &f.Index, &f.Path, &f.Size, &f.Downloaded, &f.Priority, &f.IsMedia, &f.Offset, &f.OffsetKnown, &f.LegacyDownloaded); err != nil {
 			return err
 		}
 		if t := torrents[hash]; t != nil {
@@ -265,11 +316,54 @@ func (r *TorrentRepo) TemporaryQueue() ([]string, error) {
 }
 
 func (r *TorrentRepo) UpdateFilePriority(hash string, fileIndex int, priority models.FilePriority) error {
-	_, err := r.db.DB().Exec(`UPDATE files SET priority = ? WHERE hash = ? AND "index" = ?`, priority, hash, fileIndex)
-	return err
+	if fileIndex < 0 || !models.ValidFilePriority(priority) {
+		return ErrInvalidPriority
+	}
+	return r.updatePriority(hash, &fileIndex, priority)
 }
 
 func (r *TorrentRepo) UpdateTorrentFilesPriority(hash string, priority models.FilePriority) error {
-	_, err := r.db.DB().Exec(`UPDATE files SET priority = ? WHERE hash = ?`, priority, hash)
-	return err
+	if !models.ValidFilePriority(priority) {
+		return ErrInvalidPriority
+	}
+	return r.updatePriority(hash, nil, priority)
+}
+
+func (r *TorrentRepo) updatePriority(hash string, index *int, priority models.FilePriority) error {
+	tx, err := r.db.DB().Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	query := `UPDATE files SET priority = ? WHERE hash = ?`
+	args := []any{priority, hash}
+	if index != nil {
+		query += ` AND "index" = ?`
+		args = append(args, *index)
+	}
+	res, err := tx.Exec(query, args...)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		var exists, files int
+		if err := tx.QueryRow(`SELECT COUNT(*) FROM torrents WHERE hash=?`, hash).Scan(&exists); err != nil {
+			return err
+		}
+		if exists == 0 {
+			return ErrTorrentNotFound
+		}
+		if err := tx.QueryRow(`SELECT COUNT(*) FROM files WHERE hash=?`, hash).Scan(&files); err != nil {
+			return err
+		}
+		if files == 0 {
+			return ErrMetadataPending
+		}
+		return ErrFileNotFound
+	}
+	return tx.Commit()
 }

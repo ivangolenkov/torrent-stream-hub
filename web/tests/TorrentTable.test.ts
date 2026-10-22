@@ -79,3 +79,24 @@ it('shows pending deletion and its failure in both layouts', async () => {
     expect(wrapper.find(selector).text()).toContain('database commit failed');
   }
 });
+
+it('labels last-known progress in both layouts', async () => {
+  const { wrapper, store } = setup();
+  store.torrents = [{ ...fixture('one'), progress: 60, progress_source: 'last_known' }];
+  await nextTick();
+  for (const selector of ['tbody', '.md\\:hidden']) {
+    expect(wrapper.find(selector).text()).toContain('60.0%');
+    expect(wrapper.find(selector).text()).toContain('Last known — verification required');
+  }
+});
+
+it('shows action and recheck failures in both layouts', async () => {
+  const { wrapper, store } = setup();
+  store.torrents = [{ ...fixture('one'), recheck: { id: 1, status: 'failed', error: 'Read failed' } }];
+  store.actionErrors.one = 'Priority commit failed';
+  await nextTick();
+  for (const selector of ['tbody', '.md\\:hidden']) {
+    expect(wrapper.find(selector).text()).toContain('Priority commit failed');
+    expect(wrapper.find(selector).text()).toContain('Recheck: failed Read failed');
+  }
+});

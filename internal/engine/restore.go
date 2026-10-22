@@ -3,8 +3,10 @@ package engine
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 
 	"github.com/anacrolix/torrent"
+	"github.com/anacrolix/torrent/metainfo"
 	"torrent-stream-hub/internal/models"
 )
 
@@ -21,6 +23,12 @@ func (e *Engine) StageExistingRestore(saved *models.Torrent) error {
 	e.mu.RUnlock()
 	if mt == nil {
 		return TorrentNotFoundError{Hash: saved.Hash}
+	}
+	mt.mu.Lock()
+	checking := mt.rechecking || mt.verificationUncertain
+	mt.mu.Unlock()
+	if checking {
+		return ErrOperationConflict
 	}
 	mt.t.DisallowDataDownload()
 	mt.mu.Lock()
@@ -64,7 +72,18 @@ func (e *Engine) RestoreTorrent(spec *torrent.TorrentSpec, saved *models.Torrent
 		}
 	}
 	spec.DisallowDataDownload = true
-	e.augmentTorrentSpec(spec)
+	spec.DisallowDataUpload = true
+	inactive := saved.State == models.StatePaused || saved.State == models.StateError || saved.State == models.StateMissingFiles
+	if inactive {
+		spec.DisableNetworking = true
+		spec.Trackers = nil
+		spec.Webseeds = nil
+		spec.DhtNodes = nil
+		spec.PeerAddrs = nil
+		spec.Sources = nil
+	} else {
+		e.augmentTorrentSpec(spec)
+	}
 	t, _, err := e.client.AddTorrentSpec(spec)
 	if err != nil {
 		return nil, err
@@ -84,6 +103,13 @@ func (e *Engine) FinishRestore(hash string, state models.TorrentState, manualRes
 	if mt == nil {
 		e.admissionMu.Unlock()
 		return TorrentNotFoundError{Hash: hash}
+	}
+	mt.mu.Lock()
+	checking := mt.rechecking || mt.verificationUncertain
+	mt.mu.Unlock()
+	if checking {
+		e.admissionMu.Unlock()
+		return ErrOperationConflict
 	}
 	if mt.t.Info() != nil {
 		mi := mt.t.Metainfo()
@@ -134,6 +160,19 @@ func (e *Engine) FinishRestore(hash string, state models.TorrentState, manualRes
 	mt.downloadAllStarted = false
 	inactive := state == models.StatePaused || state == models.StateError || state == models.StateMissingFiles || state == models.StateDiskFull || mt.downloadBlock != ""
 	if !inactive {
+		if !mt.t.NetworkingEnabled() {
+			if mi, err := metainfo.LoadFromFile(filepath.Join(e.ConfigDir(), "metainfo", hash+".torrent")); err == nil {
+				if spec, err := torrent.TorrentSpecFromMetaInfoErr(mi); err == nil {
+					e.augmentTorrentSpec(spec)
+					if err := mt.t.MergeSpec(spec); err != nil {
+						mt.mu.Unlock()
+						e.admissionMu.Unlock()
+						return err
+					}
+				}
+			}
+			mt.t.EnableNetworking()
+		}
 		mt.state = models.StateQueued
 		mt.err = models.ErrNone
 		mt.payloadCtx, mt.payloadCancel = context.WithCancelCause(e.ctx)

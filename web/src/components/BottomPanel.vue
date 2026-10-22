@@ -6,6 +6,7 @@ import { ArrowDownTrayIcon, ClockIcon } from '@heroicons/vue/24/outline';
 import { apiClient } from '../api/client';
 import VideoPlayer from './VideoPlayer.vue';
 import PieceProgressBar from './PieceProgressBar.vue';
+import { fileProgress, progressLabel } from '../progress';
 import TemporaryTorrentControl from './TemporaryTorrentControl.vue';
 
 const store = useTorrentStore();
@@ -51,7 +52,7 @@ const playVideo = (hash: string, index: number, path: string) => {
   activeVideo.value = { hash, index, path };
 };
 
-const canDownloadFile = (file: { size: number; downloaded: number }) => file.size > 0 && file.downloaded >= file.size;
+const canDownloadFile = (file: { size: number; downloaded: number }) => currentTorrent.value?.progress_source === 'verified' && file.size > 0 && file.downloaded >= file.size;
 
 const downloadFile = (hash: string, index: number) => {
   window.location.href = apiClient.fileDownloadUrl(hash, index);
@@ -96,6 +97,7 @@ onMounted(() => {
 });
 
 onUnmounted(() => {
+	stopPiecesPolling();
   window.removeEventListener('resize', checkMobile);
   window.removeEventListener('mousemove', onDrag);
   window.removeEventListener('mouseup', stopDrag);
@@ -104,16 +106,33 @@ onUnmounted(() => {
 // Pieces fetching loop
 const piecesString = ref('');
 let piecesInterval: number | null = null;
+let piecesController: AbortController | null = null;
+let piecesVersion = 0;
+
+const stopPiecesPolling = () => {
+  piecesVersion++;
+  if (piecesInterval !== null) window.clearInterval(piecesInterval);
+  piecesInterval = null;
+  piecesController?.abort();
+  piecesController = null;
+};
 
 const fetchPieces = async () => {
-  if (!store.selectedHash || activeTab.value !== 'files') return;
+  if (!store.selectedHash || activeTab.value !== 'files' || piecesController) return;
+  const hash = store.selectedHash;
+  const version = piecesVersion;
+  const controller = new AbortController();
+  piecesController = controller;
   try {
-    const res = await fetch(`/api/v1/torrent/${store.selectedHash}/pieces`);
+    const res = await fetch(`/api/v1/torrent/${hash}/pieces`, { signal: controller.signal });
     if (res.ok) {
-      piecesString.value = await res.text();
+      const text = await res.text();
+      if (!controller.signal.aborted && version === piecesVersion && store.selectedHash === hash && activeTab.value === 'files') piecesString.value = text;
     }
   } catch (err) {
-    console.error('Failed to fetch pieces', err);
+    if (!controller.signal.aborted && version === piecesVersion) console.error('Failed to fetch pieces', err);
+  } finally {
+    if (piecesController === controller) piecesController = null;
   }
 };
 
@@ -121,10 +140,7 @@ watch(() => store.selectedHash, () => { activeVideo.value = null; });
 
 watch([() => store.selectedHash, activeTab], ([newHash, newTab]) => {
   piecesString.value = '';
-  if (piecesInterval) {
-    clearInterval(piecesInterval);
-    piecesInterval = null;
-  }
+  stopPiecesPolling();
   
   if (newHash && newTab === 'files') {
     fetchPieces();
@@ -184,6 +200,7 @@ watch([() => store.selectedHash, activeTab], ([newHash, newTab]) => {
       </div>
 
       <!-- Body Area -->
+      <div v-if="currentTorrent && progressLabel(currentTorrent)" class="px-4 text-xs text-amber-700">{{ progressLabel(currentTorrent) }}</div>
       <div class="flex-1 overflow-hidden p-4 bg-white relative h-full flex flex-col">
         
         <!-- General Tab -->
@@ -273,7 +290,7 @@ watch([() => store.selectedHash, activeTab], ([newHash, newTab]) => {
                     {{ formatSize(file.size) }}
                   </td>
                   <td class="px-4 py-2 whitespace-nowrap text-right font-mono">
-                    {{ ((file.downloaded / file.size) * 100).toFixed(1) }}%
+                    {{ fileProgress(file.downloaded, file.size).toFixed(1) }}%
                   </td>
                   <td class="px-4 py-2 w-full">
                     <PieceProgressBar 
@@ -367,7 +384,7 @@ watch([() => store.selectedHash, activeTab], ([newHash, newTab]) => {
                       <option :value="1">High</option>
                     </select>
                   </div>
-                  <span class="font-mono font-medium text-gray-700">{{ ((file.downloaded / file.size) * 100).toFixed(1) }}%</span>
+                  <span class="font-mono font-medium text-gray-700">{{ fileProgress(file.downloaded, file.size).toFixed(1) }}%</span>
                 </div>
 
                 <!-- Piece Progress Bar -->

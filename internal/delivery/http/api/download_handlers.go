@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"torrent-stream-hub/internal/delivery/http/response"
+	"torrent-stream-hub/internal/engine"
 	"torrent-stream-hub/internal/logging"
 	"torrent-stream-hub/internal/usecase"
 
@@ -195,7 +196,7 @@ func (h *APIHandler) handleDownloadError(w http.ResponseWriter, hash string, err
 		response.Error(w, http.StatusNotFound, "Torrent not found")
 		return
 	}
-	if errors.Is(err, usecase.ErrDownloadNotReady) || errors.Is(err, usecase.ErrStorageConflict) {
+	if errors.Is(err, usecase.ErrDownloadNotReady) || errors.Is(err, usecase.ErrStorageConflict) || errors.Is(err, usecase.ErrMetadataPending) || errors.Is(err, engine.ErrOperationConflict) {
 		response.Error(w, http.StatusConflict, "Download is not ready")
 		return
 	}

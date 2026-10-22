@@ -148,6 +148,81 @@ can reopen the same isolated data. Cached metainfo and application-owned files
 are not payload and are not removed. Schema upgrades import existing cleanup
 manifests as pending `payload` deletion; back up SQLite and payload before upgrades.
 
+## Progress, Recheck And Paused Reads
+
+`downloaded`/`progress` describe the currently verified payload observation, not
+all bytes ever received. They may decrease after corruption, replacement or
+recheck. REST/SSE expose `progress_source`: `verified` for a live observation,
+`checking` during verification, `unknown` when it is unavailable, and
+`last_known`/`legacy` for database estimates. Stored estimates never authorize
+reading, upload or cache readiness. `legacy_downloaded` preserves old observations
+without pretending they are cumulative network traffic. Current network counters
+remain in BT health diagnostics. `progress_observed_at_ns` orders observations;
+it is diagnostic wall-clock time, not a readiness token.
+
+Cached piece length/count and file offsets carry `metadata_known`/`offset_known`.
+The UI labels last-known progress and does not invent a piece map for unknown
+offsets. Empty files do not produce NaN percentages.
+
+`POST /api/v1/torrent/{hash}/action` with `{"action":"recheck"}` returns **202**
+with an engine-session operation ID and status; list/SSE snapshots include
+`recheck.status` and `recheck.error`. Repeated requests during a running operation
+join it. No exact percentage is invented. A completed operation does not imply
+every piece is valid: inspect verified progress. Operation history is runtime-only
+and does not survive restart as a falsely successful result. Conflicting active
+transfers, missing metadata and deletion/migration return 409; missing torrents
+return 404. A failed check keeps readiness revoked until a successful local check;
+Resume cannot bypass it. Pause is not undone by a late result.
+
+After restart, Paused torrents with cached hash-matching metainfo reopen with
+networking, upload and payload download disabled. A local hash pass can establish
+direct read readiness for streaming/HEAD/Range/download without implicit Resume.
+Missing/corrupt/incomplete data never causes automatic network repair. Missing
+cached metainfo is an explicit conflict on read/recheck, not a metadata fetch.
+Local verification may take time on slow disks. Resume explicitly enables normal
+discovery again; pausing an already online runtime is not a promise to cancel all
+existing discovery operations.
+
+Priority commands require an explicit enum value (-1/0/1). Invalid input returns
+400, missing torrent/file 404, and unknown file metadata or storage conflicts 409.
+Known persisted file selections can be changed while metadata is pending; an
+unknown index or bulk operation without a file list is not silently accepted.
+Successful commands also return `command_at_ns`; views carry `snapshot_at_ns`.
+The GUI ignores delayed pre-command views instead of undoing a confirmed action.
+These ordering diagnostics assume a stable server wall clock and are not access
+control/readiness tokens; they do not use the browser clock.
+
+Background queue order uses the existing persisted FIFO sequence. Resume and
+duplicate add do not move it; deletion/re-add creates a new position. Skip All or
+a completed selected subset releases the background slot. A completed subset is
+reported separately and does not turn an incomplete torrent into Seeding or
+100% payload completion. Selecting more files makes it eligible again, subject
+to Pause/DiskFull and the background limit. Speed sampling runs once per second;
+API/polling frequency no longer changes its baseline or watchdog measurements.
+
+## Preload And SSE Limits
+
+Preload joins one warmup per torrent generation/file. Limits are fixed at **4
+active warmups**, **128 retained states**, a **2-minute timeout**, and **10-minute
+TTL** (swept every minute without polling the key). Saturation returns 429;
+shutdown rejects new work with 503. Readers/transfer leases and capacity tokens
+are released once even after failures/cancellation. Active transfer leases still
+conflict with manual Delete; engine generation cancellation and shutdown stop
+the warmup. `preload_status`/`preload_error` distinguish failure from completion.
+An HTTP disconnect does not cancel a shared accepted warmup.
+
+SSE keeps the latest snapshot rather than ten stale updates. Writes/flushes are
+checked, each write has a 10-second deadline, and idle connections get a heartbeat
+every 15 seconds. Writers/middleware without deadline/flushing support receive
+503; preserve ResponseController support in reverse-proxy integrations. Service
+shutdown closes subscriptions before waiting for HTTP handlers. These deadlines
+are specific to SSE and do not impose a short video WriteTimeout.
+
+The emulated cache window uses `HUB_STREAM_CACHE_SIZE` for both partial and fully
+verified files. Zero disables the reported window; negative values normalize to
+zero. Full-file readiness remains independent of that fake limit. These changes
+do not implement general upload/body/SSRF protections (audit F11/F12).
+
 ## Ports
 
 - `8080/tcp` - Web GUI and HTTP API.

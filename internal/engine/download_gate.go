@@ -172,7 +172,7 @@ func (e *Engine) admitPayloadLocked(mt *ManagedTorrent) error {
 		return e.ctx.Err()
 	}
 	mt.mu.Lock()
-	blocked, initializing, state := mt.downloadBlock, mt.initializing || mt.rechecking, mt.state
+	blocked, initializing, state := mt.downloadBlock, mt.initializing || mt.rechecking || mt.verificationUncertain, mt.state
 	mt.mu.Unlock()
 	if blocked != "" {
 		return DownloadBlockedError{blocked}

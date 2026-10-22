@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"fmt"
+	"sort"
 	"time"
 
 	"torrent-stream-hub/internal/logging"
@@ -48,6 +49,37 @@ func (e *Engine) manageResources() {
 	}
 	totalTorrents := len(e.managedTorrents)
 	e.mu.RUnlock()
+	// Copy sort keys under their owner lock; don't mutate them in the comparator.
+	type ordered struct {
+		mt       *ManagedTorrent
+		position int64
+		added    time.Time
+	}
+	order := make([]ordered, 0, len(torrents))
+	for _, mt := range torrents {
+		if mt != nil {
+			mt.mu.Lock()
+			order = append(order, ordered{mt, mt.queuePosition, mt.addedAt})
+			mt.mu.Unlock()
+		}
+	}
+	sort.Slice(order, func(i, j int) bool {
+		a, b := order[i], order[j]
+		if a.position > 0 && b.position > 0 && a.position != b.position {
+			return a.position < b.position
+		}
+		if a.position > 0 != (b.position > 0) {
+			return a.position > 0
+		}
+		if !a.added.Equal(b.added) {
+			return a.added.Before(b.added)
+		}
+		return a.mt.hash < b.mt.hash
+	})
+	torrents = torrents[:0]
+	for _, entry := range order {
+		torrents = append(torrents, entry.mt)
+	}
 
 	activeCount := 0
 
@@ -56,8 +88,9 @@ func (e *Engine) manageResources() {
 			continue
 		}
 		mt.t.RefreshStorageCompletion()
+		e.reconcileSelectionLocked(mt)
 		mt.mu.Lock()
-		initializing := mt.initializing || mt.rechecking
+		initializing := mt.initializing || mt.rechecking || mt.verificationUncertain
 		reserved := mt.state == models.StateDownloading
 		mt.mu.Unlock()
 		if initializing {
@@ -93,9 +126,6 @@ func (e *Engine) manageResources() {
 						mt.downloadAllStarted = false
 					}
 				}
-				if mt.state == models.StateDownloading && mt.t.BytesCompleted() == info.TotalLength() {
-					mt.setStateLocked(models.StateSeeding, models.ErrNone, "download complete")
-				}
 			} else if !mt.metadataWaitLogged {
 				logging.Debugf("download waiting for metadata hash=%s", mt.t.InfoHash().HexString())
 				mt.metadataWaitLogged = true
@@ -116,7 +146,7 @@ func (e *Engine) manageResources() {
 			mt.mu.Unlock()
 			break
 		}
-		if mt.state == models.StateQueued && !mt.initializing && !mt.rechecking && mt.downloadBlock == "" {
+		if mt.state == models.StateQueued && !mt.selectionComplete && !mt.initializing && !mt.rechecking && mt.downloadBlock == "" {
 			mt.setStateLocked(models.StateDownloading, models.ErrNone, "resource slot available")
 			if mt.t.Info() != nil {
 				mt.downloadAllStarted = true

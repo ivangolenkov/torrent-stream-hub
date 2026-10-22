@@ -2356,6 +2356,10 @@ func (t *Torrent) consumeDhtAnnouncePeers(pvs <-chan dht.PeersValues) {
 func (t *Torrent) AnnounceToDht(s DhtServer) (done <-chan struct{}, stop func(), err error) {
 	var ihs [][20]byte
 	t.cl.lock()
+	if !t.networkingEnabled.Bool() {
+		t.cl.unlock()
+		return nil, nil, fmt.Errorf("torrent networking is disabled")
+	}
 	t.eachShortInfohash(func(short [20]byte) {
 		ihs = append(ihs, short)
 	})
@@ -2381,6 +2385,26 @@ func (t *Torrent) AnnounceToDht(s DhtServer) (done <-chan struct{}, stop func(),
 		eg.Wait()
 	}()
 	return
+}
+
+// EnableNetworking activates a torrent initially opened in offline mode. It is
+// deliberately one-way: cancelling existing discovery needs a separate lifecycle.
+func (t *Torrent) EnableNetworking() {
+	t.cl.lock()
+	defer t.cl.unlock()
+	if t.closed.IsSet() {
+		return
+	}
+	t.networkingEnabled.Set()
+	t.cl.event.Broadcast()
+	t.openNewConns()
+	t.updateWantPeersEvent()
+}
+
+func (t *Torrent) NetworkingEnabled() bool {
+	t.cl.rLock()
+	defer t.cl.rUnlock()
+	return t.networkingEnabled.Bool()
 }
 
 // Announce using the provided DHT server. Peers are consumed automatically. done is closed when the

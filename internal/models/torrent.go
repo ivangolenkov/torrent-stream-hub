@@ -35,26 +35,40 @@ const (
 	PriorityNone   FilePriority = -1
 )
 
+func ValidFilePriority(priority FilePriority) bool {
+	return priority == PriorityNormal || priority == PriorityHigh || priority == PriorityNone
+}
+
 // Torrent defines the core properties and state of a single torrent
 type Torrent struct {
-	DeletionMode  string       `json:"deletion_mode,omitempty"`
-	DeletionError string       `json:"deletion_error,omitempty"`
-	DownloadBlock string       `json:"download_block,omitempty"`
-	StorageState  string       `json:"storage_state,omitempty"`
-	StorageError  string       `json:"storage_error,omitempty"`
-	IsTemporary   bool         `json:"is_temporary"`
-	Hash          string       `json:"hash"`
-	Name          string       `json:"name"`
-	Title         string       `json:"title,omitempty"`
-	Data          string       `json:"data,omitempty"`
-	Poster        string       `json:"poster,omitempty"`
-	Category      string       `json:"category,omitempty"`
-	Size          int64        `json:"size"`
-	Downloaded    int64        `json:"downloaded"`
-	Progress      float64      `json:"progress"`
-	State         TorrentState `json:"state"`
-	Error         ErrorReason  `json:"error,omitempty"`
-	Files         []*File      `json:"files,omitempty"`
+	DeletionMode  string  `json:"deletion_mode,omitempty"`
+	DeletionError string  `json:"deletion_error,omitempty"`
+	DownloadBlock string  `json:"download_block,omitempty"`
+	StorageState  string  `json:"storage_state,omitempty"`
+	StorageError  string  `json:"storage_error,omitempty"`
+	IsTemporary   bool    `json:"is_temporary"`
+	Hash          string  `json:"hash"`
+	Name          string  `json:"name"`
+	Title         string  `json:"title,omitempty"`
+	Data          string  `json:"data,omitempty"`
+	Poster        string  `json:"poster,omitempty"`
+	Category      string  `json:"category,omitempty"`
+	Size          int64   `json:"size"`
+	Downloaded    int64   `json:"downloaded"`
+	Progress      float64 `json:"progress"`
+	// Persisted observations never grant file readiness. LegacyDownloaded is
+	// the pre-upgrade observation, NOT a cumulative network transfer counter.
+	ProgressSource     string            `json:"progress_source"`
+	ProgressObservedAt int64             `json:"progress_observed_at_ns,omitempty"`
+	LegacyDownloaded   int64             `json:"legacy_downloaded,omitempty"`
+	MetadataKnown      bool              `json:"metadata_known"`
+	QueuePosition      int64             `json:"-"`
+	SelectionComplete  bool              `json:"selection_complete"`
+	Recheck            *RecheckOperation `json:"recheck,omitempty"`
+	SnapshotAt         int64             `json:"snapshot_at_ns,omitempty"`
+	State              TorrentState      `json:"state"`
+	Error              ErrorReason       `json:"error,omitempty"`
+	Files              []*File           `json:"files,omitempty"`
 	// Piece info for UI progress
 	PieceLength int64 `json:"piece_length"`
 	NumPieces   int   `json:"num_pieces"`
@@ -66,6 +80,12 @@ type Torrent struct {
 	PeerSummary   PeerSummary `json:"peer_summary"`
 
 	SourceURI string `json:"-"`
+}
+
+type RecheckOperation struct {
+	ID     uint64 `json:"id"`
+	Status string `json:"status"`
+	Error  string `json:"error,omitempty"`
 }
 
 // PeerSummary contains runtime-only aggregate swarm diagnostics.
@@ -162,11 +182,22 @@ type BTTorrentHealth struct {
 
 // File represents a single file within a torrent
 type File struct {
-	Index      int          `json:"index"`
-	Path       string       `json:"path"`
-	Size       int64        `json:"size"`
-	Offset     int64        `json:"offset"`
-	Downloaded int64        `json:"downloaded"`
-	Priority   FilePriority `json:"priority"`
-	IsMedia    bool         `json:"is_media"` // Helper flag for UI (can be streamed)
+	Index            int          `json:"index"`
+	Path             string       `json:"path"`
+	Size             int64        `json:"size"`
+	Offset           int64        `json:"offset"`
+	OffsetKnown      bool         `json:"offset_known"`
+	LegacyDownloaded int64        `json:"legacy_downloaded,omitempty"`
+	Downloaded       int64        `json:"downloaded"`
+	Priority         FilePriority `json:"priority"`
+	IsMedia          bool         `json:"is_media"` // Helper flag for UI (can be streamed)
+}
+
+// ProgressPercent is shared by runtime and persisted views. Unknown/empty size
+// has no meaningful percentage; bytes alone never establish readiness.
+func ProgressPercent(downloaded, size int64) float64 {
+	if size <= 0 {
+		return 0
+	}
+	return float64(max(int64(0), min(downloaded, size))) / float64(size) * 100
 }

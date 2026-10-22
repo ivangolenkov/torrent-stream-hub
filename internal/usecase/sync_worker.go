@@ -13,10 +13,13 @@ import (
 )
 
 type SyncWorker struct {
-	engine  *engine.Engine
-	repo    *repository.TorrentRepo
-	clients map[chan []byte]bool
-	mu      sync.RWMutex
+	engine    *engine.Engine
+	repo      *repository.TorrentRepo
+	clients   map[chan []byte]bool
+	mu        sync.RWMutex
+	latest    []byte
+	done      chan struct{}
+	closeOnce sync.Once
 }
 
 func NewSyncWorker(e *engine.Engine, r *repository.TorrentRepo) *SyncWorker {
@@ -24,21 +27,36 @@ func NewSyncWorker(e *engine.Engine, r *repository.TorrentRepo) *SyncWorker {
 		engine:  e,
 		repo:    r,
 		clients: make(map[chan []byte]bool),
+		done:    make(chan struct{}),
 	}
 }
 
 func (sw *SyncWorker) AddClient(ch chan []byte) {
 	sw.mu.Lock()
 	defer sw.mu.Unlock()
+	select {
+	case <-sw.done:
+		close(ch)
+		return
+	default:
+	}
 	sw.clients[ch] = true
+	if sw.latest != nil {
+		select {
+		case ch <- sw.latest:
+		default:
+		}
+	}
 	logging.Debugf("sync worker client added clients=%d", len(sw.clients))
 }
 
 func (sw *SyncWorker) RemoveClient(ch chan []byte) {
 	sw.mu.Lock()
 	defer sw.mu.Unlock()
-	delete(sw.clients, ch)
-	close(ch)
+	if sw.clients[ch] {
+		delete(sw.clients, ch)
+		close(ch)
+	}
 	logging.Debugf("sync worker client removed clients=%d", len(sw.clients))
 }
 
@@ -47,6 +65,7 @@ func (sw *SyncWorker) Start() {
 }
 
 func (sw *SyncWorker) StartContext(ctx context.Context) {
+	defer sw.Close()
 	logging.Infof("sync worker started interval=2s")
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
@@ -54,6 +73,8 @@ func (sw *SyncWorker) StartContext(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
+			return
+		case <-sw.done:
 			return
 		case <-ticker.C:
 		}
@@ -108,6 +129,9 @@ func (sw *SyncWorker) syncOnce() {
 	}
 
 	// Serialize to JSON
+	for _, t := range stateToSend {
+		t.SnapshotAt = time.Now().UnixNano()
+	}
 	data, err := json.Marshal(stateToSend)
 	if err != nil {
 		logging.Warnf("failed to marshal sync state: %v", err)
@@ -115,13 +139,49 @@ func (sw *SyncWorker) syncOnce() {
 	}
 
 	// Broadcast to all SSE clients
-	sw.mu.RLock()
+	sw.publish(data)
+}
+
+func (sw *SyncWorker) publish(data []byte) {
+	sw.mu.Lock()
+	defer sw.mu.Unlock()
+	select {
+	case <-sw.done:
+		return
+	default:
+	}
+	sw.latest = data
 	for ch := range sw.clients {
+		// Drop queued snapshots: only the most recent state matters to a UI.
+	drain:
+		for {
+			select {
+			case <-ch:
+			default:
+				break drain
+			}
+		}
 		select {
 		case ch <- data:
 		default:
 			logging.Debugf("sync worker skipped slow SSE client")
 		}
 	}
-	sw.mu.RUnlock()
+}
+
+func (sw *SyncWorker) Done() <-chan struct{} { return sw.done }
+
+// Refresh publishes a consistent snapshot, including before the first periodic tick.
+func (sw *SyncWorker) Refresh() { sw.syncOnce() }
+
+func (sw *SyncWorker) Close() {
+	sw.closeOnce.Do(func() {
+		sw.mu.Lock()
+		defer sw.mu.Unlock()
+		close(sw.done)
+		for ch := range sw.clients {
+			delete(sw.clients, ch)
+			close(ch)
+		}
+	})
 }

@@ -1457,7 +1457,9 @@ func (cl *Client) newTorrentOpt(opts AddTorrentOpts) (t *Torrent) {
 		return h.Sum64()
 	}
 	t.smartBanCache.Init()
-	t.networkingEnabled.Set()
+	if !opts.DisableNetworking {
+		t.networkingEnabled.Set()
+	}
 	ihHex := t.InfoHash().HexString()
 	t.logger = cl.logger.WithDefaultLevel(log.Debug).WithNames(ihHex).WithContextText(ihHex)
 	t.name()
@@ -1572,6 +1574,8 @@ type AddTorrentOpts struct {
 	// Whether to initially allow data download or upload
 	DisallowDataUpload   bool
 	DisallowDataDownload bool
+	// Start without discovery/connections; intended for verified local reads.
+	DisableNetworking bool
 }
 
 // Add or merge a torrent spec. Returns new if the torrent wasn't already in the client. See also

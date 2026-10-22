@@ -73,6 +73,11 @@ func (uc *TorrentUseCase) finishAddLocked(t *models.Torrent, metadata TorrentMet
 		}
 		return nil, err
 	}
+	saved, err := uc.repo.GetTorrent(t.Hash)
+	if err != nil {
+		return nil, err
+	}
+	uc.engine.SetQueuePosition(t.Hash, saved.QueuePosition)
 	t.IsTemporary = temporary && (existing == nil || existing.IsTemporary)
 	if temporary && existing == nil {
 		uc.cleanupLocked("add")

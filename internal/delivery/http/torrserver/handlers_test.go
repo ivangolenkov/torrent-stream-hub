@@ -294,10 +294,15 @@ func TestStreamContentTypeAvoidsBlockingSniff(t *testing.T) {
 }
 
 func TestPreloadTargetPersistsForStatPolling(t *testing.T) {
-	h := NewTorrServerHandler(nil)
-	h.setPreload("hash", 0, preloadState{TargetBytes: 12345, StartedAt: time.Now()})
+	_, _, h, cleanup := setupTorrServerIntegration(t)
+	defer cleanup()
+	tor, err := h.uc.AddMagnet("magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567")
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.setPreload(tor.Hash, 0, preloadState{TargetBytes: 12345, StartedAt: time.Now()})
 
-	if got := h.preloadTarget("hash", 0, 999999); got != 12345 {
+	if got := h.preloadTarget(tor.Hash, 0, 999999); got != 12345 {
 		t.Fatalf("expected persisted preload target, got %d", got)
 	}
 }

@@ -27,9 +27,11 @@ import (
 )
 
 type TorrServerHandler struct {
-	uc       *usecase.TorrentUseCase
-	preloads map[preloadKey]preloadState
-	mu       sync.Mutex
+	uc          *usecase.TorrentUseCase
+	preloads    map[preloadKey]preloadState
+	mu          sync.Mutex
+	warmup      func(context.Context, string, int, int64) (int64, int64, error)
+	warmupSlots chan struct{}
 }
 
 const defaultPreloadSize int64 = 20 << 20
@@ -40,16 +42,41 @@ type preloadKey struct {
 }
 
 type preloadState struct {
+	Owner       context.Context
+	Running     bool
+	Error       string
 	TargetBytes int64
 	ReadBytes   int64
 	StartedAt   time.Time
 }
 
 func NewTorrServerHandler(uc *usecase.TorrentUseCase) *TorrServerHandler {
-	return &TorrServerHandler{
-		uc:       uc,
-		preloads: make(map[preloadKey]preloadState),
+	h := &TorrServerHandler{
+		uc:          uc,
+		preloads:    make(map[preloadKey]preloadState),
+		warmupSlots: make(chan struct{}, 4),
 	}
+	if uc != nil {
+		h.warmup = uc.Warmup
+	}
+	if uc != nil {
+		uc.StartTask(func(ctx context.Context) {
+			ticker := time.NewTicker(time.Minute)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					h.mu.Lock()
+					clear(h.preloads)
+					h.mu.Unlock()
+					return
+				case now := <-ticker.C:
+					h.expirePreloads(now)
+				}
+			}
+		})
+	}
+	return h
 }
 
 func (h *TorrServerHandler) RegisterRoutes(r chi.Router) {
@@ -98,6 +125,8 @@ type torrentResponse struct {
 	TorrentSize      int64               `json:"torrent_size"`
 	PreloadedBytes   int64               `json:"preloaded_bytes"`
 	PreloadSize      int64               `json:"preload_size"`
+	PreloadStatus    string              `json:"preload_status,omitempty"`
+	PreloadError     string              `json:"preload_error,omitempty"`
 	DownloadSpeed    int64               `json:"download_speed"`
 	UploadSpeed      int64               `json:"upload_speed"`
 	TotalPeers       int                 `json:"total_peers"`
@@ -108,6 +137,7 @@ type torrentResponse struct {
 	FileStats        []torrentFileStat   `json:"file_stats,omitempty"`
 	Downloaded       int64               `json:"downloaded"`
 	Progress         float64             `json:"progress"`
+	ProgressSource   string              `json:"progress_source"`
 	Stat             models.TorrentState `json:"stat,omitempty"`
 	Error            models.ErrorReason  `json:"error,omitempty"`
 }
@@ -319,9 +349,10 @@ func (h *TorrServerHandler) UploadTorrent(w http.ResponseWriter, r *http.Request
 		return
 	}
 	if poster := strings.TrimSpace(r.FormValue("poster")); poster != "" {
-		t, err = h.uc.UpdateMetadata(t.Hash, usecase.TorrentMetadata{Poster: poster})
+		hash := t.Hash
+		t, err = h.uc.UpdateMetadata(hash, usecase.TorrentMetadata{Poster: poster})
 		if err != nil {
-			logging.Warnf("torrent upload metadata failed filename=%q hash=%s: %v", filename, t.Hash, err)
+			logging.Warnf("torrent upload metadata failed filename=%q hash=%s: %v", filename, hash, err)
 			response.Error(w, http.StatusInternalServerError, err.Error())
 			return
 		}
@@ -425,6 +456,7 @@ func toTorrentResponse(t *models.Torrent, includeFiles bool) torrentResponse {
 		HalfOpenPeers:    t.PeerSummary.HalfOpen,
 		Downloaded:       t.Downloaded,
 		Progress:         t.Progress,
+		ProgressSource:   t.ProgressSource,
 		Stat:             t.State,
 		Error:            t.Error,
 	}
@@ -476,13 +508,71 @@ func (h *TorrServerHandler) serveTorrentStatus(w http.ResponseWriter, r *http.Re
 	res := toTorrentResponse(t, true)
 	res.PreloadSize = target
 	res.PreloadedBytes = h.preloadedBytes(hash, index, t, target)
+	h.preloadDiagnostic(&res, hash, index)
 	response.JSON(w, http.StatusOK, res)
 }
 
 func (h *TorrServerHandler) servePreload(w http.ResponseWriter, r *http.Request, hash string, index int) {
-	release, err := h.uc.AcquireTransfer(hash)
+	owner, err := h.uc.GenerationContext(hash)
 	if err != nil {
 		response.Error(w, http.StatusNotFound, "Torrent not found")
+		return
+	}
+	if owner.Err() != nil {
+		response.Error(w, http.StatusServiceUnavailable, "Service is closing")
+		return
+	}
+	key := preloadKey{Hash: hash, Index: index}
+	h.expirePreloads(time.Now())
+	h.mu.Lock()
+	state, exists := h.preloads[key]
+	if exists && state.Owner == owner && (state.Running || state.Error == "") {
+		h.mu.Unlock()
+		t, err := h.uc.GetTorrent(hash)
+		if err != nil || t == nil {
+			response.Error(w, http.StatusNotFound, "Torrent not found")
+			return
+		}
+		res := toTorrentResponse(t, true)
+		res.PreloadSize = state.TargetBytes
+		res.PreloadedBytes = h.preloadedBytes(hash, index, t, state.TargetBytes)
+		h.preloadDiagnostic(&res, hash, index)
+		response.JSON(w, http.StatusOK, res)
+		return
+	}
+	if !exists && len(h.preloads) >= 128 {
+		h.mu.Unlock()
+		response.Error(w, http.StatusTooManyRequests, "Preload capacity reached")
+		return
+	}
+	select {
+	case h.warmupSlots <- struct{}{}:
+	default:
+		h.mu.Unlock()
+		response.Error(w, http.StatusTooManyRequests, "Preload capacity reached")
+		return
+	}
+	state = preloadState{Owner: owner, Running: true, TargetBytes: defaultPreloadSize, StartedAt: time.Now()}
+	h.preloads[key] = state
+	h.mu.Unlock()
+	accepted := false
+	defer func() {
+		if !accepted {
+			<-h.warmupSlots
+			h.mu.Lock()
+			if h.preloads[key].Owner == owner {
+				delete(h.preloads, key)
+			}
+			h.mu.Unlock()
+		}
+	}()
+	release, err := h.uc.AcquireTransfer(hash)
+	if err != nil {
+		status := http.StatusNotFound
+		if errors.Is(err, usecase.ErrStorageConflict) {
+			status = http.StatusConflict
+		}
+		response.Error(w, status, "Transfer unavailable")
 		return
 	}
 	// The asynchronous warmup takes ownership of the lease below.
@@ -497,50 +587,131 @@ func (h *TorrServerHandler) servePreload(w http.ResponseWriter, r *http.Request,
 		response.Error(w, http.StatusNotFound, "Torrent not found")
 		return
 	}
+	currentOwner, err := h.uc.GenerationContext(hash)
+	if err != nil || currentOwner != owner || owner.Err() != nil {
+		response.Error(w, http.StatusConflict, "Torrent generation changed")
+		return
+	}
 	fSize := fileSize(t, index)
-	target := h.preloadTarget(hash, index, fSize)
+	if len(t.Files) == 0 {
+		response.Error(w, http.StatusConflict, "Metadata is unavailable")
+		return
+	}
+	found := false
+	for _, file := range t.Files {
+		if file != nil && file.Index == index {
+			found = true
+			break
+		}
+	}
+	if !found {
+		response.Error(w, http.StatusNotFound, "File not found")
+		return
+	}
+	target := defaultPreloadSize
+	if fSize > 0 {
+		target = min(target, fSize)
+	}
+	state.TargetBytes = target
 
 	// Check if file is already completed and verified on disk
 	if ready, _, checkErr := h.uc.CheckFileDirectReady(hash, index); checkErr == nil && ready {
 		logging.Debugf("preload fast path for completed file hash=%s file_index=%d target=%d", hash, index, target)
-		h.setPreload(hash, index, preloadState{TargetBytes: target, ReadBytes: target, StartedAt: time.Now()})
+		state.ReadBytes = target
+		state.Running = false
+		h.completePreload(key, state)
+		accepted = true
+		<-h.warmupSlots
 		res := toTorrentResponse(t, true)
 		res.PreloadSize = target
 		res.PreloadedBytes = target
+		h.preloadDiagnostic(&res, hash, index)
 		response.JSON(w, http.StatusOK, res)
 		return
 	}
 
-	h.setPreload(hash, index, preloadState{TargetBytes: target, StartedAt: time.Now()})
-
-	async = true
-	go func() {
-		defer release()
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	h.completePreload(key, state)
+	if !h.uc.StartTask(func(serviceCtx context.Context) {
+		defer func() { release(); <-h.warmupSlots }()
+		ctx, cancel := context.WithTimeout(owner, 2*time.Minute)
 		defer cancel()
-		read, _, err := h.uc.Warmup(ctx, hash, index, target)
+		stop := context.AfterFunc(serviceCtx, cancel)
+		defer stop()
+		read, _, err := h.warmup(ctx, hash, index, target)
 		if err != nil {
 			logging.Debugf("preload warmup incomplete hash=%s file_index=%d read=%d: %v", hash, index, read, err)
 		}
-		h.setPreload(hash, index, preloadState{TargetBytes: target, ReadBytes: read, StartedAt: time.Now()})
-	}()
+		state.Running = false
+		state.ReadBytes = read
+		state.StartedAt = time.Now()
+		if err != nil {
+			state.Error = err.Error()
+		}
+		release()
+		h.completePreload(key, state)
+	}) {
+		response.Error(w, http.StatusServiceUnavailable, "Service is closing")
+		return
+	}
+	async = true
+	accepted = true
 
 	res := toTorrentResponse(t, true)
 	res.PreloadSize = target
 	res.PreloadedBytes = h.preloadedBytes(hash, index, t, target)
+	h.preloadDiagnostic(&res, hash, index)
 	response.JSON(w, http.StatusOK, res)
 }
 
 func (h *TorrServerHandler) setPreload(hash string, index int, state preloadState) {
+	state.Owner, _ = h.uc.GenerationContext(hash)
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.preloads[preloadKey{Hash: hash, Index: index}] = state
 }
 
-func (h *TorrServerHandler) preloadTarget(hash string, index int, size int64) int64 {
+func (h *TorrServerHandler) completePreload(key preloadKey, state preloadState) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.preloads[key].Owner == state.Owner {
+		h.preloads[key] = state
+	}
+}
+
+func (h *TorrServerHandler) preloadDiagnostic(res *torrentResponse, hash string, index int) {
+	owner, _ := h.uc.GenerationContext(hash)
 	h.mu.Lock()
 	state, ok := h.preloads[preloadKey{Hash: hash, Index: index}]
-	if ok && time.Since(state.StartedAt) < 10*time.Minute && state.TargetBytes > 0 {
+	h.mu.Unlock()
+	if !ok || owner == nil || state.Owner != owner {
+		return
+	}
+	res.PreloadStatus = "completed"
+	if owner.Err() != nil {
+		res.PreloadStatus = "cancelled"
+	} else if state.Running {
+		res.PreloadStatus = "running"
+	} else if state.Error != "" {
+		res.PreloadStatus = "failed"
+		res.PreloadError = "Warmup failed; retry preload"
+	}
+}
+
+func (h *TorrServerHandler) expirePreloads(now time.Time) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for key, state := range h.preloads {
+		if !state.Running && (state.Owner != nil && state.Owner.Err() != nil || now.Sub(state.StartedAt) >= 10*time.Minute) {
+			delete(h.preloads, key)
+		}
+	}
+}
+
+func (h *TorrServerHandler) preloadTarget(hash string, index int, size int64) int64 {
+	owner, _ := h.uc.GenerationContext(hash)
+	h.mu.Lock()
+	state, ok := h.preloads[preloadKey{Hash: hash, Index: index}]
+	if ok && state.Owner == owner && owner != nil && owner.Err() == nil && time.Since(state.StartedAt) < 10*time.Minute && state.TargetBytes > 0 {
 		h.mu.Unlock()
 		return state.TargetBytes
 	}
@@ -564,16 +735,13 @@ func (h *TorrServerHandler) preloadedBytes(hash string, index int, t *models.Tor
 		return target
 	}
 	size := fileSize(t, index)
-	if size > 0 && fileDownloaded(t, index) >= size {
+	if t.ProgressSource == "verified" && size > 0 && fileDownloaded(t, index) >= size {
 		return target
 	}
 	if status, err := h.uc.GetCacheStatus(hash, index, 0); err == nil && status != nil {
 		return minInt64(status.VirtualCacheBytes, target)
 	}
-	h.mu.Lock()
-	state := h.preloads[preloadKey{Hash: hash, Index: index}]
-	h.mu.Unlock()
-	return minInt64(maxInt64(fileDownloaded(t, index), state.ReadBytes), target)
+	return 0 // A historical byte count is not proof of a readable cache window.
 }
 
 func (h *TorrServerHandler) PlayAlias(w http.ResponseWriter, r *http.Request) {
@@ -592,7 +760,11 @@ func (h *TorrServerHandler) PlayAlias(w http.ResponseWriter, r *http.Request) {
 func (h *TorrServerHandler) serveStream(w http.ResponseWriter, r *http.Request, hash string, index int) {
 	release, err := h.uc.AcquireTransfer(hash)
 	if err != nil {
-		response.Error(w, http.StatusNotFound, "Torrent not found")
+		status := http.StatusNotFound
+		if errors.Is(err, usecase.ErrStorageConflict) {
+			status = http.StatusConflict
+		}
+		response.Error(w, status, "Transfer unavailable")
 		return
 	}
 	defer release()
@@ -608,7 +780,7 @@ func (h *TorrServerHandler) serveStream(w http.ResponseWriter, r *http.Request, 
 	prepDuration := time.Since(prepStart)
 	if err != nil {
 		status := http.StatusNotFound
-		if errors.Is(err, engine.ErrDownloadBlocked) {
+		if errors.Is(err, engine.ErrDownloadBlocked) || errors.Is(err, engine.ErrOperationConflict) || errors.Is(err, usecase.ErrMetadataPending) || errors.Is(err, usecase.ErrStorageConflict) {
 			status = http.StatusConflict
 		}
 		message := "File not found"

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { progressLabel } from '../progress';
 import { computed, ref, onMounted, onUnmounted, nextTick, watch } from 'vue';
 import { useTorrentStore } from '../stores/torrentStore';
 import { PlayIcon, PauseIcon, TrashIcon, EllipsisVerticalIcon, FolderOpenIcon, PlusIcon } from '@heroicons/vue/24/solid';
@@ -119,7 +120,7 @@ const formatPeerTitle = (torrent: Torrent) => {
 };
 
 const torrentLabel = (torrent: Torrent) => torrent.name || torrent.title || torrent.hash;
-const canDownloadTorrent = (torrent: Torrent) => torrent.size > 0 && torrent.downloaded >= torrent.size;
+const canDownloadTorrent = (torrent: Torrent) => torrent.progress_source === 'verified' && torrent.size > 0 && torrent.downloaded >= torrent.size;
 
 const downloadTorrent = (torrent: Torrent) => {
   window.location.href = apiClient.torrentDownloadUrl(torrent.hash);
@@ -151,8 +152,7 @@ const confirmDelete = async () => {
   if (!pendingDelete.value) return;
   deleting.value = true;
   try {
-    await store.performAction(pendingDelete.value.torrent.hash, 'delete', pendingDelete.value.deleteFiles);
-    pendingDelete.value = null;
+    if (await store.performAction(pendingDelete.value.torrent.hash, 'delete', pendingDelete.value.deleteFiles)) pendingDelete.value = null;
   } finally {
     deleting.value = false;
   }
@@ -217,6 +217,9 @@ const confirmDelete = async () => {
                 </div>
               </div>
               <TemporaryTorrentControl :torrent="t" />
+              <div v-if="store.actionErrors[t.hash]" role="alert" class="text-xs text-red-700">{{ store.actionErrors[t.hash] }}</div>
+              <div v-if="t.recheck" class="text-xs text-amber-700">Recheck: {{ t.recheck.status }} {{ t.recheck.error }}</div>
+              <div v-if="t.selection_complete && t.state !== 'Seeding'" class="text-xs text-gray-500">Selected files complete (no background slot)</div>
               <div v-if="t.deletion_mode" class="text-xs text-orange-700">Deletion pending ({{ t.deletion_mode }}). {{ t.deletion_error }}</div>
               <div v-if="t.download_block" class="text-xs text-orange-700">Download blocked: {{ t.download_block }}. Resume manually after recovery.</div>
               <div v-if="t.storage_state && t.storage_state !== 'ready'" class="text-xs text-amber-700">Storage: {{ t.storage_state }}. {{ t.storage_error }}</div>
@@ -229,6 +232,7 @@ const confirmDelete = async () => {
                 <div class="bg-blue-600 h-2.5 rounded-full" :style="{ width: `${t.progress}%` }"></div>
               </div>
               <div class="text-xs text-gray-500 mt-1">{{ t.progress.toFixed(1) }}%</div>
+              <div v-if="progressLabel(t)" class="text-xs text-amber-700">{{ progressLabel(t) }}</div>
             </td>
             <td class="px-6 py-4 whitespace-nowrap">
               <span :class="['px-2.5 py-0.5 inline-flex text-xs leading-5 font-semibold rounded-full border', getStateColor(t.state)]">
@@ -317,6 +321,9 @@ const confirmDelete = async () => {
           
           <!-- Status tag + Size + Priority -->
           <TemporaryTorrentControl :torrent="t" />
+          <div v-if="store.actionErrors[t.hash]" role="alert" class="text-xs text-red-700">{{ store.actionErrors[t.hash] }}</div>
+          <div v-if="t.recheck" class="text-xs text-amber-700">Recheck: {{ t.recheck.status }} {{ t.recheck.error }}</div>
+          <div v-if="t.selection_complete && t.state !== 'Seeding'" class="text-xs text-gray-500">Selected files complete (no background slot)</div>
           <div v-if="t.deletion_mode" class="text-xs text-orange-700">Deletion pending ({{ t.deletion_mode }}). {{ t.deletion_error }}</div>
           <div v-if="t.download_block" class="text-xs text-orange-700">Download blocked: {{ t.download_block }}. Resume manually after recovery.</div>
           <div v-if="t.storage_state && t.storage_state !== 'ready'" class="text-xs text-amber-700">Storage: {{ t.storage_state }}. {{ t.storage_error }}</div>
@@ -338,6 +345,7 @@ const confirmDelete = async () => {
           </div>
 
           <!-- Progress bar -->
+          <div v-if="progressLabel(t)" class="text-xs text-amber-700">{{ progressLabel(t) }}</div>
           <div class="w-full bg-gray-200 rounded-full h-1.5 mb-1.5 flex">
             <div class="bg-blue-600 h-1.5 rounded-full" :style="{ width: `${t.progress}%` }"></div>
           </div>
@@ -389,6 +397,7 @@ const confirmDelete = async () => {
           >
             <PauseIcon class="w-4 h-4 mr-2" /> Pause
           </button>
+          <button @click="store.performAction(activeTorrent.hash, 'recheck'); activeMenu = null" class="flex items-center w-full px-4 py-2 text-sm text-gray-700 hover:bg-gray-100">Recheck</button>
           <button 
             v-if="canDownloadTorrent(activeTorrent)"
             @click="downloadTorrent(activeTorrent); activeMenu = null"
@@ -415,7 +424,7 @@ const confirmDelete = async () => {
     <ConfirmDialog
       :is-open="Boolean(pendingDelete)"
       :title="deleteTitle"
-      :message="deleteMessage"
+      :message="deleteMessage + (pendingDelete && store.actionErrors[pendingDelete.torrent.hash] ? '\n' + store.actionErrors[pendingDelete.torrent.hash] : '')"
       :confirm-label="pendingDelete?.deleteFiles ? 'Delete Files' : 'Remove Torrent'"
       :danger="true"
       :loading="deleting"

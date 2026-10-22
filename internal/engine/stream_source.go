@@ -167,6 +167,12 @@ func (e *Engine) OpenStreamSource(ctx context.Context, hash string, index int, i
 	if !ok {
 		return nil, TorrentNotFoundError{Hash: hash}
 	}
+	mt.mu.Lock()
+	checking := mt.rechecking || mt.initializing || mt.verificationUncertain
+	mt.mu.Unlock()
+	if checking {
+		return nil, ErrOperationConflict
+	}
 	if mt.t.Info() == nil {
 		return nil, fmt.Errorf("torrent metadata is not available yet")
 	}
@@ -382,6 +388,12 @@ func (e *Engine) CheckFileDirectReady(hash string, index int) (bool, int64, erro
 	file := files[index]
 	fileLength := file.Length()
 
+	mt.mu.Lock()
+	checking := mt.rechecking || mt.initializing || mt.verificationUncertain
+	mt.mu.Unlock()
+	if checking {
+		return false, fileLength, nil
+	}
 	if !file.ReadyForDirectRead() {
 		return false, fileLength, nil
 	}

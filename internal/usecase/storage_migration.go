@@ -334,6 +334,9 @@ func (uc *TorrentUseCase) restoreMappedTorrentLocked(t *models.Torrent) error {
 	if uc.engine.GetTorrent(t.Hash) != nil {
 		return nil
 	}
+	if t.State == models.StatePaused || t.State == models.StateError || t.State == models.StateMissingFiles {
+		return uc.restoreInactiveLocked(t)
+	}
 	if _, err := uc.restoreTorrentToEngine(t); err != nil {
 		return err
 	}

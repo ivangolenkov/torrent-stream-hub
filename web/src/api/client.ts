@@ -32,31 +32,34 @@ export const apiClient = {
     if (!response.ok) throw new Error(await readError(response, 'Failed to upload torrent file'));
   },
 
-  async action(hash: string, action: 'pause' | 'resume' | 'delete' | 'recheck' | 'hard_refresh' | 'make_permanent', deleteFiles: boolean = false): Promise<void> {
+  async action(hash: string, action: 'pause' | 'resume' | 'delete' | 'recheck' | 'hard_refresh' | 'make_permanent', deleteFiles: boolean = false): Promise<number> {
     const response = await fetch(`${API_BASE}/torrent/${hash}/action`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ action, delete_files: deleteFiles })
     });
     if (!response.ok) throw new Error(await readError(response, `Failed to perform action: ${action}`));
+    return (await response.json()).command_at_ns || 0;
   },
 
-  async setTorrentPriority(hash: string, priority: number): Promise<void> {
+  async setTorrentPriority(hash: string, priority: number): Promise<number> {
     const response = await fetch(`${API_BASE}/torrent/${hash}/priority`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ priority })
     });
     if (!response.ok) throw new Error(await readError(response, 'Failed to set torrent priority'));
+    return (await response.json()).command_at_ns || 0;
   },
 
-  async setFilePriority(hash: string, index: number, priority: number): Promise<void> {
+  async setFilePriority(hash: string, index: number, priority: number): Promise<number> {
     const response = await fetch(`${API_BASE}/torrent/${hash}/file/${index}/priority`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ priority })
     });
     if (!response.ok) throw new Error(await readError(response, 'Failed to set file priority'));
+    return (await response.json()).command_at_ns || 0;
   },
 
   async getFiles(hash: string): Promise<File[]> {

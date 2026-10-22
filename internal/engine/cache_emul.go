@@ -33,25 +33,33 @@ func (e *Engine) GetCacheStatus(hash string, fileIndex int, currentOffset int64)
 	}
 
 	file := files[fileIndex]
+	mt.mu.Lock()
+	checking := mt.rechecking || mt.initializing || mt.verificationUncertain
+	mt.mu.Unlock()
+	if checking {
+		return &CacheStatus{}, nil
+	}
+	mt.t.RefreshStorageCompletion()
+	fullyDownloaded := file.ReadyForDirectRead()
 	if currentOffset < 0 {
 		currentOffset = 0
 	}
 	if currentOffset >= file.Length() {
 		return &CacheStatus{
 			VirtualCacheBytes: 0,
-			IsFullyDownloaded: file.BytesCompleted() == file.Length(),
+			IsFullyDownloaded: fullyDownloaded,
 		}, nil
 	}
 
 	// Optimization: if fully downloaded, skip bitfield calculations
-	if file.BytesCompleted() == file.Length() {
+	if fullyDownloaded {
 		remaining := file.Length() - currentOffset
 		if remaining < 0 {
 			remaining = 0
 		}
 		logging.Debugf("cache status fully downloaded hash=%s file_index=%d offset=%d", hash, fileIndex, currentOffset)
 		return &CacheStatus{
-			VirtualCacheBytes: remaining,
+			VirtualCacheBytes: min(remaining, max(int64(0), e.cfg.StreamCacheSize)),
 			IsFullyDownloaded: true,
 		}, nil
 	}

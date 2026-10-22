@@ -149,7 +149,7 @@ func TestSaveAndGetTorrent(t *testing.T) {
 	}
 }
 
-func TestSaveTorrentDoesNotDecreaseProgress(t *testing.T) {
+func TestSaveTorrentAllowsProgressDecrease(t *testing.T) {
 	db, cleanup := setupTestDB(t)
 	defer cleanup()
 
@@ -184,11 +184,11 @@ func TestSaveTorrentDoesNotDecreaseProgress(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to fetch torrent: %v", err)
 	}
-	if fetched.Downloaded != 700 {
-		t.Fatalf("expected torrent progress to stay 700, got %d", fetched.Downloaded)
+	if fetched.Downloaded != 0 || fetched.LegacyDownloaded != 700 {
+		t.Fatalf("current observation must decrease, legacy retained separately: %+v", fetched)
 	}
-	if len(fetched.Files) != 1 || fetched.Files[0].Downloaded != 700 {
-		t.Fatalf("expected file progress to stay 700, got %+v", fetched.Files)
+	if len(fetched.Files) != 1 || fetched.Files[0].Downloaded != 0 || fetched.Files[0].LegacyDownloaded != 700 {
+		t.Fatalf("file observation must decrease, legacy retained separately: %+v", fetched.Files)
 	}
 }
 

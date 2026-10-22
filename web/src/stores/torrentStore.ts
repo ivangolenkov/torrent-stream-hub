@@ -10,11 +10,27 @@ export const useTorrentStore = defineStore('torrents', () => {
   const pieces = ref<Record<string, string>>({});
   const pinning = ref<Record<string, boolean>>({});
   const pinErrors = ref<Record<string, string>>({});
+  const actionErrors = ref<Record<string, string>>({});
+  const actionPending = ref<Record<string, boolean>>({});
+  let dataVersion = 0;
+  let listRequest = 0;
+  const confirmedPriorities = new Map<string, Map<number, number>>();
+  const commandBarriers = new Map<string, number>();
   // Protect a confirmed pin from an older SSE event already in flight.
   const confirmedPermanent = new Set<string>();
 
   const applyTorrents = (data: Torrent[]) => {
+    dataVersion++;
+    data = data.flatMap(t => {
+      const barrier = commandBarriers.get(t.hash) || 0;
+      const previous = torrents.value.find(old => old.hash === t.hash);
+      if (t.snapshot_at_ns && t.snapshot_at_ns < barrier) return previous ? [previous] : [];
+      const priorities = confirmedPriorities.get(t.hash);
+      if (priorities && t.files && [...priorities].every(([index, priority]) => t.files?.some(f => f.index === index && f.priority === priority))) confirmedPriorities.delete(t.hash);
+      return [{ ...t, files: t.files?.map(f => priorities?.has(f.index) ? { ...f, priority: priorities.get(f.index)! } : f) }];
+    });
     const hashes = new Set(data.map(t => t.hash));
+    for (const hash of confirmedPriorities.keys()) if (!hashes.has(hash)) confirmedPriorities.delete(hash);
     for (const hash of confirmedPermanent) {
       if (!hashes.has(hash)) confirmedPermanent.delete(hash);
     }
@@ -67,8 +83,11 @@ export const useTorrentStore = defineStore('torrents', () => {
   };
 
   const loadTorrents = async () => {
+    const request = ++listRequest;
+    const version = dataVersion;
     try {
-      applyTorrents(await apiClient.getTorrents());
+      const data = await apiClient.getTorrents();
+      if (request === listRequest && version === dataVersion) applyTorrents(data);
     } catch (e) {
       console.error(e);
     }
@@ -76,10 +95,11 @@ export const useTorrentStore = defineStore('torrents', () => {
 
   const selectTorrent = async (hash: string) => {
     selectedHash.value = hash;
+    const version = dataVersion;
     if (!files.value[hash]) {
       try {
         const data = await apiClient.getFiles(hash);
-        if (torrents.value.some(t => t.hash === hash)) files.value[hash] = data;
+        if (version === dataVersion && selectedHash.value === hash && torrents.value.some(t => t.hash === hash)) files.value[hash] = data;
       } catch (e) {
         console.error(e);
       }
@@ -87,8 +107,10 @@ export const useTorrentStore = defineStore('torrents', () => {
   };
 
   const fetchPieces = async (hash: string) => {
+    const version = dataVersion;
     try {
-      pieces.value[hash] = await apiClient.getPieces(hash);
+      const data = await apiClient.getPieces(hash);
+      if (version === dataVersion && selectedHash.value === hash) pieces.value[hash] = data;
     } catch (e) {
       console.error(e);
     }
@@ -99,8 +121,19 @@ export const useTorrentStore = defineStore('torrents', () => {
   };
 
   // Actions wrapper
-  const performAction = async (hash: string, action: 'pause' | 'resume' | 'delete', deleteFiles = false) => {
-    await apiClient.action(hash, action, deleteFiles);
+  const runCommand = async (hash: string, command: () => Promise<void>) => {
+    if (actionPending.value[hash]) return false;
+    actionPending.value[hash] = true;
+    delete actionErrors.value[hash];
+    dataVersion++;
+    try { await command(); return true; }
+    catch (e) { actionErrors.value[hash] = e instanceof Error ? e.message : 'Operation failed'; return false; }
+    finally { delete actionPending.value[hash]; }
+  };
+
+  const performAction = async (hash: string, action: 'pause' | 'resume' | 'delete' | 'recheck', deleteFiles = false) => runCommand(hash, async () => {
+    const barrier = await apiClient.action(hash, action, deleteFiles);
+    if (barrier) commandBarriers.set(hash, barrier);
     if (action === 'delete' && selectedHash.value === hash) {
       closeInspector();
     }
@@ -109,23 +142,23 @@ export const useTorrentStore = defineStore('torrents', () => {
       delete files.value[hash];
     }
     await loadTorrents();
-  };
+  });
 
-  const setTorrentPriority = async (hash: string, priority: number) => {
-    await apiClient.setTorrentPriority(hash, priority);
-    // Reload files for this torrent if it's currently selected to update UI
-    if (files.value[hash]) {
-      try {
-        files.value[hash] = await apiClient.getFiles(hash);
-      } catch (e) {
-        console.error(e);
-      }
-    }
+  const setTorrentPriority = async (hash: string, priority: number) => runCommand(hash, async () => {
+    const barrier = await apiClient.setTorrentPriority(hash, priority);
+    if (barrier) commandBarriers.set(hash, barrier);
+    const current = torrents.value.find(t => t.hash === hash)?.files || files.value[hash] || [];
+    confirmedPriorities.set(hash, new Map(current.map(f => [f.index, priority])));
+    for (const file of current) file.priority = priority;
     await loadTorrents();
-  };
+  });
 
-  const setFilePriority = async (hash: string, index: number, priority: number) => {
-    await apiClient.setFilePriority(hash, index, priority);
+  const setFilePriority = async (hash: string, index: number, priority: number) => runCommand(hash, async () => {
+    const barrier = await apiClient.setFilePriority(hash, index, priority);
+    if (barrier) commandBarriers.set(hash, barrier);
+    const priorities = confirmedPriorities.get(hash) || new Map<number, number>();
+    priorities.set(index, priority);
+    confirmedPriorities.set(hash, priorities);
     // Update local file state
     if (files.value[hash]) {
       const file = files.value[hash].find(f => f.index === index);
@@ -133,12 +166,16 @@ export const useTorrentStore = defineStore('torrents', () => {
         file.priority = priority;
       }
     }
-  };
+    const file = torrents.value.find(t => t.hash === hash)?.files?.find(f => f.index === index);
+    if (file) file.priority = priority;
+  });
 
   return {
     makePermanent,
     pinning,
     pinErrors,
+    actionErrors,
+    actionPending,
     torrents,
     selectedHash,
     files,

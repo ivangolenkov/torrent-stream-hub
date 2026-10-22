@@ -3,6 +3,7 @@
 package payload
 
 import (
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -17,6 +18,29 @@ var ErrNotRegular = errors.New("payload is not a regular file")
 
 func Path(info *metainfo.Info, file *metainfo.FileInfo) string {
 	return storage.DefaultFilePathMaker(storage.FilePathMakerOpts{Info: info, File: file})
+}
+
+const LayoutVersion = 1
+
+func Root(hash string) string { return filepath.Join("payload", hash) }
+
+func ValidRoot(root string) bool {
+	parts := strings.Split(filepath.Clean(root), string(os.PathSeparator))
+	if len(parts) != 2 || parts[0] != "payload" || len(parts[1]) != 40 {
+		return false
+	}
+	_, err := hex.DecodeString(parts[1])
+	return err == nil
+}
+
+func Overlap(a, b string) bool {
+	a = filepath.Clean(a)
+	b = filepath.Clean(b)
+	return a == b || strings.HasPrefix(a, b+string(os.PathSeparator)) || strings.HasPrefix(b, a+string(os.PathSeparator))
+}
+
+func IsolatedPath(hash string, info *metainfo.Info, file *metainfo.FileInfo) string {
+	return filepath.Join(Root(hash), Path(info, file))
 }
 
 func ValidateRelative(name string) error {
@@ -69,7 +93,7 @@ func Open(root *os.Root, name string) (*os.File, error) {
 		return nil, err
 	}
 	st, err := f.Stat()
-	if err != nil || !st.Mode().IsRegular() {
+	if err != nil || !st.Mode().IsRegular() || storage.FileHasMultipleLinks(f, st) {
 		_ = f.Close()
 		return nil, ErrNotRegular
 	}

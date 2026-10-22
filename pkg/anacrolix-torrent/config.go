@@ -212,6 +212,7 @@ type ClientConfig struct {
 	DialRateLimiter *rate.Limiter
 
 	PieceHashersPerTorrent int // default: 2
+	MaxActivePieceHashers  int // 0 uses the CPU/environment default.
 }
 
 func (cfg *ClientConfig) SetListenAddr(addr string) *ClientConfig {

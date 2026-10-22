@@ -2,7 +2,7 @@
 
 ## Статус И Зависимости
 
-- Статус: запланировано; реализация по отдельной команде после полного DoD фазы 34.
+- Статус: завершено; DoD проверен, обязательные тесты форка проходят без исключений. Ограничения дополнительных libpossum/FUSE проверок отражены в отчёте согласно разделу «Тестирование». Фаза 36 не начата. Подробности: `tasks/implementation/phase35-report.md`.
 - Основание: аудит `tasks/draft/codebase-audit-2026-10-21.md`, **F05, F06**.
 - Продолжает единый manifest/resolver фазы 34. Следующая фаза — 36, восстановление приоритетов и DiskFull.
 
@@ -69,11 +69,11 @@
 
 ## Definition Of Done
 
-- [ ] F05: разные раздачи физически изолированы, writer/reader/delete используют один versioned mapping; одинаковые имена не создают shared writes.
-- [ ] Legacy-миграция возобновляема, не перезаписывает target/чужие данные; неоднозначные случаи блокируются с инструкцией восстановления.
-- [ ] FIFO, temporary/permanent, metadata, priorities и manifests сохранены; pending deletion не конфликтует с миграцией.
-- [ ] F06: имя/размер и старый completion cache не дают verified status; существующие данные после открытия проверяются до признания готовыми.
-- [ ] Direct stream, download/ZIP, torrent reader и seeding не выдают непроверенные данные по исправленным сценариям.
-- [ ] Verification ограничена по ресурсам и отменяется при shutdown/Delete; mmap payload не добавлен.
-- [ ] Тесты legacy/new layout, повреждения и прерываний проходят, выполнены отдельные проверки форка; ограничения отражены в отчёте.
-- [ ] README содержит процедуру миграции/backup и ограничения downgrade; создан `tasks/implementation/phase35-report.md`.
+- [x] F05: разные раздачи физически изолированы, writer/reader/delete используют один versioned mapping; одинаковые имена не создают shared writes.
+- [x] Legacy-миграция возобновляема, не перезаписывает target/чужие данные; неоднозначные случаи блокируются с инструкцией восстановления.
+- [x] FIFO, temporary/permanent, metadata, priorities и manifests сохранены; pending deletion не конфликтует с миграцией.
+- [x] F06: имя/размер и старый completion cache не дают verified status; существующие данные после открытия проверяются до признания готовыми.
+- [x] Direct stream, download/ZIP, torrent reader и seeding не выдают непроверенные данные по исправленным сценариям.
+- [x] Verification ограничена по ресурсам и отменяется при shutdown/Delete; mmap payload не добавлен.
+- [x] Тесты legacy/new layout, повреждения и прерываний проходят, выполнены отдельные проверки форка; ограничения отражены в отчёте.
+- [x] README содержит процедуру миграции/backup и ограничения downgrade; создан `tasks/implementation/phase35-report.md`.

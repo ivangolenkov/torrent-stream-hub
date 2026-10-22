@@ -36,7 +36,7 @@ func setupHTTPStreamServer(t *testing.T, pieceLength int64, name string, fileDat
 	}
 	hash := tor.Hash
 
-	filePath := filepath.Join(dir, name, name+".mp4")
+	filePath := filepath.Join(dir, "payload", tor.Hash, name, name+".mp4")
 	if err := os.MkdirAll(filepath.Dir(filePath), 0o755); err != nil {
 		ts.Close()
 		cleanup()

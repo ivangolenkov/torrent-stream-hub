@@ -114,10 +114,10 @@ func (me *filePieceImpl) checkCompleteFileSizes() (c Completion) {
 	for i, extent := range me.iterFileSegments() {
 		file := me.t.file(i)
 		file.mu.RLock()
-		s, err := os.Stat(file.safeOsPath)
+		s, err := me.t.stat(file.safeOsPath)
 		if me.partFiles() && errors.Is(err, fs.ErrNotExist) {
 			// Can we use shared files for this? Is it faster?
-			s, err = os.Stat(file.partFilePath())
+			s, err = me.t.stat(file.partFilePath())
 		}
 		file.mu.RUnlock()
 		if err != nil {
@@ -170,11 +170,50 @@ func (me *filePieceImpl) markIncompletePieces(file *file, size int64) {
 	}
 }
 
-func (me *filePieceImpl) MarkComplete() (err error) {
+func (me *filePieceImpl) BeginVerification() error {
+	if !me.t.client.opts.VerifyOnOpen {
+		return nil
+	}
 	if !me.t.beginOperation() {
 		return os.ErrClosed
 	}
 	defer me.t.lifecycle.RUnlock()
+	signature, err := me.t.pieceSignature(me.p.Index())
+	if err != nil {
+		return err
+	}
+	me.t.freshMu.Lock()
+	me.t.hashSnapshot[me.p.Index()] = signature
+	me.t.freshMu.Unlock()
+	return nil
+}
+
+func (me *filePieceImpl) MarkComplete() (err error) {
+	var verifiedSignature []os.FileInfo
+	if !me.t.beginOperation() {
+		return os.ErrClosed
+	}
+	defer me.t.lifecycle.RUnlock()
+	if me.t.client.opts.VerifyOnOpen {
+		current, e := me.t.pieceSignature(me.p.Index())
+		if e != nil {
+			return e
+		}
+		me.t.freshMu.Lock()
+		snapshot, ok := me.t.hashSnapshot[me.p.Index()]
+		before := append([]os.FileInfo(nil), snapshot...)
+		me.t.freshMu.Unlock()
+		if !ok || len(before) != len(current) {
+			return fmt.Errorf("storage generation changed during verification")
+		}
+		for i, st := range before {
+			now := current[i]
+			if !os.SameFile(st, now) || st.Size() != now.Size() || !st.ModTime().Equal(now.ModTime()) {
+				return fmt.Errorf("storage changed during verification")
+			}
+		}
+		verifiedSignature = before
+	}
 	err = me.pieceCompletion().Set(me.pieceKey(), true)
 	if err != nil {
 		return
@@ -184,6 +223,11 @@ func (me *filePieceImpl) MarkComplete() (err error) {
 		if err != nil {
 			me.logger().Warn("error flushing completed piece", "piece", me.p.Index(), "err", err)
 		}
+	}
+	if me.t.client.opts.VerifyOnOpen {
+		me.t.freshMu.Lock()
+		me.t.fresh[me.p.Index()] = verifiedSignature
+		me.t.freshMu.Unlock()
 	}
 	for f := range me.pieceFiles() {
 		res := me.allFilePiecesComplete(f)
@@ -204,6 +248,16 @@ func (me *filePieceImpl) MarkComplete() (err error) {
 }
 
 func (me *filePieceImpl) allFilePiecesComplete(f file) (ret g.Result[bool]) {
+	if me.t.client.opts.VerifyOnOpen {
+		for index := f.beginPieceIndex(); index < f.endPieceIndex(); index++ {
+			c := me.t.getCompletion(index)
+			if !c.Ok || !c.Complete || c.Err != nil {
+				return
+			}
+		}
+		ret.SetOk(true)
+		return
+	}
 	next, stop := iter.Pull(GetPieceCompletionRange(
 		me.t.pieceCompletion(),
 		me.t.infoHash,
@@ -233,6 +287,9 @@ func (me *filePieceImpl) MarkNotComplete() (err error) {
 		return os.ErrClosed
 	}
 	defer me.t.lifecycle.RUnlock()
+	me.t.freshMu.Lock()
+	delete(me.t.fresh, me.p.Index())
+	me.t.freshMu.Unlock()
 	err = me.pieceCompletion().Set(me.pieceKey(), false)
 	if err != nil {
 		return
@@ -249,6 +306,9 @@ func (me *filePieceImpl) MarkNotComplete() (err error) {
 }
 
 func (me *filePieceImpl) promotePartFile(f file) (err error) {
+	if me.t.client.opts.NoCompletionRename {
+		return nil
+	}
 	// Flush file on completion, even if we don't promote it.
 	err = me.t.io.flush(f.partFilePath(), 0, f.length())
 	if err != nil {
@@ -268,6 +328,9 @@ func (me *filePieceImpl) promotePartFile(f file) (err error) {
 	if !renamed {
 		return
 	}
+	if me.t.client.opts.RootFS != nil {
+		return nil
+	} // Never reopen by absolute name.
 	err = os.Chmod(f.safeOsPath, filePerm&^0o222)
 	if err != nil {
 		me.logger().Info("error setting promoted file to read-only", "file", f.safeOsPath, "err", err)
@@ -291,6 +354,9 @@ func (me *filePieceImpl) exclRenameIfExists(from, to string) (renamed bool, err 
 }
 
 func (me *filePieceImpl) onFileNotComplete(f file) (err error) {
+	if me.t.client.opts.NoCompletionRename {
+		return nil
+	}
 	if !me.partFiles() {
 		return
 	}

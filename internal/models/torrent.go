@@ -37,19 +37,21 @@ const (
 
 // Torrent defines the core properties and state of a single torrent
 type Torrent struct {
-	IsTemporary bool         `json:"is_temporary"`
-	Hash        string       `json:"hash"`
-	Name        string       `json:"name"`
-	Title       string       `json:"title,omitempty"`
-	Data        string       `json:"data,omitempty"`
-	Poster      string       `json:"poster,omitempty"`
-	Category    string       `json:"category,omitempty"`
-	Size        int64        `json:"size"`
-	Downloaded  int64        `json:"downloaded"`
-	Progress    float64      `json:"progress"`
-	State       TorrentState `json:"state"`
-	Error       ErrorReason  `json:"error,omitempty"`
-	Files       []*File      `json:"files,omitempty"`
+	StorageState string       `json:"storage_state,omitempty"`
+	StorageError string       `json:"storage_error,omitempty"`
+	IsTemporary  bool         `json:"is_temporary"`
+	Hash         string       `json:"hash"`
+	Name         string       `json:"name"`
+	Title        string       `json:"title,omitempty"`
+	Data         string       `json:"data,omitempty"`
+	Poster       string       `json:"poster,omitempty"`
+	Category     string       `json:"category,omitempty"`
+	Size         int64        `json:"size"`
+	Downloaded   int64        `json:"downloaded"`
+	Progress     float64      `json:"progress"`
+	State        TorrentState `json:"state"`
+	Error        ErrorReason  `json:"error,omitempty"`
+	Files        []*File      `json:"files,omitempty"`
 	// Piece info for UI progress
 	PieceLength int64 `json:"piece_length"`
 	NumPieces   int   `json:"num_pieces"`

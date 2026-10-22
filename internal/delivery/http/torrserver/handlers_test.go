@@ -393,7 +393,7 @@ func TestPreload_CompletedFileReturnsFastPath(t *testing.T) {
 	}
 	hash := tor.Hash
 
-	filePath := filepath.Join(dir, "test_preload_fast", "video.mp4")
+	filePath := filepath.Join(dir, "payload", hash, "test_preload_fast", "video.mp4")
 	if err := os.MkdirAll(filepath.Dir(filePath), 0o755); err != nil {
 		t.Fatalf("failed to create dir: %v", err)
 	}

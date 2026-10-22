@@ -21,6 +21,9 @@ type fileTorrentImpl struct {
 	// after Torrent.Drop; it must not rename payload after application cleanup.
 	lifecycle         sync.RWMutex
 	closed            bool
+	freshMu           sync.Mutex
+	fresh             map[int][]os.FileInfo
+	hashSnapshot      map[int][]os.FileInfo
 	info              *metainfo.Info
 	files             []fileExtra
 	metainfoFileInfos []metainfo.FileInfo
@@ -99,6 +102,9 @@ func (fts *fileTorrentImpl) pathForWrite(f *file) string {
 }
 
 func (fts *fileTorrentImpl) getCompletion(piece int) Completion {
+	if fts.client.opts.VerifyOnOpen {
+		return fts.freshCompletion(piece)
+	}
 	cmpl, err := fts.pieceCompletion().Get(metainfo.PieceKey{fts.infoHash, piece})
 	cmpl.Err = errors.Join(cmpl.Err, err)
 	return cmpl
@@ -113,6 +119,83 @@ func (fts *fileTorrentImpl) Piece(p metainfo.Piece) PieceImpl {
 		p,
 		missinggo.NewSectionWriter(_io, p.Offset(), p.Length()),
 		io.NewSectionReader(_io, p.Offset(), p.Length()),
+	}
+}
+
+func (fts *fileTorrentImpl) stat(name string) (os.FileInfo, error) {
+	if r, ok := fts.io.(rootFileIo); ok {
+		return r.stat(name)
+	}
+	return os.Stat(name)
+}
+
+func (fts *fileTorrentImpl) pieceSignature(index int) ([]os.FileInfo, error) {
+	var result []os.FileInfo
+	p := fts.info.Piece(index)
+	for i := range fts.segmentLocater.LocateIter(segments.Extent{p.Offset(), p.Length()}) {
+		f := fts.file(i)
+		f.mu.RLock()
+		var st os.FileInfo
+		var err error
+		if fts.partFiles() {
+			st, err = fts.stat(f.partFilePath())
+		}
+		if st == nil && (err == nil || errors.Is(err, os.ErrNotExist)) {
+			st, err = fts.stat(f.safeOsPath)
+		}
+		f.mu.RUnlock()
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, st)
+	}
+	return result, nil
+}
+
+func (fts *fileTorrentImpl) freshCompletion(index int) Completion {
+	fts.freshMu.Lock()
+	defer fts.freshMu.Unlock()
+	old, ok := fts.fresh[index]
+	if !ok {
+		return Completion{}
+	}
+	current, err := fts.pieceSignature(index)
+	if err != nil || len(old) != len(current) {
+		delete(fts.fresh, index)
+		return Completion{}
+	}
+	for i, st := range old {
+		other := current[i]
+		if !os.SameFile(st, other) || st.Size() != other.Size() || !st.ModTime().Equal(other.ModTime()) {
+			delete(fts.fresh, index)
+			return Completion{}
+		}
+	}
+	return Completion{Ok: true, Complete: true}
+}
+
+// Internal writes to a missing piece do not invalidate unrelated verified
+// pieces merely because the containing file's mtime/size changed.
+func (fts *fileTorrentImpl) acceptWrite(before, after os.FileInfo, off, n int64) {
+	if !fts.client.opts.VerifyOnOpen || before == nil || after == nil {
+		return
+	}
+	fts.freshMu.Lock()
+	defer fts.freshMu.Unlock()
+	for _, cache := range []map[int][]os.FileInfo{fts.fresh, fts.hashSnapshot} {
+		for piece, signature := range cache {
+			start := int64(piece) * fts.info.PieceLength
+			end := start + fts.info.PieceLength
+			if n > 0 && off < end && off+n > start {
+				delete(cache, piece)
+				continue
+			}
+			for i, old := range signature {
+				if os.SameFile(old, before) && old.Size() == before.Size() && old.ModTime().Equal(before.ModTime()) {
+					signature[i] = after
+				}
+			}
+		}
 	}
 }
 

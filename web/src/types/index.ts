@@ -39,6 +39,8 @@ export interface PeerSummary {
 }
 
 export interface Torrent {
+	storage_state?: string;
+	storage_error?: string;
   is_temporary: boolean;
   hash: string;
   name: string;

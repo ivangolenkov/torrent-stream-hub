@@ -7,6 +7,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 
@@ -152,6 +153,9 @@ func isSafeRelativePath(rel string) bool {
 
 // OpenStreamSource prepares a stream source for the given torrent and file.
 func (e *Engine) OpenStreamSource(ctx context.Context, hash string, index int, isHEAD bool) (*StreamSource, error) {
+	if e.ctx != nil && e.ctx.Err() != nil {
+		return nil, e.ctx.Err()
+	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -172,6 +176,7 @@ func (e *Engine) OpenStreamSource(ctx context.Context, hash string, index int, i
 		return nil, fmt.Errorf("file index out of bounds: %d", index)
 	}
 	file := files[index]
+	mt.t.RefreshStorageCompletion()
 	displayName := file.DisplayPath()
 	fileLength := file.Length()
 
@@ -199,7 +204,6 @@ func (e *Engine) OpenStreamSource(ctx context.Context, hash string, index int, i
 		reader := file.NewReader()
 		reader.SetContext(ctx)
 		reader.SetReadahead(defaultStreamHeadPrebuffer)
-		reader.SetResponsive()
 
 		return &StreamSource{
 			Type:           StreamSourceTorrent,
@@ -225,7 +229,11 @@ func (e *Engine) OpenStreamSource(ctx context.Context, hash string, index int, i
 	// 3. Compute relative path from layout
 	info := mt.t.Info()
 	fi := file.FileInfo()
-	relPath := payload.Path(info, &fi)
+	storageRoot, err := e.StorageRoot(hash)
+	if err != nil {
+		return nil, err
+	}
+	relPath := filepath.Join(storageRoot, payload.Path(info, &fi))
 	if !isSafeRelativePath(relPath) {
 		return makeTorrentFallback(FallbackReasonPathOutsideRoot)
 	}
@@ -345,7 +353,11 @@ func (e *Engine) CheckFileDirectReady(hash string, index int) (bool, int64, erro
 
 	info := mt.t.Info()
 	fi := file.FileInfo()
-	relPath := payload.Path(info, &fi)
+	storageRoot, err := e.StorageRoot(hash)
+	if err != nil {
+		return false, fileLength, err
+	}
+	relPath := filepath.Join(storageRoot, payload.Path(info, &fi))
 	if !isSafeRelativePath(relPath) {
 		return false, fileLength, nil
 	}

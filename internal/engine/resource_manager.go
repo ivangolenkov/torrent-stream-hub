@@ -49,6 +49,7 @@ func (e *Engine) manageResources() {
 	activeCount := 0
 
 	for _, mt := range torrents {
+		mt.t.RefreshStorageCompletion()
 		if diskFull {
 			mt.mu.Lock()
 			if mt.state == models.StateDownloading {

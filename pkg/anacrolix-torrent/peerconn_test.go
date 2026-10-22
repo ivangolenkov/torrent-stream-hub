@@ -44,6 +44,8 @@ func TestSendBitfieldThenHave(t *testing.T) {
 	c.postBitfield( /*[]bool{false, true, false}*/ )
 	c.locker().Unlock()
 	c.locker().Lock()
+	// HAVE is now gated by current completion, just like the bitfield.
+	c.t._completedPieces.Add(2)
 	c.have(2)
 	c.locker().Unlock()
 	b := make([]byte, 15)

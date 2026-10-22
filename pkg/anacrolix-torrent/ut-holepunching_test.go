@@ -21,15 +21,34 @@ import (
 	"golang.org/x/time/rate"
 
 	"github.com/anacrolix/torrent/internal/testutil"
+	utHolepunch "github.com/anacrolix/torrent/peer_protocol/ut-holepunch"
 )
 
 // Check that after completing leeching, a leecher transitions to a seeding
 // correctly. Connected in a chain like so: Seeder <-> Leecher <-> LeecherLeecher.
 func TestHolepunchConnect(t *testing.T) {
+	// The rendezvous address must match the address seen by the relay. With
+	// dual-stack loopback AddClientPeer can select ::1 while ListenAddrs()[0]
+	// selects 127.0.0.1, which describes a different peer to the relay.
+	config := func() *ClientConfig {
+		cfg := TestingConfig(t)
+		cfg.DisableIPv6 = true
+		return cfg
+	}
+	// This fork deliberately does not advertise holepunch in production.
+	// Enable it only in this fixture, before any peer handshakes occur.
+	newClient := func(cfg *ClientConfig) (*Client, error) {
+		cl, err := NewClient(cfg)
+		if err == nil {
+			cl.defaultLocalLtepProtocolMap.Index = append(cl.defaultLocalLtepProtocolMap.Index, utHolepunch.ExtensionName)
+			cl.defaultLocalLtepProtocolMap.NumBuiltin++
+		}
+		return cl, err
+	}
 	greetingTempDir, mi := testutil.GreetingTestTorrent()
 	defer os.RemoveAll(greetingTempDir)
 
-	cfg := TestingConfig(t)
+	cfg := config()
 	cfg.Seed = true
 	cfg.MaxAllocPeerRequestDataPerConn = 4
 	cfg.DataDir = greetingTempDir
@@ -43,7 +62,7 @@ func TestHolepunchConnect(t *testing.T) {
 	// have to allow the initial connection to the leecher though, so it can rendezvous for us.
 	cfg.DialRateLimiter = rate.NewLimiter(0, 1)
 	cfg.Logger = cfg.Logger.WithContextText("seeder")
-	seeder, err := NewClient(cfg)
+	seeder, err := newClient(cfg)
 	require.NoError(t, err)
 	defer seeder.Close()
 	defer testutil.ExportStatusWriter(seeder, "s", t)()
@@ -52,21 +71,21 @@ func TestHolepunchConnect(t *testing.T) {
 	assert.True(t, ok)
 	seederTorrent.VerifyData()
 
-	cfg = TestingConfig(t)
+	cfg = config()
 	cfg.Seed = true
 	cfg.DataDir = t.TempDir()
 	cfg.AlwaysWantConns = true
 	cfg.Logger = cfg.Logger.WithContextText("leecher")
-	// This way the leecher leecher will still try to use this peer as a relay, but won't be told
-	// about the seeder via PEX.
-	//cfg.DisablePEX = true
+	// Test rendezvous, not PEX discovery. A non-accepting seeder need not be
+	// advertised by PEX; advertising PEX here can exclude this relay entirely.
+	cfg.DisablePEX = true
 	cfg.Debug = true
-	leecher, err := NewClient(cfg)
+	leecher, err := newClient(cfg)
 	require.NoError(t, err)
 	defer leecher.Close()
 	defer testutil.ExportStatusWriter(leecher, "l", t)()
 
-	cfg = TestingConfig(t)
+	cfg = config()
 	cfg.Seed = false
 	cfg.DataDir = t.TempDir()
 	cfg.MaxAllocPeerRequestDataPerConn = 4
@@ -74,7 +93,7 @@ func TestHolepunchConnect(t *testing.T) {
 	cfg.NominalDialTimeout = time.Second
 	cfg.Logger = cfg.Logger.WithContextText("leecher-leecher")
 	//cfg.DisableUTP = true
-	leecherLeecher, _ := NewClient(cfg)
+	leecherLeecher, err := newClient(cfg)
 	require.NoError(t, err)
 	defer leecherLeecher.Close()
 	defer testutil.ExportStatusWriter(leecherLeecher, "ll", t)()

@@ -18,21 +18,17 @@ import (
 
 func TestClientInvalidTracker(t *testing.T) {
 	timeout := time.NewTimer(3 * time.Second)
-	receivedStatusUpdate := make(chan bool)
-	gotTrackerDisconnectedEvt := false
+	defer timeout.Stop()
+	receivedStatusUpdate := make(chan StatusUpdatedEvent, 1)
 	cfg := TestingConfig(t)
 	cfg.DisableTrackers = false
 	cfg.Callbacks.StatusUpdated = append(cfg.Callbacks.StatusUpdated, func(e StatusUpdatedEvent) {
-		if e.Event == TrackerAnnounceError {
-			// ignore
-			return
-		}
 		if e.Event == TrackerDisconnected {
-			gotTrackerDisconnectedEvt = true
-			require.Equal(t, "ws://test.invalid:4242", e.Url)
-			require.Error(t, e.Error)
+			select {
+			case receivedStatusUpdate <- e:
+			default:
+			}
 		}
-		receivedStatusUpdate <- true
 	})
 
 	cl, err := NewClient(cfg)
@@ -51,9 +47,11 @@ func TestClientInvalidTracker(t *testing.T) {
 
 	select {
 	case <-timeout.C:
-	case <-receivedStatusUpdate:
+		t.Fatal("no tracker disconnected event")
+	case e := <-receivedStatusUpdate:
+		require.Equal(t, "ws://test.invalid:4242", e.Url)
+		require.Error(t, e.Error)
 	}
-	require.True(t, gotTrackerDisconnectedEvt)
 	to.Drop()
 }
 
@@ -82,17 +80,17 @@ func TestClientValidTrackerConn(t *testing.T) {
 	defer s.Close()
 
 	timeout := time.NewTimer(3 * time.Second)
-	receivedStatusUpdate := make(chan bool)
-	gotTrackerConnectedEvt := false
+	defer timeout.Stop()
+	receivedStatusUpdate := make(chan StatusUpdatedEvent, 1)
 	cfg := TestingConfig(t)
 	cfg.DisableTrackers = false
 	cfg.Callbacks.StatusUpdated = append(cfg.Callbacks.StatusUpdated, func(e StatusUpdatedEvent) {
 		if e.Event == TrackerConnected {
-			gotTrackerConnectedEvt = true
-			require.Equal(t, trackerUrl, e.Url)
-			require.NoError(t, e.Error)
+			select {
+			case receivedStatusUpdate <- e:
+			default:
+			}
 		}
-		receivedStatusUpdate <- true
 	})
 
 	cl, err := NewClient(cfg)
@@ -111,9 +109,11 @@ func TestClientValidTrackerConn(t *testing.T) {
 
 	select {
 	case <-timeout.C:
-	case <-receivedStatusUpdate:
+		t.Fatal("no tracker connected event")
+	case e := <-receivedStatusUpdate:
+		require.Equal(t, trackerUrl, e.Url)
+		require.NoError(t, e.Error)
 	}
-	require.True(t, gotTrackerConnectedEvt)
 	to.Drop()
 }
 
@@ -122,26 +122,20 @@ func TestClientAnnounceFailure(t *testing.T) {
 	defer s.Close()
 
 	timeout := time.NewTimer(3 * time.Second)
-	receivedStatusUpdate := make(chan bool)
-	gotTrackerAnnounceErrorEvt := false
+	defer timeout.Stop()
+	receivedStatusUpdate := make(chan StatusUpdatedEvent, 1)
 	cfg := TestingConfig(t)
 	cfg.DisableTrackers = false
 
 	var to *Torrent
 
 	cfg.Callbacks.StatusUpdated = append(cfg.Callbacks.StatusUpdated, func(e StatusUpdatedEvent) {
-		if e.Event == TrackerConnected {
-			// ignore
-			return
-		}
 		if e.Event == TrackerAnnounceError {
-			gotTrackerAnnounceErrorEvt = true
-			require.Equal(t, trackerUrl, e.Url)
-			require.Equal(t, to.InfoHash().HexString(), e.InfoHash)
-			require.Error(t, e.Error)
-			require.Equal(t, "test error", e.Error.Error())
+			select {
+			case receivedStatusUpdate <- e:
+			default:
+			}
 		}
-		receivedStatusUpdate <- true
 	})
 
 	cl, err := NewClient(cfg)
@@ -164,9 +158,12 @@ func TestClientAnnounceFailure(t *testing.T) {
 
 	select {
 	case <-timeout.C:
-	case <-receivedStatusUpdate:
+		t.Fatal("no tracker announce error event")
+	case e := <-receivedStatusUpdate:
+		require.Equal(t, trackerUrl, e.Url)
+		require.Equal(t, to.InfoHash().HexString(), e.InfoHash)
+		require.EqualError(t, e.Error, "test error")
 	}
-	require.True(t, gotTrackerAnnounceErrorEvt)
 	to.Drop()
 }
 
@@ -175,25 +172,20 @@ func TestClientAnnounceSuccess(t *testing.T) {
 	defer s.Close()
 
 	timeout := time.NewTimer(3 * time.Second)
-	receivedStatusUpdate := make(chan bool)
-	gotTrackerAnnounceSuccessfulEvt := false
+	defer timeout.Stop()
+	receivedStatusUpdate := make(chan StatusUpdatedEvent, 1)
 	cfg := TestingConfig(t)
 	cfg.DisableTrackers = false
 
 	var to *Torrent
 
 	cfg.Callbacks.StatusUpdated = append(cfg.Callbacks.StatusUpdated, func(e StatusUpdatedEvent) {
-		if e.Event == TrackerConnected {
-			// ignore
-			return
-		}
 		if e.Event == TrackerAnnounceSuccessful {
-			gotTrackerAnnounceSuccessfulEvt = true
-			require.Equal(t, trackerUrl, e.Url)
-			require.Equal(t, to.InfoHash().HexString(), e.InfoHash)
-			require.NoError(t, e.Error)
+			select {
+			case receivedStatusUpdate <- e:
+			default:
+			}
 		}
-		receivedStatusUpdate <- true
 	})
 
 	cl, err := NewClient(cfg)
@@ -212,9 +204,12 @@ func TestClientAnnounceSuccess(t *testing.T) {
 
 	select {
 	case <-timeout.C:
-	case <-receivedStatusUpdate:
+		t.Fatal("no tracker announce successful event")
+	case e := <-receivedStatusUpdate:
+		require.Equal(t, trackerUrl, e.Url)
+		require.Equal(t, to.InfoHash().HexString(), e.InfoHash)
+		require.NoError(t, e.Error)
 	}
-	require.True(t, gotTrackerAnnounceSuccessfulEvt)
 	to.Drop()
 }
 

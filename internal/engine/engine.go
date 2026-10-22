@@ -38,10 +38,14 @@ type Engine struct {
 	storage storage.ClientImplCloser
 	cfg     *config.Config
 
-	ctx       context.Context
-	cancel    context.CancelFunc
-	wg        sync.WaitGroup
-	closeOnce sync.Once
+	ctx                   context.Context
+	cancel                context.CancelFunc
+	wg                    sync.WaitGroup
+	closeOnce             sync.Once
+	storageTaskMu         sync.Mutex
+	storageRootMu         sync.RWMutex
+	storageRootResolver   func(string) (string, error)
+	storageAliasRegistrar func(string, string) error
 
 	mu                        sync.RWMutex
 	managedTorrents           map[string]*ManagedTorrent
@@ -57,6 +61,7 @@ type Engine struct {
 }
 
 type ManagedTorrent struct {
+	hash                      string
 	mu                        sync.Mutex
 	t                         *torrent.Torrent
 	state                     models.TorrentState
@@ -252,7 +257,6 @@ func (e *Engine) Warmup(ctx context.Context, hash string, index int, size int64)
 
 	reader := file.NewReader()
 	reader.SetContext(ctx)
-	reader.SetResponsive()
 	defer reader.Close()
 	reader.SetReadahead(target)
 
@@ -278,9 +282,11 @@ func (e *Engine) Warmup(ctx context.Context, hash string, index int, size int64)
 func (e *Engine) Close() {
 	e.closeOnce.Do(func() {
 		logging.Infof("closing torrent engine")
+		e.storageTaskMu.Lock()
 		if e.cancel != nil {
 			e.cancel()
 		}
+		e.storageTaskMu.Unlock()
 		if e.streamManager != nil {
 			e.streamManager.CloseAllStreams()
 		}
@@ -337,7 +343,7 @@ func (e *Engine) AddInfoHash(hash string) (*models.Torrent, error) {
 	return e.AddMagnet("magnet:?xt=urn:btih:" + strings.TrimSpace(hash))
 }
 
-func (e *Engine) AddTorrentFile(r io.Reader) (*models.Torrent, error) {
+func (e *Engine) AddTorrentFile(r io.Reader, identity ...string) (*models.Torrent, error) {
 	logging.Infof("adding torrent from .torrent file")
 	metaInfo, err := metainfo.Load(r)
 	if err != nil {
@@ -360,11 +366,18 @@ func (e *Engine) AddTorrentFile(r io.Reader) (*models.Torrent, error) {
 		return nil, err
 	}
 
-	model, err := e.addTorrentWithSource(t, metaInfo.Magnet(nil, nil).String())
+	magnet, err := metaInfo.MagnetV2()
 	if err != nil {
 		return nil, err
 	}
-	model.SourceURI = metaInfo.Magnet(nil, nil).String()
+	model, err := e.addTorrentWithSource(t, magnet.String(), identity...)
+	if err != nil {
+		return nil, err
+	}
+	model.SourceURI = magnet.String()
+	if err := e.saveMetainfo(model.Hash, metaInfo, false); err != nil {
+		logging.Warnf("failed to persist canonical metainfo hash=%s: %v", model.Hash, err)
+	}
 	logging.Infof("torrent added hash=%s source=file state=%s", model.Hash, model.State)
 	return model, nil
 }
@@ -429,10 +442,21 @@ func (e *Engine) addTorrent(t *torrent.Torrent) (*models.Torrent, error) {
 	return e.addTorrentWithSource(t, "")
 }
 
-func (e *Engine) addTorrentWithSource(t *torrent.Torrent, sourceURI string) (*models.Torrent, error) {
+func (e *Engine) addTorrentWithSource(t *torrent.Torrent, sourceURI string, identity ...string) (*models.Torrent, error) {
 	hash := t.InfoHash().HexString()
+	if len(identity) > 0 && identity[0] != "" {
+		hash = identity[0]
+	}
 
 	e.mu.Lock()
+	// A v2-only magnet can acquire its hybrid v1 alias with metadata. Keep the
+	// application's original identity for this runtime, never register it twice.
+	for key, existing := range e.managedTorrents {
+		if existing.t == t {
+			hash = key
+			break
+		}
+	}
 	if mt, ok := e.managedTorrents[hash]; ok {
 		if mt.sourceURI == "" && strings.TrimSpace(sourceURI) != "" {
 			mt.sourceURI = strings.TrimSpace(sourceURI)
@@ -444,6 +468,7 @@ func (e *Engine) addTorrentWithSource(t *torrent.Torrent, sourceURI string) (*mo
 	}
 
 	mt := &ManagedTorrent{
+		hash:                      hash,
 		t:                         t,
 		state:                     models.StateQueued, // initially queued, resourceMonitor will start it
 		err:                       models.ErrNone,

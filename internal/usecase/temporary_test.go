@@ -350,6 +350,9 @@ func TestTemporaryPartialDeletionSurvivesRestart(t *testing.T) {
 	}
 	// The final file was already removed by a prior attempt, .part remains.
 	remaining := filepath.Join(dir, paths[0]+".part")
+	if err := os.MkdirAll(filepath.Dir(remaining), 0700); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(remaining, []byte("partial"), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -417,7 +420,14 @@ func TestTemporaryCleanupDBFailureKeepsAddSuccessfulAndRetries(t *testing.T) {
 		t.Fatal(err)
 	}
 	a := temporaryFile(t, uc, "old", false)
-	path := filepath.Join(dir, "old.part")
+	paths, err := uc.knownStoragePaths(a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, paths[0]+".part")
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(path, []byte("keep until manifest is durable"), 0600); err != nil {
 		t.Fatal(err)
 	}

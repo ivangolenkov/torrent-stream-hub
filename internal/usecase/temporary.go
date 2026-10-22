@@ -23,6 +23,9 @@ func (uc *TorrentUseCase) AcquireTransfer(hash string) (func(), error) {
 	if t == nil {
 		return nil, TorrentNotFoundError{Hash: hash}
 	}
+	if err := uc.checkStorageAvailable(hash); err != nil {
+		return nil, err
+	}
 	if _, pending, err := uc.repo.CleanupPaths(hash); err != nil {
 		return nil, err
 	} else if pending {

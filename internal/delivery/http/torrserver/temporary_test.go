@@ -97,7 +97,7 @@ func TestTemporaryHTTPTransfersBlockCleanup(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			path := filepath.Join(dir, "old", "video.mp4")
+			path := filepath.Join(dir, "payload", old.Hash, "old", "video.mp4")
 			if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 				t.Fatal(err)
 			}

@@ -123,7 +123,8 @@ func (r *reader) available(off, max int64) (ret int64) {
 		if !ok {
 			break
 		}
-		if !r.responsive && !r.t.pieceComplete(pieceIndex(req.Index)) {
+		requireVerified := !r.responsive || (r.t.storage != nil && r.t.storage.FreshComplete != nil)
+		if requireVerified && !r.t.pieceComplete(pieceIndex(req.Index)) {
 			break
 		}
 		if !r.t.haveChunk(req) {

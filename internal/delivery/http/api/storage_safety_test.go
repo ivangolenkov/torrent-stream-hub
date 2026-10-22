@@ -27,18 +27,27 @@ func TestDownloadSafetyAndHEAD(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			uc, repo, dir, cleanup := setupAPITestUseCase(t)
 			defer cleanup()
-			hash := writeDownloadMetainfo(t, dir, "safe.txt", []metainfo.FileInfo{{Length: 4}})
+			hash := writeDownloadMetainfo(t, dir, "safe.txt", []metainfo.FileInfo{{Length: 4}}, []byte("safe"))
 			if err := repo.SaveTorrent(&models.Torrent{Hash: hash, Name: "safe.txt", Size: 4, Downloaded: 4, State: models.StatePaused, Files: []*models.File{{Index: 0, Path: "safe.txt", Size: 4, Downloaded: 4}}}); err != nil {
 				t.Fatal(err)
 			}
 			full := filepath.Join(dir, "safe.txt")
-			if tc.name != "missing" && tc.name != "directory" && tc.name != "symlink" {
+			if tc.name != "unknown-layout" {
 				if err := os.WriteFile(full, []byte("safe"), 0600); err != nil {
 					t.Fatal(err)
 				}
+				dir = activateDownloadFixture(t, uc, repo, dir, hash)
+				full = filepath.Join(dir, "safe.txt")
 			}
 			switch tc.name {
+			case "missing":
+				if err := os.Remove(full); err != nil {
+					t.Fatal(err)
+				}
 			case "symlink":
+				if err := os.Remove(full); err != nil {
+					t.Fatal(err)
+				}
 				external := filepath.Join(t.TempDir(), "secret")
 				if err := os.WriteFile(external, []byte("evil"), 0600); err != nil {
 					t.Fatal(err)
@@ -47,6 +56,9 @@ func TestDownloadSafetyAndHEAD(t *testing.T) {
 					t.Skip(err)
 				}
 			case "directory":
+				if err := os.Remove(full); err != nil {
+					t.Fatal(err)
+				}
 				if err := os.Mkdir(full, 0700); err != nil {
 					t.Fatal(err)
 				}
@@ -114,6 +126,7 @@ func TestZIPReopensEntriesSafelyAfterHeaders(t *testing.T) {
 	if err := repo.SaveTorrent(&models.Torrent{Hash: hash, Name: "archive", Size: 2 * size, Downloaded: 2 * size, State: models.StatePaused, Files: []*models.File{{Index: 0, Path: "a", Size: size, Downloaded: size}, {Index: 1, Path: "b", Size: size, Downloaded: size}}}); err != nil {
 		t.Fatal(err)
 	}
+	dir = activateDownloadFixture(t, uc, repo, dir, hash)
 	external := filepath.Join(t.TempDir(), "secret")
 	if err := os.WriteFile(external, bytes.Repeat([]byte("s"), int(size)), 0600); err != nil {
 		t.Fatal(err)

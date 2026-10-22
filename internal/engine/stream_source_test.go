@@ -95,8 +95,27 @@ func setupEngineWithTorrent(t *testing.T, pieceLength int64, name string, files 
 	if err != nil {
 		t.Fatalf("failed to add torrent file: %v", err)
 	}
+	raw := e.GetRawTorrent(m.Hash)
+	if err := raw.VerifyData(); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		pending := false
+		for i := 0; i < raw.NumPieces(); i++ {
+			state := raw.Piece(i).State()
+			pending = pending || state.Hashing || state.Checking || state.Marking
+		}
+		if !pending {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("initial missing-data verification did not finish")
+		}
+		time.Sleep(time.Millisecond)
+	}
 
-	return e, m, dir
+	return e, m, filepath.Join(dir, "payload", m.Hash)
 }
 
 func verifyEngineTorrentPieces(t *testing.T, e *Engine, hash string, begin, end int) {
@@ -247,8 +266,8 @@ func TestStreamSource_PartFileExistsBlocksDisk(t *testing.T) {
 	if source.Type != StreamSourceTorrent {
 		t.Fatalf("expected StreamSourceTorrent, got %s", source.Type)
 	}
-	if source.FallbackReason != FallbackReasonPartFileExists {
-		t.Fatalf("expected FallbackReasonPartFileExists, got %s", source.FallbackReason)
+	if source.FallbackReason != FallbackReasonNotReady {
+		t.Fatalf("expected revoked verified readiness, got %s", source.FallbackReason)
 	}
 }
 
@@ -287,8 +306,8 @@ func TestStreamSource_SizeMismatchBlocksDisk(t *testing.T) {
 	if source.Type != StreamSourceTorrent {
 		t.Fatalf("expected StreamSourceTorrent, got %s", source.Type)
 	}
-	if source.FallbackReason != FallbackReasonSizeMismatch {
-		t.Fatalf("expected FallbackReasonSizeMismatch, got %s", source.FallbackReason)
+	if source.FallbackReason != FallbackReasonNotReady {
+		t.Fatalf("expected revoked verified readiness, got %s", source.FallbackReason)
 	}
 }
 
@@ -329,8 +348,8 @@ func TestStreamSource_DirectoryInsteadOfFile(t *testing.T) {
 	if source.Type != StreamSourceTorrent {
 		t.Fatalf("expected StreamSourceTorrent, got %s", source.Type)
 	}
-	if source.FallbackReason != FallbackReasonNotRegularFile {
-		t.Fatalf("expected FallbackReasonNotRegularFile, got %s", source.FallbackReason)
+	if source.FallbackReason != FallbackReasonNotReady {
+		t.Fatalf("expected revoked verified readiness, got %s", source.FallbackReason)
 	}
 }
 

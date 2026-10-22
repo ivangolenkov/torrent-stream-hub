@@ -6,6 +6,8 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -13,13 +15,28 @@ import (
 	"torrent-stream-hub/internal/logging"
 
 	"github.com/anacrolix/torrent"
+	"github.com/anacrolix/torrent/metainfo"
 	"github.com/anacrolix/torrent/storage"
 	"golang.org/x/time/rate"
 )
 
 func (e *Engine) newTorrentClient() (*torrent.Client, storage.ClientImplCloser, error) {
 	pieceCompletion, completionBackend, completionPersistent, completionErr := e.newPieceCompletion()
-	torrentStorage := storage.NewFileWithCompletion(e.cfg.DownloadDir, pieceCompletion)
+	root, err := os.OpenRoot(e.cfg.DownloadDir)
+	if err != nil {
+		pieceCompletion.Close()
+		return nil, nil, err
+	}
+	torrentStorage := storage.NewFileOpts(storage.NewFileClientOpts{
+		ClientBaseDir: e.cfg.DownloadDir, RootFS: root, VerifyOnOpen: true, PieceCompletion: pieceCompletion, IOContext: e.ctx,
+		TorrentRootResolver: func(base string, _ *metainfo.Info, hash metainfo.Hash) (string, error) {
+			rel, err := e.StorageRoot(hash.HexString())
+			if err != nil {
+				return "", err
+			}
+			return filepath.Join(base, rel), nil
+		},
+	})
 	e.mu.Lock()
 	e.pieceCompletionBackend = completionBackend
 	e.pieceCompletionPersistent = completionPersistent
@@ -27,6 +44,8 @@ func (e *Engine) newTorrentClient() (*torrent.Client, storage.ClientImplCloser, 
 	e.mu.Unlock()
 	clientConfig := buildClientConfig(e.cfg)
 	clientConfig.DefaultStorage = torrentStorage
+	clientConfig.MaxActivePieceHashers = 2
+	clientConfig.PieceHashersPerTorrent = 1
 	clientConfig.Callbacks.StatusUpdated = append(clientConfig.Callbacks.StatusUpdated, func(event torrent.StatusUpdatedEvent) {
 		e.handleStatusEvent(event)
 	})

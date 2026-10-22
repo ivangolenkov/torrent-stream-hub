@@ -57,7 +57,7 @@ func setupBenchmarkEngine(b *testing.B, totalSize int64, pieceLength int64) (*us
 	}
 	hash := tor.Hash
 
-	filePath := filepath.Join(dir, "bench_file", "bench_file.mkv")
+	filePath := filepath.Join(dir, "payload", hash, "bench_file", "bench_file.mkv")
 	if err := os.MkdirAll(filepath.Dir(filePath), 0o755); err != nil {
 		eng.Close()
 		db.Close()

@@ -14,6 +14,60 @@ The service is designed for home LAN usage, including low-power devices such as 
 - Run as a single binary or as a Docker container.
 - Publish a LAN-friendly API with permissive CORS.
 
+## Storage Layout, Upgrade And Recovery
+
+Payload is stored under `HUB_DOWNLOAD_DIR/payload/<stable-infohash>/`, followed
+by the original metainfo paths. SQLite stores the versioned mapping; hybrid
+v1/v2 aliases share one stable identity and directory. Do not move payload
+directories or edit mappings while the service is running. Keep the database,
+metainfo and other service files outside the payload namespace.
+
+Before upgrading an installation using the old shared layout:
+
+1. Stop the service cleanly. Back up the **entire download and config directories**,
+   including SQLite, metainfo, completion data and any remaining `-wal`/`-shm`
+   files as one consistent, offline snapshot.
+2. Provide additional free space for a copy of the largest torrent being migrated,
+   plus the configured `HUB_MIN_FREE_SPACE_GB` reserve. Migration copies files
+   sequentially, preserving original files until the mapping commit. It does not
+   use an in-place rename optimization.
+3. Start the new binary. A background worker inventories ownership, journals the
+   copy, checks its digest and performs an offline torrent hash pass. Existing
+   partial or corrupt pieces remain incomplete and must be downloaded again;
+   verification does not turn them into trusted data. Migration does not change
+   temporary/permanent policy, FIFO position or saved file priorities.
+4. Monitor `storage_state` / `storage_error` in the torrent list/API and the logs.
+   `legacy`, `moving` and `blocked` entries cannot write or stream. Deletion is
+   refused while a migration journal is pending or ownership cannot be proven.
+   Unaffected ready entries remain usable.
+   Interrupted migrations retain their journal and retry automatically (including
+   after restart); do not delete journal-owned copies or temporary files manually.
+
+Shared legacy paths, an occupied target, missing original metainfo, symlinks,
+hardlinks or ambiguous aliases cause a conservative block rather than choosing
+an owner or overwriting files. Stop the service and make another backup before
+repairing anything. Restore the exact original `.torrent` in the config
+`metainfo/<stable-infohash>.torrent` location when it is missing; free disk space
+or correct permissions for I/O failures. Restart to retry. For ambiguous ownership
+or an occupied target, restore a known-consistent backup or resolve ownership
+offline; never merge directories or blindly remove a conflicting target. Preserve
+both copies and the database journal if recovery needs manual investigation.
+
+After each startup/reopen, existing payload is hash-checked again with bounded
+background concurrency; old completion hints, a final filename, file size and a
+saved 100% progress value do not authorize streaming/download/seeding. Verified
+pieces can be read while other pieces are still being checked. Direct streaming
+and completed downloads require all relevant pieces to be verified. Changes to
+inode, size or modification time revoke trust and trigger rechecking when
+observed. External writers must remain stopped during verification and transfers:
+stat checks cannot detect content changes that preserve every checked attribute,
+nor guarantee an immutable file while it is being served.
+
+**Downgrade is not an in-place operation.** Old binaries do not understand the new
+mapping. To return to an old version, stop the new service and restore the entire
+pre-upgrade download/config snapshot together, then start the old binary. Do not
+point an old binary at the migrated database or isolated payload tree.
+
 ## Ports
 
 - `8080/tcp` - Web GUI and HTTP API.

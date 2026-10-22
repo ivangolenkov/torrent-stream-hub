@@ -93,7 +93,7 @@ func (e *Engine) BTHealth() *models.BTHealth {
 		activeStreams := e.streamManager.ActiveStreamsForTorrent(mt.t.InfoHash().HexString())
 
 		health.Torrents = append(health.Torrents, models.BTTorrentHealth{
-			Hash:                  mt.t.InfoHash().HexString(),
+			Hash:                  mt.hash,
 			Name:                  mt.t.Name(),
 			State:                 mtState,
 			Known:                 stats.TotalPeers,
@@ -223,7 +223,7 @@ func (e *Engine) mapManagedTorrent(mt *ManagedTorrent) *models.Torrent {
 	e.logPeerSummaryLocked(t.InfoHash().HexString(), peerSummary, mt)
 
 	model := &models.Torrent{
-		Hash:       t.InfoHash().HexString(),
+		Hash:       mt.hash,
 		Name:       t.Name(),
 		Size:       size,
 		Downloaded: downloaded,

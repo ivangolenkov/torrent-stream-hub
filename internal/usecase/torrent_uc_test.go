@@ -88,7 +88,7 @@ func TestPauseMagnetWithoutMetadataDoesNotPanic(t *testing.T) {
 	}
 }
 
-func TestResumeDBOnlyTorrentRestoresEngine(t *testing.T) {
+func TestResumeDBOnlyLegacyWithoutMetainfoIsBlocked(t *testing.T) {
 	uc, repo, cleanup := setupTorrentUseCase(t)
 	defer cleanup()
 
@@ -96,30 +96,21 @@ func TestResumeDBOnlyTorrentRestoresEngine(t *testing.T) {
 		t.Fatalf("failed to save torrent: %v", err)
 	}
 
-	if err := uc.Resume(testInfoHash); err != nil {
-		t.Fatalf("resume failed: %v", err)
+	if err := uc.Resume(testInfoHash); !errors.Is(err, ErrStorageConflict) {
+		t.Fatalf("unconfirmed legacy Resume: %v", err)
 	}
 
 	fetched, err := repo.GetTorrent(testInfoHash)
 	if err != nil {
 		t.Fatalf("failed to fetch torrent: %v", err)
 	}
-	if fetched.State != models.StateQueued {
-		t.Fatalf("expected queued state in repository, got %s", fetched.State)
-	}
-	if fetched.SourceURI == "" {
-		t.Fatal("expected resume to persist a fallback source URI")
+	if fetched.State != models.StatePaused {
+		t.Fatalf("expected paused state in repository, got %s", fetched.State)
 	}
 
 	engineTorrents := uc.engine.GetAllTorrents()
-	if len(engineTorrents) != 1 {
-		t.Fatalf("expected restored engine torrent, got %d", len(engineTorrents))
-	}
-	if engineTorrents[0].Hash != testInfoHash {
-		t.Fatalf("expected hash %s, got %s", testInfoHash, engineTorrents[0].Hash)
-	}
-	if engineTorrents[0].State != models.StateDownloading {
-		t.Fatalf("expected engine torrent to start downloading, got %s", engineTorrents[0].State)
+	if len(engineTorrents) != 0 {
+		t.Fatalf("legacy payload admitted: %d", len(engineTorrents))
 	}
 }
 
@@ -160,7 +151,11 @@ func TestDeleteTorrentFilesRemovesSingleFileAndPartFile(t *testing.T) {
 	defer cleanup()
 
 	downloadDir := uc.engine.DownloadDir()
-	filePath := filepath.Join(downloadDir, "movie.mkv")
+	tor := temporaryFile(t, uc, "movie.mkv", false)
+	filePath := filepath.Join(downloadDir, "payload", tor.Hash, "movie.mkv")
+	if err := os.MkdirAll(filepath.Dir(filePath), 0700); err != nil {
+		t.Fatal(err)
+	}
 	partPath := filePath + ".part"
 	if err := os.WriteFile(filePath, []byte("data"), 0o600); err != nil {
 		t.Fatalf("failed to create file: %v", err)
@@ -169,7 +164,6 @@ func TestDeleteTorrentFilesRemovesSingleFileAndPartFile(t *testing.T) {
 		t.Fatalf("failed to create part file: %v", err)
 	}
 
-	tor := temporaryFile(t, uc, "movie.mkv", false)
 	err := uc.Delete(tor.Hash, true)
 	if err != nil {
 		t.Fatalf("delete files failed: %v", err)
@@ -187,7 +181,8 @@ func TestDeleteTorrentFilesRemovesMultiFileStorageLayout(t *testing.T) {
 	defer cleanup()
 
 	downloadDir := uc.engine.DownloadDir()
-	filePath := filepath.Join(downloadDir, "Torrent Root", "nested", "video.bin")
+	tor := temporaryFile(t, uc, "Torrent Root", true)
+	filePath := filepath.Join(downloadDir, "payload", tor.Hash, "Torrent Root", "nested", "video.bin")
 	if err := os.MkdirAll(filepath.Dir(filePath), 0o700); err != nil {
 		t.Fatalf("failed to create dir: %v", err)
 	}
@@ -195,7 +190,6 @@ func TestDeleteTorrentFilesRemovesMultiFileStorageLayout(t *testing.T) {
 		t.Fatalf("failed to create file: %v", err)
 	}
 
-	tor := temporaryFile(t, uc, "Torrent Root", true)
 	err := uc.Delete(tor.Hash, true)
 	if err != nil {
 		t.Fatalf("delete files failed: %v", err)

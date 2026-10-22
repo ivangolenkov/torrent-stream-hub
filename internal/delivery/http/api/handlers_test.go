@@ -3,6 +3,7 @@ package api
 import (
 	"archive/zip"
 	"bytes"
+	"crypto/sha1"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -11,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"torrent-stream-hub/internal/config"
 	"torrent-stream-hub/internal/engine"
@@ -20,6 +22,7 @@ import (
 
 	"github.com/anacrolix/torrent/bencode"
 	"github.com/anacrolix/torrent/metainfo"
+	"github.com/anacrolix/torrent/storage"
 	"github.com/go-chi/chi/v5"
 )
 
@@ -197,7 +200,7 @@ func TestDownloadTorrentFileServesCompletedFileWithRange(t *testing.T) {
 	defer cleanup()
 
 	content := []byte("hello downloaded file")
-	apiTestInfoHash := writeDownloadMetainfo(t, downloadDir, "movie.mkv", []metainfo.FileInfo{{Length: int64(len(content))}})
+	apiTestInfoHash := writeDownloadMetainfo(t, downloadDir, "movie.mkv", []metainfo.FileInfo{{Length: int64(len(content))}}, content)
 	filePath := filepath.Join(downloadDir, "movie.mkv")
 	if err := os.WriteFile(filePath, content, 0o600); err != nil {
 		t.Fatalf("failed to create downloaded file: %v", err)
@@ -218,6 +221,7 @@ func TestDownloadTorrentFileServesCompletedFileWithRange(t *testing.T) {
 		t.Fatalf("failed to save torrent: %v", err)
 	}
 
+	activateDownloadFixture(t, uc, repo, downloadDir, apiTestInfoHash)
 	h := NewAPIHandler(uc, nil)
 	router := chi.NewRouter()
 	h.RegisterRoutes(router)
@@ -274,7 +278,7 @@ func TestDownloadSingleFileTorrentServesFileNotZip(t *testing.T) {
 	defer cleanup()
 
 	content := []byte("single file torrent")
-	apiTestInfoHash := writeDownloadMetainfo(t, downloadDir, "single.txt", []metainfo.FileInfo{{Length: int64(len(content))}})
+	apiTestInfoHash := writeDownloadMetainfo(t, downloadDir, "single.txt", []metainfo.FileInfo{{Length: int64(len(content))}}, content)
 	if err := os.WriteFile(filepath.Join(downloadDir, "single.txt"), content, 0o600); err != nil {
 		t.Fatalf("failed to create downloaded file: %v", err)
 	}
@@ -294,6 +298,7 @@ func TestDownloadSingleFileTorrentServesFileNotZip(t *testing.T) {
 		t.Fatalf("failed to save torrent: %v", err)
 	}
 
+	activateDownloadFixture(t, uc, repo, downloadDir, apiTestInfoHash)
 	h := NewAPIHandler(uc, nil)
 	router := chi.NewRouter()
 	h.RegisterRoutes(router)
@@ -351,6 +356,7 @@ func TestDownloadMultiFileTorrentStreamsZip(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("failed to save torrent: %v", err)
 	}
+	activateDownloadFixture(t, uc, repo, downloadDir, apiTestInfoHash)
 
 	h := NewAPIHandler(uc, nil)
 	router := chi.NewRouter()
@@ -425,6 +431,7 @@ func TestDownloadMultiFileTorrentRejectsRangeForZip(t *testing.T) {
 	router := chi.NewRouter()
 	h.RegisterRoutes(router)
 	req := httptest.NewRequest(http.MethodGet, "/torrent/"+apiTestInfoHash+"/download", nil)
+	activateDownloadFixture(t, uc, repo, downloadDir, apiTestInfoHash)
 	req.Header.Set("Range", "bytes=0-10")
 	rr := httptest.NewRecorder()
 
@@ -465,7 +472,7 @@ func TestDownloadTorrentRejectsUnsafePath(t *testing.T) {
 }
 
 // Completed legacy fixtures must carry real metainfo, not guessed DB paths.
-func writeDownloadMetainfo(t *testing.T, dir, name string, files []metainfo.FileInfo) string {
+func writeDownloadMetainfo(t *testing.T, dir, name string, files []metainfo.FileInfo, contents ...[]byte) string {
 	t.Helper()
 	info := metainfo.Info{Name: name, PieceLength: 1024}
 	var size int64
@@ -477,7 +484,25 @@ func writeDownloadMetainfo(t *testing.T, dir, name string, files []metainfo.File
 	} else {
 		info.Files = files
 	}
-	info.Pieces = make([]byte, ((size+1023)/1024)*20)
+	var content []byte
+	if len(contents) > 0 {
+		content = bytes.Join(contents, nil)
+	} else {
+		for _, file := range files {
+			path := filepath.Join(append([]string{dir, name}, file.Path...)...)
+			data, _ := os.ReadFile(path)
+			content = append(content, data...)
+		}
+	}
+	for offset := int64(0); offset < size; offset += 1024 {
+		end := min(offset+1024, size)
+		chunk := make([]byte, end-offset)
+		if offset < int64(len(content)) {
+			copy(chunk, content[offset:min(end, int64(len(content)))])
+		}
+		h := sha1.Sum(chunk)
+		info.Pieces = append(info.Pieces, h[:]...)
+	}
 	data, err := bencode.Marshal(info)
 	if err != nil {
 		t.Fatal(err)
@@ -495,6 +520,66 @@ func writeDownloadMetainfo(t *testing.T, dir, name string, files []metainfo.File
 		t.Fatal(err)
 	}
 	return mi.HashInfoBytes().HexString()
+}
+
+func activateDownloadFixture(t *testing.T, uc *usecase.TorrentUseCase, repo *repository.TorrentRepo, dir, hash string) string {
+	t.Helper()
+	mi, err := metainfo.LoadFromFile(filepath.Join(dir, "metainfo", hash+".torrent"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := mi.UnmarshalInfo()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rel := filepath.Join("payload", hash)
+	if err := repo.SaveStorageMapping(&repository.StorageMapping{Hash: hash, Version: 1, Root: rel, State: "ready"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, file := range info.UpvertedFiles() {
+		path := storage.DefaultFilePathMaker(storage.FilePathMakerOpts{Info: &info, File: &file})
+		for _, suffix := range []string{"", ".part"} {
+			from, to := filepath.Join(dir, path+suffix), filepath.Join(dir, rel, path+suffix)
+			if _, err := os.Lstat(from); os.IsNotExist(err) {
+				continue
+			}
+			if err := os.MkdirAll(filepath.Dir(to), 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Rename(from, to); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if err := uc.RestoreTorrents(); err != nil {
+		t.Fatal(err)
+	}
+	f, err := uc.GetTorrentFile(hash, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Torrent().VerifyData(); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		all := true
+		for index := range info.UpvertedFiles() {
+			ready, _, err := uc.CheckFileDirectReady(hash, index)
+			if err != nil {
+				t.Fatal(err)
+			}
+			all = all && ready
+		}
+		if all {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("fixture not verified")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	return filepath.Join(dir, rel)
 }
 
 func setupAPITestUseCase(t *testing.T) (*usecase.TorrentUseCase, *repository.TorrentRepo, string, func()) {

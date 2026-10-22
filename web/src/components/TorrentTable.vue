@@ -217,6 +217,7 @@ const confirmDelete = async () => {
                 </div>
               </div>
               <TemporaryTorrentControl :torrent="t" />
+              <div v-if="t.storage_state && t.storage_state !== 'ready'" class="text-xs text-amber-700">Storage: {{ t.storage_state }}. {{ t.storage_error }}</div>
             </td>
             <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
               {{ formatSize(t.size) }}
@@ -314,6 +315,7 @@ const confirmDelete = async () => {
           
           <!-- Status tag + Size + Priority -->
           <TemporaryTorrentControl :torrent="t" />
+          <div v-if="t.storage_state && t.storage_state !== 'ready'" class="text-xs text-amber-700">Storage: {{ t.storage_state }}. {{ t.storage_error }}</div>
           <div class="flex items-center gap-2 mb-2 text-xs">
             <span :class="['px-2 py-0.5 inline-flex leading-4 font-semibold rounded border', getStateColor(t.state)]">
               {{ t.state }}

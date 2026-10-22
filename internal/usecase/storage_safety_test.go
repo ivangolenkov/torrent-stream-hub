@@ -1,6 +1,7 @@
 package usecase
 
 import (
+	"crypto/sha1"
 	"errors"
 	"os"
 	"path/filepath"
@@ -220,6 +221,8 @@ func completedSafetyFile(t *testing.T, uc *TorrentUseCase, name string, multi bo
 	t.Helper()
 	// DB-only legacy fixture: no background hasher may rename our test files.
 	info := metainfo.Info{Name: name, Length: 1024, PieceLength: 1024, Pieces: make([]byte, 20)}
+	digest := sha1.Sum(make([]byte, 1024))
+	info.Pieces = digest[:]
 	if multi {
 		info.Length = 0
 		info.Files = []metainfo.FileInfo{{Length: 1024, Path: []string{"nested", "video.bin"}}}
@@ -249,7 +252,10 @@ func completedSafetyFile(t *testing.T, uc *TorrentUseCase, name string, multi bo
 	if err != nil {
 		t.Fatal(err)
 	}
-	full := filepath.Join(uc.engine.DownloadDir(), paths[0])
+	if err := uc.repo.SaveStorageMapping(&repository.StorageMapping{Hash: tor.Hash, Version: 1, Root: filepath.Join("payload", tor.Hash), State: "ready"}); err != nil {
+		t.Fatal(err)
+	}
+	full := filepath.Join(uc.engine.DownloadDir(), "payload", tor.Hash, paths[0])
 	if err := os.MkdirAll(filepath.Dir(full), 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -260,6 +266,27 @@ func completedSafetyFile(t *testing.T, uc *TorrentUseCase, name string, multi bo
 	tor.Files = []*models.File{{Index: 0, Path: paths[0], Size: 1024, Downloaded: 1024}}
 	if err := uc.repo.SaveTorrent(tor); err != nil {
 		t.Fatal(err)
+	}
+	raw, err := uc.engine.AddPausedMetainfo(&mi)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := raw.VerifyData(); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		ready, _, err := uc.engine.CheckFileDirectReady(tor.Hash, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ready {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("fixture never became verified")
+		}
+		time.Sleep(time.Millisecond)
 	}
 	return tor, full
 }
@@ -316,7 +343,11 @@ func TestDownloadRevalidatesOnEveryOpen(t *testing.T) {
 			case "shared", "hardlink":
 				other, otherFull := completedSafetyFile(t, uc, "other", true)
 				if mutation == "shared" {
-					if err := uc.repo.SaveCleanupPaths(other.Hash, []string{tor.Files[0].Path}); err != nil {
+					paths, err := uc.knownStoragePaths(tor)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if err := uc.repo.SaveCleanupPaths(other.Hash, paths); err != nil {
 						t.Fatal(err)
 					}
 				} else {

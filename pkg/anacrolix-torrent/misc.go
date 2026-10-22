@@ -88,6 +88,12 @@ func torrentRequestOffset(torrentLength, pieceSize int64, r Request) (off int64)
 }
 
 func validateInfo(info *metainfo.Info) error {
+	if info.PieceLength < 0 {
+		return errors.New("negative piece length")
+	}
+	if info.HasV1() && info.HasV2() && len(info.Pieces)/20 != info.NumPieces() {
+		return errors.New("hybrid v1 piece count does not cover v2 layout")
+	}
 	if len(info.Pieces)%20 != 0 {
 		return errors.New("pieces has invalid length")
 	}

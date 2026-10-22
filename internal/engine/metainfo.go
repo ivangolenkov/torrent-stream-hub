@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -40,12 +41,16 @@ func (e *Engine) saveMetainfo(hash string, mi *metainfo.MetaInfo, keepExisting b
 			return err
 		}
 	}
-	tmp := path + ".tmp"
-	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	f, err := os.CreateTemp(dir, strings.ToLower(strings.TrimSpace(hash))+".*.tmp")
 	if err != nil {
 		return err
 	}
+	tmp := f.Name()
+	defer os.Remove(tmp)
 	writeErr := mi.Write(f)
+	if writeErr == nil {
+		writeErr = f.Sync()
+	}
 	closeErr := f.Close()
 	if writeErr != nil {
 		_ = os.Remove(tmp)
@@ -59,8 +64,14 @@ func (e *Engine) saveMetainfo(hash string, mi *metainfo.MetaInfo, keepExisting b
 }
 
 func (e *Engine) watchMetadata(hash string, t *torrent.Torrent) {
-	go func() {
-		<-t.GotInfo()
+	e.RunStorageTask(func(ctx context.Context) {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.Closed():
+			return
+		case <-t.GotInfo():
+		}
 
 		e.mu.RLock()
 		mt, ok := e.managedTorrents[hash]
@@ -102,7 +113,7 @@ func (e *Engine) watchMetadata(hash string, t *torrent.Torrent) {
 			e.applyFilePrioritiesAndDownload(mt)
 			logging.Debugf("download all started after metadata hash=%s files=%d", hash, fileCount)
 		}
-	}()
+	})
 }
 
 func sanitizeDiagnosticError(err error) string {

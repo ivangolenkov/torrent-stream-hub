@@ -422,6 +422,9 @@ func (cn *PeerConn) fillWriteBuffer() {
 }
 
 func (cn *PeerConn) have(piece pieceIndex) {
+	if !cn.t.pieceComplete(piece) {
+		return
+	}
 	if cn.sentHaves.Get(bitmap.BitIndex(piece)) {
 		return
 	}
@@ -439,11 +442,16 @@ func (cn *PeerConn) postBitfield() {
 	if !cn.t.haveAnyPieces() {
 		return
 	}
+	field := cn.t.bitfield()
 	cn.write(pp.Message{
 		Type:     pp.Bitfield,
-		Bitfield: cn.t.bitfield(),
+		Bitfield: field,
 	})
-	cn.sentHaves = bitmap.Bitmap{cn.t._completedPieces.Clone()}
+	for index, complete := range field {
+		if complete {
+			cn.sentHaves.Add(bitmap.BitIndex(index))
+		}
+	}
 }
 
 func (cn *PeerConn) handleOnNeedUpdateRequests() {

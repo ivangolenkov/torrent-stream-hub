@@ -39,6 +39,8 @@ type TorrentImpl struct {
 
 	NewReader      func() TorrentReader
 	NewPieceReader func(p Piece) PieceReader
+	// Optional generation/freshness check for already verified pieces.
+	FreshComplete func(piece int) bool
 }
 
 // Interacts with torrent piece data. Optional interfaces to implement include://

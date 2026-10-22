@@ -104,9 +104,10 @@ func TestUnmountWedged(t *testing.T) {
 		if err.Error() == "fusermount: exit status 1" {
 			t.Skip(err)
 		}
-		if !errors.Is(err, fuse.ErrOSXFUSENotFound) {
-			t.Fatal(err)
+		if errors.Is(err, fuse.ErrOSXFUSENotFound) {
+			t.Skipf("FUSE integration requires OSXFUSE: %v", err)
 		}
+		t.Fatal(err)
 	}
 	go func() {
 		server := fusefs.New(fuseConn, &fusefs.Config{

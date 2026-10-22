@@ -1511,6 +1511,9 @@ func (cl *Client) AddTorrentInfoHashWithStorage(
 // then this Storage is ignored and the existing torrent returned with `new` set to `false`.
 func (cl *Client) AddTorrentOpt(opts AddTorrentOpts) (t *Torrent, new bool) {
 	infoHash := opts.InfoHash
+	if infoHash == (infohash.T{}) && opts.InfoHashV2.Ok {
+		infoHash = *opts.InfoHashV2.Value.ToShort()
+	}
 	panicif.Zero(infoHash)
 	cl.lock()
 	defer cl.unlock()
@@ -1534,6 +1537,12 @@ func (cl *Client) AddTorrentOpt(opts AddTorrentOpts) (t *Torrent, new bool) {
 	})
 	cl.torrentsByShortHash[infoHash] = t
 	t.setInfoBytesLocked(opts.InfoBytes)
+	// Both aliases must be registered before tracker/discovery initialization
+	// in MergeSpec. A hybrid's v2 alias is already present in opts, so setInfo
+	// does not discover and register it as a newly learned hash.
+	if opts.InfoHashV2.Ok {
+		cl.torrentsByShortHash[*opts.InfoHashV2.Value.ToShort()] = t
+	}
 	cl.clearAcceptLimits()
 	t.updateWantPeersEvent()
 	// Tickle Client.waitAccept, new torrent may want conns.
@@ -1987,6 +1996,9 @@ func (cl *Client) checkConfig() error {
 var maxActivePieceHashers = initIntFromEnv("TORRENT_MAX_ACTIVE_PIECE_HASHERS", runtime.NumCPU(), 0)
 
 func (cl *Client) maxActivePieceHashers() int {
+	if cl.config.MaxActivePieceHashers > 0 {
+		return cl.config.MaxActivePieceHashers
+	}
 	return maxActivePieceHashers
 }
 

@@ -36,6 +36,20 @@ func (uc *TorrentUseCase) knownStoragePaths(t *models.Torrent) ([]string, error)
 			return paths, err
 		}
 	}
+	m, err := uc.repo.StorageMapping(t.Hash)
+	if err != nil {
+		return nil, err
+	}
+	if m != nil && m.Version == payload.LayoutVersion {
+		paths, known, err := uc.metadataStoragePaths(t)
+		if err != nil {
+			return nil, err
+		}
+		if !known {
+			return []string{m.Root}, nil
+		}
+		return paths, nil
+	}
 	paths, _, err := uc.metadataStoragePaths(t)
 	return paths, err
 }
@@ -46,6 +60,18 @@ func (uc *TorrentUseCase) metadataStoragePaths(t *models.Torrent) ([]string, boo
 		return nil, false, err
 	}
 	paths, err := storagePaths(info)
+	if err != nil {
+		return nil, false, err
+	}
+	m, err := uc.repo.StorageMapping(t.Hash)
+	if err != nil {
+		return nil, false, err
+	}
+	if m != nil && m.Version == payload.LayoutVersion {
+		for i, path := range paths {
+			paths[i] = filepath.Join(m.Root, path)
+		}
+	}
 	return paths, true, err
 }
 
@@ -96,6 +122,11 @@ func (uc *TorrentUseCase) deleteTemporaryLocked(hash string) error {
 // Caller holds Lifecycle. Both manual deletion and FIFO use this workflow.
 func (uc *TorrentUseCase) deletePayloadLocked(t *models.Torrent) error {
 	hash := t.Hash
+	if m, err := uc.repo.StorageMapping(hash); err != nil {
+		return err
+	} else if m != nil && (m.State == "moving" || m.Manifest != "") {
+		return ErrStorageConflict
+	}
 	paths, pending, err := uc.repo.CleanupPaths(hash)
 	if err != nil {
 		return err
@@ -126,6 +157,13 @@ func (uc *TorrentUseCase) deletePayloadLocked(t *models.Torrent) error {
 		}
 		if raw != nil && raw.Info() != nil {
 			paths, err = storagePaths(raw.Info())
+			if m, e := uc.repo.StorageMapping(hash); e != nil {
+				return e
+			} else if m != nil && m.Version == payload.LayoutVersion {
+				for i, path := range paths {
+					paths[i] = filepath.Join(m.Root, path)
+				}
+			}
 			if err != nil {
 				return err
 			}
@@ -263,7 +301,14 @@ func validateCleanupPath(root *os.Root, path string) error {
 
 // openPayloadLocked is also used on every ZIP entry open after preflight. The
 // lease protects against deletion; Lifecycle serializes ownership checks with add.
-func (uc *TorrentUseCase) openPayloadLocked(hash, path string, size int64) (*os.File, error) {
+func (uc *TorrentUseCase) openPayloadLocked(hash string, index int, path string, size int64) (*os.File, error) {
+	if err := uc.checkStorageAvailable(hash); err != nil {
+		return nil, err
+	}
+	ready, _, err := uc.engine.CheckFileDirectReady(hash, index)
+	if err != nil || !ready {
+		return nil, ErrDownloadNotReady
+	}
 	if _, pending, err := uc.repo.CleanupPaths(hash); err != nil {
 		return nil, err
 	} else if pending {

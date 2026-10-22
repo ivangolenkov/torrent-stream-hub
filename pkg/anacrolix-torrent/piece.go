@@ -234,6 +234,7 @@ func (p *Piece) VerifyDataContext(ctx context.Context) error {
 	locker := p.t.cl.locker()
 	locker.Lock()
 	if p.t.closed.IsSet() {
+		locker.Unlock()
 		return errTorrentClosed
 	}
 	target, err := p.t.queuePieceCheck(p.index)
@@ -244,7 +245,7 @@ func (p *Piece) VerifyDataContext(ctx context.Context) error {
 	//log.Printf("target: %d", target)
 	for {
 		locker.RLock()
-		done := p.numVerifies >= target
+		done := p.numVerifies >= target && !p.marking
 		//log.Printf("got %d verifies", p.numVerifies)
 		numVerifiesChanged := p.numVerifiesCond.Signaled()
 		locker.RUnlock()

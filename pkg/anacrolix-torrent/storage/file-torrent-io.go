@@ -90,7 +90,15 @@ func (fst fileTorrentImplIO) WriteAt(p []byte, off int64) (n int, err error) {
 			return
 		}
 		var n1 int
+		var before os.FileInfo
+		if statter, ok := f.(interface{ Stat() (os.FileInfo, error) }); ok {
+			before, _ = statter.Stat()
+		}
 		n1, err = f.WriteAt(p[:e.Length], e.Start)
+		if statter, ok := f.(interface{ Stat() (os.FileInfo, error) }); ok {
+			after, _ := statter.Stat()
+			fst.fts.acceptWrite(before, after, off+int64(n), int64(n1))
+		}
 		closeErr := f.Close()
 		n += n1
 		p = p[n1:]

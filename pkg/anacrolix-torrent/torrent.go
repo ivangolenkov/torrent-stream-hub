@@ -338,7 +338,29 @@ func (t *Torrent) setChunkSize(size pp.Integer) {
 }
 
 func (t *Torrent) pieceComplete(piece pieceIndex) bool {
-	return t._completedPieces.Contains(bitmap.BitIndex(piece))
+	if !t._completedPieces.Contains(bitmap.BitIndex(piece)) {
+		return false
+	}
+	return t.storage == nil || t.storage.FreshComplete == nil || t.storage.FreshComplete(piece)
+}
+
+// RefreshStorageCompletion revokes stale verified data and queues bounded
+// library hashers. It never waits for disk verification under application locks.
+func (t *Torrent) RefreshStorageCompletion() {
+	if t == nil {
+		return
+	}
+	t.cl.lock()
+	defer t.cl.unlock()
+	if t.closed.IsSet() || t.storage == nil || t.storage.FreshComplete == nil {
+		return
+	}
+	for _, index := range t._completedPieces.ToArray() {
+		if !t.storage.FreshComplete(int(index)) {
+			t.updatePieceCompletion(int(index))
+			_, _ = t.queuePieceCheck(int(index))
+		}
+	}
 }
 
 func (t *Torrent) pieceCompleteUncached(piece pieceIndex) (ret storage.Completion) {
@@ -1192,7 +1214,7 @@ func (t *Torrent) writeChunk(piece int, begin int64, data []byte) (err error) {
 func (t *Torrent) bitfield() (bf []bool) {
 	bf = make([]bool, t.numPieces())
 	t._completedPieces.Iterate(func(piece uint32) (again bool) {
-		bf[piece] = true
+		bf[piece] = t.pieceComplete(int(piece))
 		return true
 	})
 	return
@@ -1261,6 +1283,11 @@ func (t *Torrent) hashPiece(piece pieceIndex) (
 	p := t.piece(piece)
 	p.waitNoPendingWrites()
 	storagePiece := p.Storage()
+	if verifier, ok := storagePiece.PieceImpl.(interface{ BeginVerification() error }); ok {
+		if err := verifier.BeginVerification(); err != nil {
+			return false, nil, err
+		}
+	}
 
 	if p.hash != nil {
 		// Does the backend want to do its own hashing?
@@ -1368,7 +1395,17 @@ func (t *Torrent) haveAllPieces() bool {
 	if !t.haveInfo() {
 		return false
 	}
-	return t._completedPieces.GetCardinality() == bitmap.BitRange(t.numPieces())
+	if t._completedPieces.GetCardinality() != bitmap.BitRange(t.numPieces()) {
+		return false
+	}
+	if t.storage != nil && t.storage.FreshComplete != nil {
+		for index := 0; index < t.numPieces(); index++ {
+			if !t.pieceComplete(index) {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func (t *Torrent) havePiece(index pieceIndex) bool {
@@ -2614,7 +2651,9 @@ func (t *Torrent) SetMaxEstablishedConns(max int) (oldMax int) {
 func (t *Torrent) pieceHashed(piece pieceIndex, passed bool, hashIoErr error) {
 	p := t.piece(piece)
 	p.numVerifies++
-	p.numVerifiesCond.Broadcast()
+	// Verification is not finished until the storage completion commit (which
+	// temporarily releases the client lock) has finished too.
+	defer p.numVerifiesCond.Broadcast()
 	t.cl.event.Broadcast()
 	if t.closed.IsSet() {
 		return

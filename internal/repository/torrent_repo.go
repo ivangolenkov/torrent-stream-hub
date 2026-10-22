@@ -88,12 +88,12 @@ func (r *TorrentRepo) saveTorrent(t *models.Torrent, policy *bool) error {
 }
 
 func (r *TorrentRepo) GetTorrent(hash string) (*models.Torrent, error) {
-	row := r.db.DB().QueryRow(`SELECT hash, name, title, data, poster, category, size, downloaded, state, error, source_uri, is_temporary FROM torrents WHERE hash = ?`, hash)
+	row := r.db.DB().QueryRow(`SELECT hash, name, title, data, poster, category, size, downloaded, state, error, source_uri, is_temporary, COALESCE((SELECT state FROM torrent_storage WHERE hash=torrents.hash),'legacy'), COALESCE((SELECT error FROM torrent_storage WHERE hash=torrents.hash),'') FROM torrents WHERE hash = ?`, hash)
 
 	t := &models.Torrent{}
 	var stateStr, errorStr string
 
-	if err := row.Scan(&t.Hash, &t.Name, &t.Title, &t.Data, &t.Poster, &t.Category, &t.Size, &t.Downloaded, &stateStr, &errorStr, &t.SourceURI, &t.IsTemporary); err != nil {
+	if err := row.Scan(&t.Hash, &t.Name, &t.Title, &t.Data, &t.Poster, &t.Category, &t.Size, &t.Downloaded, &stateStr, &errorStr, &t.SourceURI, &t.IsTemporary, &t.StorageState, &t.StorageError); err != nil {
 		if err == sql.ErrNoRows {
 			return nil, nil // not found
 		}
@@ -111,7 +111,7 @@ func (r *TorrentRepo) GetTorrent(hash string) (*models.Torrent, error) {
 }
 
 func (r *TorrentRepo) GetAllTorrents() ([]*models.Torrent, error) {
-	rows, err := r.db.DB().Query(`SELECT hash, name, title, data, poster, category, size, downloaded, state, error, source_uri, is_temporary FROM torrents ORDER BY created_at DESC`)
+	rows, err := r.db.DB().Query(`SELECT hash, name, title, data, poster, category, size, downloaded, state, error, source_uri, is_temporary, COALESCE((SELECT state FROM torrent_storage WHERE hash=torrents.hash),'legacy'), COALESCE((SELECT error FROM torrent_storage WHERE hash=torrents.hash),'') FROM torrents ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, err
 	}
@@ -122,7 +122,7 @@ func (r *TorrentRepo) GetAllTorrents() ([]*models.Torrent, error) {
 	for rows.Next() {
 		t := &models.Torrent{}
 		var stateStr, errorStr string
-		if err := rows.Scan(&t.Hash, &t.Name, &t.Title, &t.Data, &t.Poster, &t.Category, &t.Size, &t.Downloaded, &stateStr, &errorStr, &t.SourceURI, &t.IsTemporary); err != nil {
+		if err := rows.Scan(&t.Hash, &t.Name, &t.Title, &t.Data, &t.Poster, &t.Category, &t.Size, &t.Downloaded, &stateStr, &errorStr, &t.SourceURI, &t.IsTemporary, &t.StorageState, &t.StorageError); err != nil {
 			return nil, err
 		}
 		t.State = models.TorrentState(stateStr)

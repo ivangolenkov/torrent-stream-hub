@@ -2,7 +2,7 @@
 
 ## Статус И Зависимости
 
-- Статус: запланировано; реализация по отдельной команде после полного DoD фазы 35.
+- Статус: реализовано и проверено; DoD закрыт. Отчёт: `tasks/implementation/phase36-report.md`.
 - Основание: аудит `tasks/draft/codebase-audit-2026-10-21.md`, **F07, F08**.
 - Использовать storage mapping и verified readiness фазы 35, гарантии SQLite и удаления фазы 34.
 
@@ -76,11 +76,11 @@
 
 ## Definition Of Done
 
-- [ ] F07: startup/Resume используют общую инициализацию, priorities загружены до payload admission и переживают metadata pending/рестарт.
-- [ ] SyncWorker, DiskFull и QoS не перезаписывают пользовательские base priorities runtime defaults/overlays.
-- [ ] F08: DiskFull блокирует новые payload-запросы независимо от readers и overlays; ENOSPC и неизвестное свободное место обработаны безопасно.
-- [ ] Все пути разрешения загрузки проверяют общий gate; детерминированные тесты подтверждают отсутствие обхода через конкурентные callbacks.
-- [ ] Освобождение места/рестарт не возобновляют DiskFull автоматически; успешный ручной Resume требует проверки места и сохраняет priorities.
-- [ ] Ошибки и причины доступны API/UI без ложного успеха; чтение готовых verified данных не требует разрешения payload-загрузки.
-- [ ] Тесты/race/vet/build проходят; in-flight writes и служебные записи имеют явно описанные пределы гарантий.
-- [ ] README обновлён; создан `tasks/implementation/phase36-report.md` с фактическими проверками и отклонениями.
+- [x] F07: startup/Resume используют общую инициализацию, priorities загружены до payload admission и переживают metadata pending/рестарт.
+- [x] SyncWorker, DiskFull и QoS не перезаписывают пользовательские base priorities runtime defaults/overlays.
+- [x] F08: DiskFull блокирует новые payload-запросы независимо от readers и overlays; ENOSPC и неизвестное свободное место обработаны безопасно.
+- [x] Все пути разрешения загрузки проверяют общий gate; детерминированные тесты подтверждают отсутствие обхода через конкурентные callbacks.
+- [x] Освобождение места/рестарт не возобновляют DiskFull автоматически; успешный ручной Resume требует проверки места и сохраняет priorities.
+- [x] Ошибки и причины доступны API/UI без ложного успеха; чтение готовых verified данных не требует разрешения payload-загрузки.
+- [x] Тесты/race/vet/build проходят; in-flight writes и служебные записи имеют явно описанные пределы гарантий.
+- [x] README обновлён; создан `tasks/implementation/phase36-report.md` с фактическими проверками и отклонениями.

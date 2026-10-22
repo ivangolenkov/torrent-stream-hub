@@ -200,18 +200,37 @@ func (e *Engine) OpenStreamSource(ctx context.Context, hash string, index int, i
 	}
 
 	makeTorrentFallback := func(reason FallbackReason) (*StreamSource, error) {
+		if err := e.CheckPayloadAdmission(hash); err != nil {
+			return nil, err
+		}
 		logging.Debugf("stream fallback to torrent hash=%s file_index=%d reason=%s", hash, index, reason)
+		readCtx, cancel := context.WithCancelCause(ctx)
+		mt.mu.Lock()
+		gateCtx := mt.payloadCtx
+		mt.mu.Unlock()
+		stop := func() bool { return true }
+		if gateCtx != nil {
+			stop = context.AfterFunc(gateCtx, func() { cancel(context.Cause(gateCtx)) })
+		}
 		reader := file.NewReader()
-		reader.SetContext(ctx)
+		reader.SetContext(readCtx)
 		reader.SetReadahead(defaultStreamHeadPrebuffer)
+		wrapped := &payloadStreamReader{ReadSeekCloser: reader, ctx: readCtx, cleanup: func() { stop(); cancel(context.Canceled) }, blockError: func() error {
+			mt.mu.Lock()
+			defer mt.mu.Unlock()
+			if mt.downloadBlock != "" {
+				return DownloadBlockedError{mt.downloadBlock}
+			}
+			return nil
+		}}
 
 		return &StreamSource{
 			Type:           StreamSourceTorrent,
-			Reader:         reader,
+			Reader:         wrapped,
 			Length:         fileLength,
 			DisplayName:    displayName,
 			FallbackReason: reason,
-			cleanupFn:      reader.Close,
+			cleanupFn:      wrapped.Close,
 		}, nil
 	}
 
@@ -321,6 +340,27 @@ func (e *Engine) OpenStreamSource(ctx context.Context, hash string, index int, i
 		cleanupFn:      reader.Close,
 	}, nil
 }
+
+type payloadStreamReader struct {
+	io.ReadSeekCloser
+	ctx        context.Context
+	cleanup    func()
+	blockError func() error
+}
+
+func (r *payloadStreamReader) Read(p []byte) (int, error) {
+	n, err := r.ReadSeekCloser.Read(p)
+	if err != nil && context.Cause(r.ctx) != nil {
+		err = context.Cause(r.ctx)
+	} else if err != nil && r.blockError != nil {
+		if blockErr := r.blockError(); blockErr != nil {
+			err = blockErr
+		}
+	}
+	return n, err
+}
+
+func (r *payloadStreamReader) Close() error { r.cleanup(); return r.ReadSeekCloser.Close() }
 
 // CheckFileDirectReady verifies if the file is ready for direct disk reading without keeping a file handle open.
 func (e *Engine) CheckFileDirectReady(hash string, index int) (bool, int64, error) {

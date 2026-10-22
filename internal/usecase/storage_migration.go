@@ -334,25 +334,10 @@ func (uc *TorrentUseCase) restoreMappedTorrentLocked(t *models.Torrent) error {
 	if uc.engine.GetTorrent(t.Hash) != nil {
 		return nil
 	}
-	if t.State == models.StatePaused || t.State == models.StateError || t.State == models.StateMissingFiles {
-		mi, err := metainfo.LoadFromFile(filepath.Join(uc.engine.ConfigDir(), "metainfo", t.Hash+".torrent"))
-		if err != nil {
-			return err
-		}
-		if _, err := uc.engine.AddPausedMetainfo(mi, t.Hash); err != nil {
-			return err
-		}
-	} else {
-		if _, err := uc.restoreTorrentToEngine(t); err != nil {
-			return err
-		}
+	if _, err := uc.restoreTorrentToEngine(t); err != nil {
+		return err
 	}
-	for _, file := range t.Files {
-		if file != nil {
-			_ = uc.engine.SetFilePriority(t.Hash, file.Index, file.Priority)
-		}
-	}
-	return nil
+	return uc.engine.FinishRestore(t.Hash, t.State)
 }
 
 func (uc *TorrentUseCase) registerStorageAliases(m *repository.StorageMapping, mi *metainfo.MetaInfo) error {

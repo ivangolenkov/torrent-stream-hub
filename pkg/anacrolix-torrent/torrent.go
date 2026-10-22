@@ -83,10 +83,12 @@ type Torrent struct {
 	_slogGroup         slog.Attr             // The slog group for merging into other loggers.
 	lastSlogGroupInput torrentSlogGroupInput // To guard against generating slog.Group
 
-	networkingEnabled      chansync.Flag
-	dataDownloadDisallowed chansync.Flag
-	dataUploadDisallowed   bool
-	userOnWriteChunkErr    func(error)
+	networkingEnabled        chansync.Flag
+	dataDownloadDisallowed   chansync.Flag
+	dataUploadDisallowed     bool
+	userOnWriteChunkErr      func(error)
+	lastWriteChunkErr        error
+	lastWriteChunkErrVersion uint64
 
 	closed chansync.SetOnce
 	// A background Context cancelled when the Torrent is closed. Added to minimize extra goroutines
@@ -3098,12 +3100,15 @@ func (t *Torrent) pieceForOffset(off int64) *Piece {
 }
 
 func (t *Torrent) onWriteChunkErr(err error) {
+	// Stop requests synchronously even with a custom asynchronous observer.
+	t.lastWriteChunkErr = err
+	t.lastWriteChunkErrVersion++
+	t.disallowDataDownloadLocked()
 	if t.userOnWriteChunkErr != nil {
 		go t.userOnWriteChunkErr(err)
 		return
 	}
 	t.logger.WithDefaultLevel(log.Critical).Printf("default chunk write error handler: disabling data download")
-	t.disallowDataDownloadLocked()
 }
 
 func (t *Torrent) DisallowDataDownload() {
@@ -3124,6 +3129,57 @@ func (t *Torrent) disallowDataDownloadLocked() {
 func (t *Torrent) AllowDataDownload() {
 	t.cl.lock()
 	defer t.cl.unlock()
+	t.allowDataDownloadLocked()
+}
+
+// AllowDataDownloadIfNoWriteError atomically checks the storage-error latch
+// before opening admission. Only an explicit, disk-checked Resume clears it.
+func (t *Torrent) AllowDataDownloadIfNoWriteError() error {
+	t.cl.lock()
+	defer t.cl.unlock()
+	if t.closed.IsSet() {
+		return errTorrentClosed
+	}
+	if t.lastWriteChunkErr != nil {
+		return t.lastWriteChunkErr
+	}
+	t.allowDataDownloadLocked()
+	return nil
+}
+
+func (t *Torrent) WriteChunkErrorVersion() uint64 {
+	t.cl.rLock()
+	defer t.cl.rUnlock()
+	return t.lastWriteChunkErrVersion
+}
+
+func (t *Torrent) LastWriteChunkError() error {
+	t.cl.rLock()
+	defer t.cl.rUnlock()
+	return t.lastWriteChunkErr
+}
+
+// Do not erase an in-flight write failure that arrived during the disk probe.
+func (t *Torrent) ClearWriteChunkErrorIfVersion(version uint64) error {
+	t.cl.lock()
+	defer t.cl.unlock()
+	if version != t.lastWriteChunkErrVersion {
+		if t.lastWriteChunkErr != nil {
+			return t.lastWriteChunkErr
+		}
+		return errors.New("storage-error generation changed during Resume")
+	}
+	t.lastWriteChunkErr = nil
+	return nil
+}
+
+func (t *Torrent) DataDownloadAllowed() bool {
+	t.cl.rLock()
+	defer t.cl.rUnlock()
+	return !t.closed.IsSet() && !t.dataDownloadDisallowed.IsSet()
+}
+
+func (t *Torrent) allowDataDownloadLocked() {
 	// Can't move this outside the lock because other users require it to be unchanged while the
 	// Client lock is held?
 	if !t.dataDownloadDisallowed.Clear() {

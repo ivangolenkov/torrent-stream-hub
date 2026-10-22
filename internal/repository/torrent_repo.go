@@ -75,8 +75,7 @@ func (r *TorrentRepo) saveTorrent(t *models.Torrent, policy *bool) error {
 			INSERT INTO files (hash, "index", path, size, downloaded, priority, is_media)
 			VALUES %s
 			ON CONFLICT(hash, "index") DO UPDATE SET 
-				downloaded=MAX(files.downloaded, excluded.downloaded),
-				priority=excluded.priority
+				downloaded=MAX(files.downloaded, excluded.downloaded)
 		`, strings.Join(placeholders, ", "))
 
 		if _, err := tx.Exec(query, values...); err != nil {
@@ -106,6 +105,11 @@ func (r *TorrentRepo) GetTorrent(hash string) (*models.Torrent, error) {
 	if err := r.loadFiles(t); err != nil {
 		return nil, err
 	}
+	block, err := r.DownloadBlock(hash)
+	if err != nil {
+		return nil, err
+	}
+	t.DownloadBlock = block
 
 	return t, nil
 }
@@ -134,6 +138,9 @@ func (r *TorrentRepo) GetAllTorrents() ([]*models.Torrent, error) {
 		return nil, err
 	}
 	if err := r.loadFilesForTorrents(byHash); err != nil {
+		return nil, err
+	}
+	if err := r.loadDownloadBlocks(byHash); err != nil {
 		return nil, err
 	}
 
@@ -196,6 +203,7 @@ func (r *TorrentRepo) DeleteTorrent(hash string) error {
 	// Explicit deletes also cover legacy history without a foreign key and
 	// connections created by older SQLite pool configurations.
 	for _, query := range []string{
+		`DELETE FROM torrent_download_blocks WHERE hash = ?`,
 		`DELETE FROM viewed_history WHERE hash = ?`,
 		`DELETE FROM files WHERE hash = ?`,
 		`DELETE FROM torrents WHERE hash = ?`,

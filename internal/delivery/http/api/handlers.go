@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"torrent-stream-hub/internal/engine"
 
 	"torrent-stream-hub/internal/delivery/http/response"
 	"torrent-stream-hub/internal/logging"
@@ -78,6 +79,10 @@ func (h *APIHandler) AddTorrent(w http.ResponseWriter, r *http.Request) {
 	logging.Infof("api add torrent %s", logging.SafeMagnetSummary(req.Link))
 	t, err := h.uc.AddMagnetWithMetadata(req.Link, usecase.TorrentMetadata{Poster: req.Poster})
 	if err != nil {
+		if errors.Is(err, engine.ErrDownloadBlocked) || errors.Is(err, usecase.ErrStorageConflict) {
+			response.Error(w, http.StatusConflict, err.Error())
+			return
+		}
 		logging.Warnf("api add torrent failed %s: %v", logging.SafeMagnetSummary(req.Link), err)
 		response.Error(w, http.StatusInternalServerError, err.Error())
 		return
@@ -120,6 +125,10 @@ func (h *APIHandler) TorrentAction(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err != nil {
+		if errors.Is(err, engine.ErrDownloadBlocked) {
+			response.Error(w, http.StatusConflict, err.Error())
+			return
+		}
 		if errors.Is(err, usecase.ErrStorageConflict) {
 			response.Error(w, http.StatusConflict, "Torrent is in use or storage ownership is unconfirmed")
 			return

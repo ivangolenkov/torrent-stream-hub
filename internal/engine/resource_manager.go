@@ -7,8 +7,6 @@ import (
 
 	"torrent-stream-hub/internal/logging"
 	"torrent-stream-hub/internal/models"
-
-	"github.com/anacrolix/torrent"
 )
 
 // resourceMonitor checks disk space and manages active downloads limit.
@@ -30,13 +28,15 @@ func (e *Engine) resourceMonitor(ctx context.Context) {
 }
 
 func (e *Engine) manageResources() {
-	minFreeBytes := uint64(e.cfg.MinFreeSpaceGB) * 1024 * 1024 * 1024
+	e.admissionMu.Lock()
+	defer e.admissionMu.Unlock()
+	minFreeBytes := e.minimumDiskBytes()
 
 	freeSpace, err := GetFreeSpace(e.cfg.DownloadDir)
 	if err != nil {
 		logging.Warnf("failed to check free disk space dir=%s: %v", e.cfg.DownloadDir, err)
 	}
-	diskFull := err == nil && freeSpace < minFreeBytes
+	diskFull := err != nil || freeSpace < minFreeBytes
 
 	e.mu.RLock()
 	torrents := make([]*ManagedTorrent, 0, len(e.managedTorrents))
@@ -49,27 +49,29 @@ func (e *Engine) manageResources() {
 	activeCount := 0
 
 	for _, mt := range torrents {
+		if mt == nil || mt.t == nil {
+			continue
+		}
 		mt.t.RefreshStorageCompletion()
-		if diskFull {
-			mt.mu.Lock()
-			if mt.state == models.StateDownloading {
-				mt.setStateLocked(models.StateDiskFull, models.ErrDiskFull, "free disk space below limit")
-				mt.downloadAllStarted = false
-				mt.mu.Unlock()
-				if mt.t.Info() != nil {
-					for _, f := range mt.t.Files() {
-						f.SetPriority(torrent.PiecePriorityNone)
-					}
-				}
-			} else {
-				mt.mu.Unlock()
-			}
+		mt.mu.Lock()
+		initializing := mt.initializing
+		mt.mu.Unlock()
+		if initializing {
+			continue
+		}
+		if probeErr := e.diskError(mt.hash); probeErr != nil {
+			_ = e.blockDownloadLocked(mt, probeErr.Error())
 			continue
 		}
 
 		mt.mu.Lock()
-		if mt.state == models.StateDiskFull {
-			mt.setStateLocked(models.StateQueued, models.ErrNone, "free disk space recovered")
+		if mt.downloadBlock != "" || mt.state == models.StateDiskFull {
+			reason := mt.downloadBlock
+			mt.mu.Unlock()
+			if reason != "" {
+				_ = e.blockDownloadLocked(mt, reason)
+			}
+			continue
 		}
 
 		if mt.state == models.StateDownloading {
@@ -78,11 +80,11 @@ func (e *Engine) manageResources() {
 				if !mt.downloadAllStarted {
 					mt.downloadAllStarted = true
 					mt.mu.Unlock()
-					e.applyFilePrioritiesAndDownload(mt)
+					_ = e.admitPayloadLocked(mt)
 					logging.Debugf("download all started hash=%s files=%d", mt.t.InfoHash().HexString(), len(mt.t.Files()))
 					mt.mu.Lock()
 				}
-				if mt.t.BytesCompleted() == info.TotalLength() {
+				if mt.state == models.StateDownloading && mt.t.BytesCompleted() == info.TotalLength() {
 					mt.setStateLocked(models.StateSeeding, models.ErrNone, "download complete")
 					activeCount--
 				}
@@ -94,29 +96,30 @@ func (e *Engine) manageResources() {
 		mt.mu.Unlock()
 	}
 
-	if !diskFull {
-		for _, mt := range torrents {
-			mt.mu.Lock()
-			if activeCount >= e.cfg.MaxActiveDownloads {
-				mt.mu.Unlock()
-				break
-			}
-			if mt.state == models.StateQueued {
-				mt.setStateLocked(models.StateDownloading, models.ErrNone, "resource slot available")
-				if mt.t.Info() != nil {
-					mt.downloadAllStarted = true
-					mt.mu.Unlock()
-					e.applyFilePrioritiesAndDownload(mt)
-					logging.Debugf("download all started hash=%s files=%d", mt.t.InfoHash().HexString(), len(mt.t.Files()))
-					mt.mu.Lock()
-				} else if !mt.metadataWaitLogged {
-					logging.Debugf("torrent promoted to downloading while metadata is pending hash=%s", mt.t.InfoHash().HexString())
-					mt.metadataWaitLogged = true
-				}
-				activeCount++
-			}
-			mt.mu.Unlock()
+	for _, mt := range torrents {
+		if mt == nil || mt.t == nil {
+			continue
 		}
+		mt.mu.Lock()
+		if activeCount >= e.cfg.MaxActiveDownloads {
+			mt.mu.Unlock()
+			break
+		}
+		if mt.state == models.StateQueued && !mt.initializing && mt.downloadBlock == "" {
+			mt.setStateLocked(models.StateDownloading, models.ErrNone, "resource slot available")
+			if mt.t.Info() != nil {
+				mt.downloadAllStarted = true
+				mt.mu.Unlock()
+				_ = e.admitPayloadLocked(mt)
+				logging.Debugf("download all started hash=%s files=%d", mt.t.InfoHash().HexString(), len(mt.t.Files()))
+				mt.mu.Lock()
+			} else if !mt.metadataWaitLogged {
+				logging.Debugf("torrent promoted to downloading while metadata is pending hash=%s", mt.t.InfoHash().HexString())
+				mt.metadataWaitLogged = true
+			}
+			activeCount++
+		}
+		mt.mu.Unlock()
 	}
 
 	e.logResourceSummary(totalTorrents, activeCount, diskFull, freeSpace, err)

@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"torrent-stream-hub/internal/models"
 	"torrent-stream-hub/internal/payload"
 
 	"github.com/anacrolix/torrent"
@@ -95,12 +96,12 @@ func (e *Engine) AddPausedMetainfo(mi *metainfo.MetaInfo, identity ...string) (*
 	if err != nil {
 		return nil, err
 	}
-	model, err := e.addTorrentWithSource(t, "", identity...)
+	model, err := e.registerTorrent(t, "", &models.Torrent{State: models.StatePaused}, identity...)
 	if err != nil {
 		t.Drop()
 		return nil, err
 	}
-	if err := e.Pause(model.Hash); err != nil {
+	if err := e.FinishRestore(model.Hash, models.StatePaused); err != nil {
 		return nil, err
 	}
 	return t, nil

@@ -68,6 +68,43 @@ mapping. To return to an old version, stop the new service and restore the entir
 pre-upgrade download/config snapshot together, then start the old binary. Do not
 point an old binary at the migrated database or isolated payload tree.
 
+## Download Priorities And DiskFull Recovery
+
+File priorities (Normal/High/Skip) are persisted user settings, not runtime
+statistics. Startup and Resume restore them before enabling payload requests,
+including when a magnet is still waiting for metadata. Stream/preload overlays
+do not change these saved settings. A paused torrent stays paused after restart.
+Use Resume, not a duplicate add, to restore an existing DB-only torrent.
+
+The service checks free space on each payload root's filesystem before admitting
+payload downloads, at Resume, and periodically. Falling below
+`HUB_MIN_FREE_SPACE_GB`, an unknown free-space measurement, or a payload storage
+write error closes the library-level download gate, including reader/stream
+requests and queued torrents. An unknown measurement is reported separately from
+an actual `ENOSPC`. The block is stored separately in SQLite and survives restart;
+freeing space alone does **not** restart downloads.
+
+To recover, free space (or correct the measurement/storage error), then explicitly
+Resume each affected torrent. Resume returns HTTP 409 if the disk check still
+fails, or HTTP 500 if its database changes cannot be committed; it does not report
+a false success. Successful Resume retains file priorities and obeys the background
+download limit. `download_block` and the error reason are visible through REST/SSE
+and the Web GUI; manually paused torrents are not activated by the disk monitor.
+
+Already verified data can still be streamed/downloaded by the direct disk fast
+path and seeded without payload writes. A stream waiting for missing data fails
+with a diagnostic error when blocked; it must be reopened after recovery. The
+service does not reset QoS reference counts/debounce timers to remove a disk block.
+
+The gate cancels pending/new payload requests; it cannot roll back a system write
+already in progress. Such in-flight operations may finish or fail. Writer errors
+also close admission synchronously in the torrent library, before the asynchronous
+application observer persists the reason; automatic callbacks cannot erase that
+error latch. SQLite, completion-cache and log writes themselves can fail on a full
+or read-only volume. Persistence is not guaranteed when the underlying filesystem
+cannot commit it: failure keeps the runtime gate closed, and startup rechecks disk
+space before any payload admission. Keep backups and leave free-space headroom.
+
 ## Ports
 
 - `8080/tcp` - Web GUI and HTTP API.

@@ -20,13 +20,23 @@ func mapToPiecePriority(prio models.FilePriority) torrent.PiecePriority {
 	}
 }
 
-func (e *Engine) applyFilePrioritiesAndDownload(mt *ManagedTorrent) {
+func (e *Engine) applyFilePrioritiesAndDownload(mt *ManagedTorrent) error {
 	if mt.t.Info() == nil {
-		return
+		return fmt.Errorf("metadata not ready")
 	}
 
 	mt.mu.Lock()
 	defer mt.mu.Unlock()
+	if mt.initializing {
+		return fmt.Errorf("torrent initialization is not complete")
+	}
+	for index := range mt.filePriorities {
+		if index < 0 || index >= len(mt.t.Files()) {
+			mt.t.DisallowDataDownload()
+			mt.setStateLocked(models.StateError, models.ErrInvalidTorrent, "persisted file index out of bounds")
+			return fmt.Errorf("persisted file index out of bounds")
+		}
+	}
 
 	for i := range mt.t.Files() {
 		if _, ok := mt.filePriorities[i]; !ok {
@@ -36,11 +46,21 @@ func (e *Engine) applyFilePrioritiesAndDownload(mt *ManagedTorrent) {
 
 	for i, f := range mt.t.Files() {
 		prio := mt.filePriorities[i]
+		// Queued torrents may serve a reader/stream overlay without turning
+		// their entire base selection into another background download.
+		if mt.state == models.StateQueued {
+			f.SetPriority(torrent.PiecePriorityNone)
+			continue
+		}
 		f.SetPriority(mapToPiecePriority(prio))
 	}
+	return nil
 }
 
 func (e *Engine) SetFilePriority(hash string, fileIndex int, priority models.FilePriority) error {
+	if fileIndex < 0 || (priority != models.PriorityNormal && priority != models.PriorityHigh && priority != models.PriorityNone) {
+		return fmt.Errorf("invalid file priority")
+	}
 	e.mu.RLock()
 	mt, ok := e.managedTorrents[hash]
 	e.mu.RUnlock()
@@ -50,20 +70,21 @@ func (e *Engine) SetFilePriority(hash string, fileIndex int, priority models.Fil
 		return TorrentNotFoundError{Hash: hash}
 	}
 
-	mt.mu.Lock()
-	mt.filePriorities[fileIndex] = priority
-	mt.mu.Unlock()
-
 	if mt.t.Info() != nil {
 		mt.mu.Lock()
 		files := mt.t.Files()
 		if fileIndex >= 0 && fileIndex < len(files) {
+			mt.filePriorities[fileIndex] = priority
 			files[fileIndex].SetPriority(mapToPiecePriority(priority))
 			logging.Debugf("set file priority hash=%s index=%d priority=%d", hash, fileIndex, priority)
 		} else {
 			mt.mu.Unlock()
 			return fmt.Errorf("file index out of bounds")
 		}
+		mt.mu.Unlock()
+	} else {
+		mt.mu.Lock()
+		mt.filePriorities[fileIndex] = priority
 		mt.mu.Unlock()
 	}
 

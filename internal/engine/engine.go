@@ -48,6 +48,9 @@ type Engine struct {
 	storageAliasRegistrar func(string, string) error
 
 	mu                        sync.RWMutex
+	admissionMu               sync.Mutex
+	diskProbe                 func(string) (uint64, error)
+	saveDownloadBlock         func(string, string) error
 	managedTorrents           map[string]*ManagedTorrent
 	resourceLogMu             sync.Mutex
 	lastResourceLog           time.Time
@@ -98,6 +101,13 @@ type ManagedTorrent struct {
 	boostUntil                time.Time
 	normalMaxEstablishedConns int
 	filePriorities            map[int]models.FilePriority
+	// Restored torrents remain download-disabled until settings and persistence
+	// have been installed. Readers cannot override the library-level prohibition.
+	initializing           bool
+	downloadBlock          string
+	downloadBlockPersisted bool
+	payloadCtx             context.Context
+	payloadCancel          context.CancelCauseFunc
 }
 
 func New(cfg *config.Config) (*Engine, error) {
@@ -254,11 +264,15 @@ func (e *Engine) Warmup(ctx context.Context, hash string, index int, size int64)
 		logging.Debugf("warmup skipped for completed disk file hash=%s file_index=%d size=%d", hash, index, target)
 		return target, target, nil
 	}
+	if err := e.CheckPayloadAdmission(hash); err != nil {
+		return 0, target, err
+	}
 
-	reader := file.NewReader()
-	reader.SetContext(ctx)
-	defer reader.Close()
-	reader.SetReadahead(target)
+	source, err := e.OpenStreamSource(ctx, hash, index, false)
+	if err != nil {
+		return 0, target, err
+	}
+	defer source.Close()
 
 	cleanup, err := e.streamManager.AddPreload(ctx, hash, index, StreamOptions{
 		RangeStart:  0,
@@ -267,11 +281,12 @@ func (e *Engine) Warmup(ctx context.Context, hash string, index int, size int64)
 	})
 	if err != nil {
 		logging.Debugf("warmup QoS overlay unavailable hash=%s file_index=%d: %v", hash, index, err)
+		return 0, target, err
 	} else {
 		defer cleanup()
 	}
 
-	limited := io.LimitReader(reader, target)
+	limited := io.LimitReader(source.Reader, target)
 	read, err := io.Copy(io.Discard, limited)
 	if err != nil && !errors.Is(err, context.Canceled) {
 		return read, target, err
@@ -322,6 +337,7 @@ func (e *Engine) AddMagnet(magnet string) (*models.Torrent, error) {
 		return nil, err
 	}
 	e.augmentTorrentSpec(spec)
+	spec.DisallowDataDownload = true
 	t, _, err := e.client.AddTorrentSpec(spec)
 	if err != nil {
 		logging.Warnf("failed to add magnet spec %s: %v", logging.SafeMagnetSummary(magnet), err)
@@ -360,6 +376,7 @@ func (e *Engine) AddTorrentFile(r io.Reader, identity ...string) (*models.Torren
 		logging.Warnf("failed to persist metainfo hash=%s: %v", metaInfo.HashInfoBytes().HexString(), err)
 	}
 	e.augmentTorrentSpec(spec)
+	spec.DisallowDataDownload = true
 	t, _, err := e.client.AddTorrentSpec(spec)
 	if err != nil {
 		logging.Warnf("failed to add .torrent hash=%s: %v", metaInfo.HashInfoBytes().HexString(), err)
@@ -443,6 +460,10 @@ func (e *Engine) addTorrent(t *torrent.Torrent) (*models.Torrent, error) {
 }
 
 func (e *Engine) addTorrentWithSource(t *torrent.Torrent, sourceURI string, identity ...string) (*models.Torrent, error) {
+	return e.registerTorrent(t, sourceURI, nil, identity...)
+}
+
+func (e *Engine) registerTorrent(t *torrent.Torrent, sourceURI string, restored *models.Torrent, identity ...string) (*models.Torrent, error) {
 	hash := t.InfoHash().HexString()
 	if len(identity) > 0 && identity[0] != "" {
 		hash = identity[0]
@@ -478,22 +499,40 @@ func (e *Engine) addTorrentWithSource(t *torrent.Torrent, sourceURI string, iden
 		normalMaxEstablishedConns: e.cfg.BTEstablishedConns,
 		filePriorities:            make(map[int]models.FilePriority),
 	}
+	mt.payloadCtx, mt.payloadCancel = context.WithCancelCause(e.ctx)
+	if restored != nil {
+		mt.initializing = true
+		mt.state = restored.State
+		mt.err = restored.Error
+		mt.downloadBlock = restored.DownloadBlock
+		mt.downloadBlockPersisted = restored.DownloadBlock != ""
+		for _, f := range restored.Files {
+			if f != nil {
+				mt.filePriorities[f.Index] = f.Priority
+			}
+		}
+	}
 	if t.Info() != nil {
 		mi := t.Metainfo()
 		mt.metainfo = &mi
 		if err := e.saveMetainfo(hash, &mi, true); err != nil {
 			logging.Warnf("failed to persist runtime metainfo hash=%s: %v", hash, err)
+			e.mu.Unlock()
+			t.Drop()
+			return nil, fmt.Errorf("persist runtime metainfo: %w", err)
 		}
 	}
+	t.SetOnWriteChunkError(func(error) {
+		e.RunStorageTask(func(context.Context) { e.payloadWriteError(mt, nil) })
+	})
 	e.managedTorrents[hash] = mt
 	logging.Infof("torrent registered hash=%s name=%q state=%s metadata_ready=%t", hash, t.Name(), mt.state, t.Info() != nil)
 	e.mu.Unlock()
 
-	model := e.mapManagedTorrent(mt)
 	e.manageResources()
 	e.watchMetadata(hash, t)
 
-	return model, nil
+	return e.mapManagedTorrent(mt), nil
 }
 
 // GetRawTorrent returns the underlying anacrolix torrent for raw piece data access.
@@ -508,6 +547,8 @@ func (e *Engine) GetRawTorrent(hash string) *torrent.Torrent {
 }
 
 func (e *Engine) Pause(hash string) error {
+	e.admissionMu.Lock()
+	defer e.admissionMu.Unlock()
 	e.mu.RLock()
 	mt, ok := e.managedTorrents[hash]
 	e.mu.RUnlock()
@@ -517,6 +558,7 @@ func (e *Engine) Pause(hash string) error {
 		return TorrentNotFoundError{Hash: hash}
 	}
 
+	mt.t.DisallowDataDownload()
 	if mt.t.Info() != nil {
 		for _, f := range mt.t.Files() {
 			f.SetPriority(torrent.PiecePriorityNone)
@@ -529,6 +571,9 @@ func (e *Engine) Pause(hash string) error {
 	}
 
 	mt.mu.Lock()
+	if mt.payloadCancel != nil {
+		mt.payloadCancel(DownloadBlockedError{"torrent is paused"})
+	}
 	mt.downloadAllStarted = false
 	mt.setStateLocked(models.StatePaused, models.ErrNone, "pause requested")
 	mt.mu.Unlock()
@@ -537,6 +582,19 @@ func (e *Engine) Pause(hash string) error {
 }
 
 func (e *Engine) Resume(hash string) error {
+	e.admissionMu.Lock()
+	err := e.resumeLocked(hash)
+	e.admissionMu.Unlock()
+	if err == nil {
+		e.manageResources()
+		if current := e.GetTorrent(hash); current != nil && current.DownloadBlock != "" {
+			return DownloadBlockedError{Reason: current.DownloadBlock}
+		}
+	}
+	return err
+}
+
+func (e *Engine) resumeLocked(hash string) error {
 	e.mu.RLock()
 	mt, ok := e.managedTorrents[hash]
 	e.mu.RUnlock()
@@ -546,22 +604,53 @@ func (e *Engine) Resume(hash string) error {
 		return TorrentNotFoundError{Hash: hash}
 	}
 
-	if mt.t != nil {
-		mt.t.AllowDataUpload()
-		mt.t.AllowDataDownload()
-	}
-
 	mt.mu.Lock()
+	if mt.initializing {
+		mt.mu.Unlock()
+		return fmt.Errorf("torrent initialization is not complete")
+	}
+	mt.mu.Unlock()
+	mt.t.DisallowDataDownload()
+	writeVersion := mt.t.WriteChunkErrorVersion()
+	if err := e.diskError(hash); err != nil {
+		if persistErr := e.blockDownloadLocked(mt, err.Error()); persistErr != nil {
+			return persistErr
+		}
+		return DownloadBlockedError{err.Error()}
+	}
+	if err := mt.t.ClearWriteChunkErrorIfVersion(writeVersion); err != nil {
+		if persistErr := e.blockDownloadLocked(mt, "payload write failed during Resume"); persistErr != nil {
+			return persistErr
+		}
+		return DownloadBlockedError{Reason: "payload write failed during Resume"}
+	}
+	if e.saveDownloadBlock != nil {
+		if err := e.saveDownloadBlock(hash, ""); err != nil {
+			return err
+		}
+	}
+	mt.mu.Lock()
+	mt.downloadBlock = ""
+	mt.downloadBlockPersisted = false
+	mt.payloadCtx, mt.payloadCancel = context.WithCancelCause(e.ctx)
 	mt.downloadAllStarted = false
 	mt.metadataWaitLogged = false
 	mt.setStateLocked(models.StateQueued, models.ErrNone, "resume requested") // put to queue, let resource monitor handle it
 	mt.mu.Unlock()
-
-	e.manageResources()
+	// Install base priorities before permitting requests, including reader-driven
+	// requests. Metadata-pending torrents are admitted by watchMetadata instead.
+	if mt.t.Info() != nil {
+		if err := e.applyFilePrioritiesAndDownload(mt); err != nil {
+			return err
+		}
+		mt.t.AllowDataUpload()
+	}
 	return nil
 }
 
 func (e *Engine) Delete(hash string) error {
+	e.admissionMu.Lock()
+	defer e.admissionMu.Unlock()
 	e.mu.Lock()
 	mt, ok := e.managedTorrents[hash]
 	if !ok {

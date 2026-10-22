@@ -57,3 +57,15 @@ describe('async action menu', () => {
     expect(document.body.textContent).not.toContain('Remove with files');
   });
 });
+
+it('shows a persistent download block separately from manual pause in both layouts', async () => {
+  const { wrapper, store } = setup();
+  store.torrents = [{ ...fixture('one'), download_block: 'disk space unknown: probe failed' }];
+  await nextTick();
+  for (const selector of ['tbody', '.md\\:hidden']) {
+    const text = wrapper.find(selector).text();
+    expect(text).toContain('Paused');
+    expect(text).toContain('disk space unknown: probe failed');
+    expect(text).toContain('Resume manually after recovery');
+  }
+});

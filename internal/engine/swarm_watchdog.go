@@ -210,7 +210,7 @@ func (e *Engine) refreshPeerDiscovery(mt *ManagedTorrent, reason string, downloa
 	t := mt.t
 	hash := t.InfoHash().HexString()
 	t.SetMaxEstablishedConns(e.cfg.BTSwarmBoostConns)
-	t.AllowDataDownload()
+	// Discovery must never reopen the payload gate (restore, Pause, DiskFull).
 	if !e.cfg.BTNoUpload {
 		t.AllowDataUpload()
 	}

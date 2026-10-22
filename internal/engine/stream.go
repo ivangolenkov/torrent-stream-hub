@@ -214,6 +214,11 @@ func (sm *StreamManager) AddStream(ctx context.Context, hash string, fileIndex i
 		logging.Debugf("stream QoS skipped hash=%s file_index=%d head=%t skip=%t", hash, fileIndex, opts.IsHEAD, opts.SkipQoS)
 		return nil
 	}
+	if ready, _, err := sm.engine.CheckFileDirectReady(hash, fileIndex); err == nil && !ready {
+		if err := sm.engine.CheckPayloadAdmission(hash); err != nil {
+			return err
+		}
+	}
 
 	sessionID, err := sm.addSession(hash, fileIndex, opts, false)
 	if err != nil {
@@ -238,6 +243,11 @@ func (sm *StreamManager) AddStream(ctx context.Context, hash string, fileIndex i
 func (sm *StreamManager) AddPreload(ctx context.Context, hash string, fileIndex int, opts StreamOptions) (func(), error) {
 	if opts.SkipQoS || opts.IsHEAD {
 		return func() {}, nil
+	}
+	if ready, _, err := sm.engine.CheckFileDirectReady(hash, fileIndex); err == nil && !ready {
+		if err := sm.engine.CheckPayloadAdmission(hash); err != nil {
+			return nil, err
+		}
 	}
 
 	sessionID, err := sm.addSession(hash, fileIndex, opts, true)

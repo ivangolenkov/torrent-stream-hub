@@ -70,6 +70,7 @@ func (f DownloadedDiskFile) Open() (*os.File, error) {
 }
 
 func NewTorrentUseCase(e *engine.Engine, r *repository.TorrentRepo) *TorrentUseCase {
+	e.SetDownloadBlockPersistence(r.SaveDownloadBlock)
 	e.SetStorageRootResolver(func(hash string) (string, error) {
 		m, err := r.StorageMapping(hash)
 		if err != nil {
@@ -180,6 +181,18 @@ func (uc *TorrentUseCase) checkAddAllowed(hash string) error {
 	t, err := uc.repo.GetTorrent(hash)
 	if err != nil || t == nil {
 		return err
+	}
+	if t.DownloadBlock != "" {
+		return engine.DownloadBlockedError{Reason: t.DownloadBlock}
+	}
+	if current := uc.engine.GetTorrent(hash); current != nil {
+		if current.DownloadBlock != "" {
+			return engine.DownloadBlockedError{Reason: current.DownloadBlock}
+		}
+	} else {
+		// A duplicate add is not a Resume. DB-only records must use the staged
+		// restore path, otherwise default priorities can bypass saved user intent.
+		return ErrStorageConflict
 	}
 	_, pending, err := uc.repo.CleanupPaths(hash)
 	if err != nil {
@@ -355,7 +368,7 @@ func (uc *TorrentUseCase) Resume(hash string) error {
 		return ErrStorageConflict
 	}
 
-	if err := uc.engine.Resume(hash); err != nil {
+	if err := uc.engine.StageExistingRestore(t); err != nil {
 		if !errors.Is(err, engine.ErrTorrentNotFound) {
 			logging.Warnf("engine resume failed hash=%s: %v", hash, err)
 			return err
@@ -369,13 +382,16 @@ func (uc *TorrentUseCase) Resume(hash string) error {
 		if t.SourceURI == "" {
 			t.SourceURI = restored.SourceURI
 		}
-		uc.engine.ScheduleRecheckIfProgressBehind(restored.Hash, t.Downloaded)
 	}
 
 	t.State = models.StateQueued
 	t.Error = models.ErrNone
 	if err := uc.repo.SaveTorrent(t); err != nil {
+		_ = uc.engine.Pause(hash)
 		logging.Warnf("failed to persist resumed state hash=%s: %v", hash, err)
+		return err
+	}
+	if err := uc.engine.FinishRestore(hash, models.StateQueued, true); err != nil {
 		return err
 	}
 	return nil
@@ -386,16 +402,33 @@ func (uc *TorrentUseCase) SetFilePriority(hash string, fileIndex int, priority m
 	defer uc.repo.Lifecycle.Unlock()
 	logging.Infof("usecase set file priority hash=%s index=%d priority=%d", hash, fileIndex, priority)
 
-	// Try to update engine first
-	engineErr := uc.engine.SetFilePriority(hash, fileIndex, priority)
-	if engineErr != nil && !errors.Is(engineErr, engine.ErrTorrentNotFound) && engineErr.Error() != "metadata not ready" {
-		logging.Warnf("engine set file priority failed hash=%s: %v", hash, engineErr)
-		return engineErr
+	if fileIndex < 0 || (priority != models.PriorityNormal && priority != models.PriorityHigh && priority != models.PriorityNone) {
+		return fmt.Errorf("invalid file priority")
 	}
-
-	// Always save to repository
+	saved, err := uc.repo.GetTorrent(hash)
+	if err != nil {
+		return err
+	}
+	if saved == nil {
+		return TorrentNotFoundError{Hash: hash}
+	}
+	known := false
+	for _, file := range saved.Files {
+		if file != nil && file.Index == fileIndex {
+			known = true
+			break
+		}
+	}
+	if !known {
+		return fmt.Errorf("file index out of bounds or metadata not ready")
+	}
+	// User intent is committed before changing the runtime. Statistics saves never
+	// overwrite it, even if metadata is still pending.
 	if err := uc.repo.UpdateFilePriority(hash, fileIndex, priority); err != nil {
 		logging.Warnf("failed to persist file priority hash=%s index=%d: %v", hash, fileIndex, err)
+		return err
+	}
+	if err := uc.engine.SetFilePriority(hash, fileIndex, priority); err != nil && !errors.Is(err, engine.ErrTorrentNotFound) {
 		return err
 	}
 
@@ -407,17 +440,30 @@ func (uc *TorrentUseCase) SetTorrentFilesPriority(hash string, priority models.F
 	defer uc.repo.Lifecycle.Unlock()
 	logging.Infof("usecase set torrent files priority hash=%s priority=%d", hash, priority)
 
-	// Try to update engine first
-	engineErr := uc.engine.SetTorrentFilesPriority(hash, priority)
-	if engineErr != nil && !errors.Is(engineErr, engine.ErrTorrentNotFound) && engineErr.Error() != "metadata not ready" {
-		logging.Warnf("engine set torrent files priority failed hash=%s: %v", hash, engineErr)
-		return engineErr
+	if priority != models.PriorityNormal && priority != models.PriorityHigh && priority != models.PriorityNone {
+		return fmt.Errorf("invalid file priority")
 	}
-
-	// Always save to repository
+	saved, err := uc.repo.GetTorrent(hash)
+	if err != nil {
+		return err
+	}
+	if saved == nil {
+		return TorrentNotFoundError{Hash: hash}
+	}
+	if len(saved.Files) == 0 {
+		return fmt.Errorf("metadata not ready")
+	}
 	if err := uc.repo.UpdateTorrentFilesPriority(hash, priority); err != nil {
 		logging.Warnf("failed to persist torrent files priority hash=%s: %v", hash, err)
 		return err
+	}
+	for _, file := range saved.Files {
+		if file == nil {
+			continue
+		}
+		if err := uc.engine.SetFilePriority(hash, file.Index, priority); err != nil && !errors.Is(err, engine.ErrTorrentNotFound) {
+			return err
+		}
 	}
 
 	return nil
@@ -500,16 +546,13 @@ func (uc *TorrentUseCase) RestoreTorrents() error {
 		restored, err := uc.restoreTorrentToEngine(t)
 		if err == nil {
 			mergePersistedMetadata(restored, t)
-			for _, file := range t.Files {
-				if file != nil {
-					// Pre-load priority to engine. We ignore the error as it might just mean "metadata not ready"
-					_ = uc.engine.SetFilePriority(restored.Hash, file.Index, file.Priority)
-				}
-			}
-			uc.engine.ScheduleRecheckIfProgressBehind(restored.Hash, t.Downloaded)
-			if err := uc.repo.SaveTorrent(restored); err != nil {
+			if err := uc.repo.SaveTorrent(t); err != nil {
 				logging.Warnf("failed to save restored torrent hash=%s: %v", t.Hash, err)
 				restoreErr = errors.Join(restoreErr, fmt.Errorf("save restored torrent %s: %w", t.Hash, err))
+				continue
+			}
+			if err := uc.engine.FinishRestore(t.Hash, t.State); err != nil {
+				restoreErr = errors.Join(restoreErr, err)
 			}
 			continue
 		}
@@ -528,10 +571,14 @@ func (uc *TorrentUseCase) restoreTorrentToEngine(t *models.Torrent) (*models.Tor
 	f, err := os.Open(path)
 	if err == nil {
 		logging.Debugf("restore uses persisted metainfo hash=%s", t.Hash)
-		restored, addErr := uc.engine.AddTorrentFile(f, t.Hash)
+		mi, addErr := metainfo.Load(f)
 		closeErr := f.Close()
 		if addErr == nil && closeErr == nil {
-			return restored, nil
+			spec, specErr := torrent.TorrentSpecFromMetaInfoErr(mi)
+			if specErr != nil {
+				return nil, specErr
+			}
+			return uc.engine.RestoreTorrent(spec, t)
 		}
 		if addErr == nil {
 			addErr = closeErr
@@ -546,18 +593,18 @@ func (uc *TorrentUseCase) restoreTorrentToEngine(t *models.Torrent) (*models.Tor
 
 	if t.SourceURI != "" {
 		logging.Debugf("restore uses persisted source URI hash=%s", t.Hash)
-		restored, err := uc.engine.AddMagnet(t.SourceURI)
+		spec, err := torrent.TorrentSpecFromMagnetUri(t.SourceURI)
 		if err == nil {
-			return restored, nil
+			return uc.engine.RestoreTorrent(spec, t)
 		}
 		restoreErr = errors.Join(restoreErr, fmt.Errorf("magnet: %w", err))
 		logging.Warnf("restore magnet failed hash=%s, trying infohash fallback: %v", t.Hash, err)
 	}
 
 	logging.Warnf("restore falling back to bare info hash hash=%s", t.Hash)
-	restored, err := uc.engine.AddInfoHash(t.Hash)
+	spec, err := torrent.TorrentSpecFromMagnetUri("magnet:?xt=urn:btih:" + t.Hash)
 	if err == nil {
-		return restored, nil
+		return uc.engine.RestoreTorrent(spec, t)
 	}
 	restoreErr = errors.Join(restoreErr, fmt.Errorf("infohash: %w", err))
 	return nil, restoreErr

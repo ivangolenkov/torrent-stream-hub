@@ -608,6 +608,9 @@ func (h *TorrServerHandler) serveStream(w http.ResponseWriter, r *http.Request, 
 	prepDuration := time.Since(prepStart)
 	if err != nil {
 		status := http.StatusNotFound
+		if errors.Is(err, engine.ErrDownloadBlocked) {
+			status = http.StatusConflict
+		}
 		message := "File not found"
 		if !errors.Is(err, usecase.ErrTorrentNotFound) {
 			message = err.Error()
@@ -640,6 +643,10 @@ func (h *TorrServerHandler) serveStream(w http.ResponseWriter, r *http.Request, 
 		err = h.uc.AddStream(ctx, hash, index, streamOpts)
 		if err != nil {
 			logging.Warnf("stream QoS registration failed req_id=%s hash=%s file_index=%d: %v", reqID, hash, index, err)
+			if errors.Is(err, engine.ErrDownloadBlocked) {
+				response.Error(w, http.StatusConflict, err.Error())
+				return
+			}
 		}
 	} else {
 		logging.Debugf("stream QoS registration skipped req_id=%s hash=%s file_index=%d head=%t skip=%t",

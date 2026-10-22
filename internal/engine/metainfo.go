@@ -77,7 +77,7 @@ func (e *Engine) watchMetadata(hash string, t *torrent.Torrent) {
 		mt, ok := e.managedTorrents[hash]
 		e.mu.RUnlock()
 
-		if !ok || mt.t != t || mt.metadataLogged {
+		if !ok || mt.t != t {
 			return
 		}
 
@@ -97,20 +97,31 @@ func (e *Engine) watchMetadata(hash string, t *torrent.Torrent) {
 
 		if err := e.saveMetainfo(hash, &mi, true); err != nil {
 			logging.Warnf("failed to persist runtime metainfo hash=%s: %v", hash, err)
+			e.admissionMu.Lock()
+			t.DisallowDataDownload()
+			mt.mu.Lock()
+			mt.initializing = true
+			mt.setStateLocked(models.StateError, models.ErrorReason("metadata persistence failed"), "metadata initialization failed")
+			mt.mu.Unlock()
+			e.admissionMu.Unlock()
+			return
 		}
 
 		logging.Infof("torrent metadata ready hash=%s name=%q size=%d files=%d", hash, t.Name(), info.TotalLength(), fileCount)
 
+		e.admissionMu.Lock()
+		defer e.admissionMu.Unlock()
 		mt.mu.Lock()
 		state := mt.state
 		downloadAllStarted := mt.downloadAllStarted
-		if state == models.StateDownloading && !downloadAllStarted {
+		initializing := mt.initializing || mt.downloadBlock != ""
+		if state == models.StateDownloading && !downloadAllStarted && !initializing {
 			mt.downloadAllStarted = true
 		}
 		mt.mu.Unlock()
 
-		if state == models.StateDownloading && !downloadAllStarted {
-			e.applyFilePrioritiesAndDownload(mt)
+		if state == models.StateDownloading && !downloadAllStarted && !initializing {
+			_ = e.admitPayloadLocked(mt)
 			logging.Debugf("download all started after metadata hash=%s files=%d", hash, fileCount)
 		}
 	})

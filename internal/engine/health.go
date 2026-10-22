@@ -223,13 +223,14 @@ func (e *Engine) mapManagedTorrent(mt *ManagedTorrent) *models.Torrent {
 	e.logPeerSummaryLocked(t.InfoHash().HexString(), peerSummary, mt)
 
 	model := &models.Torrent{
-		Hash:       mt.hash,
-		Name:       t.Name(),
-		Size:       size,
-		Downloaded: downloaded,
-		Progress:   progress,
-		State:      mt.state,
-		Error:      mt.err,
+		Hash:          mt.hash,
+		Name:          t.Name(),
+		Size:          size,
+		Downloaded:    downloaded,
+		Progress:      progress,
+		State:         mt.state,
+		Error:         mt.err,
+		DownloadBlock: mt.downloadBlock,
 
 		DownloadSpeed: mt.downloadSpeed,
 		UploadSpeed:   mt.uploadSpeed,

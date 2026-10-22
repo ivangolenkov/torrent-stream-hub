@@ -47,11 +47,14 @@ type Engine struct {
 	storageRootResolver   func(string) (string, error)
 	storageAliasRegistrar func(string, string) error
 
-	mu                        sync.RWMutex
-	admissionMu               sync.Mutex
-	diskProbe                 func(string) (uint64, error)
-	saveDownloadBlock         func(string, string) error
-	managedTorrents           map[string]*ManagedTorrent
+	mu                sync.RWMutex
+	admissionMu       sync.Mutex
+	diskProbe         func(string) (uint64, error)
+	saveDownloadBlock func(string, string) error
+	verifyTorrent     func(context.Context, *torrent.Torrent) error
+	managedTorrents   map[string]*ManagedTorrent
+	// Independent generation registry for callbacks under the library lock.
+	statusTorrents            sync.Map
 	resourceLogMu             sync.Mutex
 	lastResourceLog           time.Time
 	lastResourceKey           string
@@ -108,6 +111,9 @@ type ManagedTorrent struct {
 	downloadBlockPersisted bool
 	payloadCtx             context.Context
 	payloadCancel          context.CancelCauseFunc
+	ctx                    context.Context
+	cancel                 context.CancelFunc
+	rechecking             bool
 }
 
 func New(cfg *config.Config) (*Engine, error) {
@@ -188,11 +194,32 @@ func New(cfg *config.Config) (*Engine, error) {
 }
 
 func (e *Engine) startBackground(fn func(context.Context)) {
-	e.wg.Add(1)
+	if !e.beginWork() {
+		return
+	}
 	go func() {
 		defer e.wg.Done()
 		fn(e.ctx)
 	}()
+}
+
+func (e *Engine) beginWork() bool {
+	e.storageTaskMu.Lock()
+	defer e.storageTaskMu.Unlock()
+	if e.ctx == nil || e.ctx.Err() != nil {
+		return false
+	}
+	e.wg.Add(1)
+	return true
+}
+
+func (e *Engine) currentTorrent(mt *ManagedTorrent) bool {
+	if mt == nil || e.ctx == nil || e.ctx.Err() != nil {
+		return false
+	}
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.managedTorrents[mt.hash] == mt
 }
 
 func (e *Engine) StreamManager() *StreamManager {
@@ -302,6 +329,17 @@ func (e *Engine) Close() {
 			e.cancel()
 		}
 		e.storageTaskMu.Unlock()
+		e.admissionMu.Lock()
+		e.mu.RLock()
+		for _, mt := range e.managedTorrents {
+			if mt == nil || mt.t == nil {
+				continue
+			}
+			mt.t.DisallowDataDownload()
+			mt.t.DisallowDataUpload()
+		}
+		e.mu.RUnlock()
+		e.admissionMu.Unlock()
 		if e.streamManager != nil {
 			e.streamManager.CloseAllStreams()
 		}
@@ -310,8 +348,8 @@ func (e *Engine) Close() {
 		e.mu.Lock()
 		client := e.client
 		torrentStorage := e.storage
-		e.client = nil
-		e.storage = nil
+		// Client/storage pointers stay immutable for concurrent diagnostic readers.
+		// Cancellation and task admission, not a nil pointer, represent shutdown.
 		e.mu.Unlock()
 
 		closeTorrentResources(client, torrentStorage)
@@ -330,6 +368,10 @@ func closeTorrentResources(client *torrent.Client, torrentStorage storage.Client
 }
 
 func (e *Engine) AddMagnet(magnet string) (*models.Torrent, error) {
+	if !e.beginWork() {
+		return nil, context.Canceled
+	}
+	defer e.wg.Done()
 	logging.Infof("adding torrent from magnet %s", logging.SafeMagnetSummary(magnet))
 	spec, err := torrent.TorrentSpecFromMagnetUri(magnet)
 	if err != nil {
@@ -360,6 +402,10 @@ func (e *Engine) AddInfoHash(hash string) (*models.Torrent, error) {
 }
 
 func (e *Engine) AddTorrentFile(r io.Reader, identity ...string) (*models.Torrent, error) {
+	if !e.beginWork() {
+		return nil, context.Canceled
+	}
+	defer e.wg.Done()
 	logging.Infof("adding torrent from .torrent file")
 	metaInfo, err := metainfo.Load(r)
 	if err != nil {
@@ -413,46 +459,59 @@ func (e *Engine) ScheduleRecheckIfProgressBehind(hash string, persistedDownloade
 	t := mt.t
 	e.mu.RUnlock()
 
-	go func() {
-		<-t.GotInfo()
-
-		e.mu.Lock()
-		mt, ok := e.managedTorrents[hash]
-		if !ok || mt.t != t {
-			e.mu.Unlock()
+	e.RunStorageTask(func(context.Context) {
+		select {
+		case <-mt.ctx.Done():
+			return
+		case <-t.Closed():
+			return
+		case <-t.GotInfo():
+		}
+		e.admissionMu.Lock()
+		if !e.currentTorrent(mt) || t.BytesCompleted() >= persistedDownloaded {
+			e.admissionMu.Unlock()
 			return
 		}
-		if t.BytesCompleted() >= persistedDownloaded {
-			e.mu.Unlock()
+		mt.mu.Lock()
+		if mt.rechecking {
+			mt.mu.Unlock()
+			e.admissionMu.Unlock()
 			return
 		}
-		if t.Info() != nil {
-			for _, f := range t.Files() {
-				f.SetPriority(torrent.PiecePriorityNone)
-			}
-			mt.downloadAllStarted = false
+		mt.rechecking = true
+		mt.downloadAllStarted = false
+		mt.mu.Unlock()
+		t.DisallowDataDownload()
+		for _, f := range t.Files() {
+			f.SetPriority(torrent.PiecePriorityNone)
 		}
-		e.mu.Unlock()
-
-		logging.Infof("rechecking existing torrent data hash=%s runtime_downloaded=%d persisted_downloaded=%d", hash, t.BytesCompleted(), persistedDownloaded)
-		if err := t.VerifyDataContext(context.Background()); err != nil {
+		t.CancelPieces(0, t.NumPieces())
+		if e.streamManager != nil {
+			_ = e.streamManager.refreshTorrentOverlayLocked(mt)
+		}
+		verify := e.verifyTorrent
+		e.admissionMu.Unlock()
+		if verify == nil {
+			verify = func(ctx context.Context, t *torrent.Torrent) error { return t.VerifyDataContext(ctx) }
+		}
+		if err := verify(mt.ctx, t); err != nil {
 			logging.Warnf("torrent data recheck failed hash=%s: %v", hash, err)
-		} else {
-			logging.Infof("torrent data recheck completed hash=%s downloaded=%d", hash, t.BytesCompleted())
 		}
+		e.finishRecheck(mt)
+	})
+}
 
-		e.mu.Lock()
-		defer e.mu.Unlock()
-		mt, ok = e.managedTorrents[hash]
-		if !ok || mt.t != t {
-			return
-		}
-		if mt.state == models.StateDownloading && t.Info() != nil {
-			e.applyFilePrioritiesAndDownload(mt)
-			mt.downloadAllStarted = true
-			logging.Debugf("download all restarted after data recheck hash=%s files=%d", hash, len(t.Files()))
-		}
-	}()
+func (e *Engine) finishRecheck(mt *ManagedTorrent) {
+	e.admissionMu.Lock()
+	defer e.admissionMu.Unlock()
+	if !e.currentTorrent(mt) {
+		return
+	}
+	mt.mu.Lock()
+	mt.rechecking = false
+	mt.mu.Unlock()
+	// Re-evaluate current intent; never restore the pre-recheck snapshot.
+	_ = e.admitPayloadLocked(mt)
 }
 
 func (e *Engine) addTorrent(t *torrent.Torrent) (*models.Torrent, error) {
@@ -464,6 +523,18 @@ func (e *Engine) addTorrentWithSource(t *torrent.Torrent, sourceURI string, iden
 }
 
 func (e *Engine) registerTorrent(t *torrent.Torrent, sourceURI string, restored *models.Torrent, identity ...string) (*models.Torrent, error) {
+	e.admissionMu.Lock()
+	if e.ctx.Err() != nil {
+		e.admissionMu.Unlock()
+		t.Drop()
+		return nil, e.ctx.Err()
+	}
+	select {
+	case <-t.Closed():
+		e.admissionMu.Unlock()
+		return nil, fmt.Errorf("torrent generation closed during add")
+	default:
+	}
 	hash := t.InfoHash().HexString()
 	if len(identity) > 0 && identity[0] != "" {
 		hash = identity[0]
@@ -479,14 +550,18 @@ func (e *Engine) registerTorrent(t *torrent.Torrent, sourceURI string, restored 
 		}
 	}
 	if mt, ok := e.managedTorrents[hash]; ok {
+		mt.mu.Lock()
 		if mt.sourceURI == "" && strings.TrimSpace(sourceURI) != "" {
 			mt.sourceURI = strings.TrimSpace(sourceURI)
 		}
+		mt.mu.Unlock()
 		e.mu.Unlock()
+		e.admissionMu.Unlock()
 		model := e.mapManagedTorrent(mt)
 		logging.Debugf("torrent already managed hash=%s state=%s", hash, model.State)
 		return model, nil
 	}
+	e.mu.Unlock()
 
 	mt := &ManagedTorrent{
 		hash:                      hash,
@@ -500,6 +575,7 @@ func (e *Engine) registerTorrent(t *torrent.Torrent, sourceURI string, restored 
 		filePriorities:            make(map[int]models.FilePriority),
 	}
 	mt.payloadCtx, mt.payloadCancel = context.WithCancelCause(e.ctx)
+	mt.ctx, mt.cancel = context.WithCancel(e.ctx)
 	if restored != nil {
 		mt.initializing = true
 		mt.state = restored.State
@@ -517,7 +593,7 @@ func (e *Engine) registerTorrent(t *torrent.Torrent, sourceURI string, restored 
 		mt.metainfo = &mi
 		if err := e.saveMetainfo(hash, &mi, true); err != nil {
 			logging.Warnf("failed to persist runtime metainfo hash=%s: %v", hash, err)
-			e.mu.Unlock()
+			e.admissionMu.Unlock()
 			t.Drop()
 			return nil, fmt.Errorf("persist runtime metainfo: %w", err)
 		}
@@ -525,9 +601,12 @@ func (e *Engine) registerTorrent(t *torrent.Torrent, sourceURI string, restored 
 	t.SetOnWriteChunkError(func(error) {
 		e.RunStorageTask(func(context.Context) { e.payloadWriteError(mt, nil) })
 	})
+	e.mu.Lock()
 	e.managedTorrents[hash] = mt
+	e.statusTorrents.Store(hash, mt)
 	logging.Infof("torrent registered hash=%s name=%q state=%s metadata_ready=%t", hash, t.Name(), mt.state, t.Info() != nil)
 	e.mu.Unlock()
+	e.admissionMu.Unlock()
 
 	e.manageResources()
 	e.watchMetadata(hash, t)
@@ -549,6 +628,9 @@ func (e *Engine) GetRawTorrent(hash string) *torrent.Torrent {
 func (e *Engine) Pause(hash string) error {
 	e.admissionMu.Lock()
 	defer e.admissionMu.Unlock()
+	if e.ctx.Err() != nil {
+		return e.ctx.Err()
+	}
 	e.mu.RLock()
 	mt, ok := e.managedTorrents[hash]
 	e.mu.RUnlock()
@@ -577,6 +659,9 @@ func (e *Engine) Pause(hash string) error {
 	mt.downloadAllStarted = false
 	mt.setStateLocked(models.StatePaused, models.ErrNone, "pause requested")
 	mt.mu.Unlock()
+	if e.streamManager != nil {
+		_ = e.streamManager.refreshTorrentOverlayLocked(mt)
+	}
 
 	return nil
 }
@@ -595,6 +680,9 @@ func (e *Engine) Resume(hash string) error {
 }
 
 func (e *Engine) resumeLocked(hash string) error {
+	if e.ctx.Err() != nil {
+		return e.ctx.Err()
+	}
 	e.mu.RLock()
 	mt, ok := e.managedTorrents[hash]
 	e.mu.RUnlock()
@@ -651,6 +739,9 @@ func (e *Engine) resumeLocked(hash string) error {
 func (e *Engine) Delete(hash string) error {
 	e.admissionMu.Lock()
 	defer e.admissionMu.Unlock()
+	if e.ctx.Err() != nil {
+		return e.ctx.Err()
+	}
 	e.mu.Lock()
 	mt, ok := e.managedTorrents[hash]
 	if !ok {
@@ -660,11 +751,25 @@ func (e *Engine) Delete(hash string) error {
 	}
 
 	delete(e.managedTorrents, hash)
+	e.statusTorrents.Range(func(key, value any) bool {
+		if value == mt {
+			e.statusTorrents.Delete(key)
+		}
+		return true
+	})
 	e.mu.Unlock()
+	if mt.cancel != nil {
+		mt.cancel()
+	}
+	mt.mu.Lock()
+	if mt.payloadCancel != nil {
+		mt.payloadCancel(DownloadBlockedError{"torrent deleted"})
+	}
+	mt.mu.Unlock()
 
 	logging.Infof("deleting torrent hash=%s", hash)
 	if e.streamManager != nil {
-		e.streamManager.CloseStreamsForTorrent(mt)
+		e.streamManager.closeStreamsForTorrentLocked(mt)
 	}
 	mt.t.Drop()
 	return nil

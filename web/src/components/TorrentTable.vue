@@ -217,6 +217,7 @@ const confirmDelete = async () => {
                 </div>
               </div>
               <TemporaryTorrentControl :torrent="t" />
+              <div v-if="t.deletion_mode" class="text-xs text-orange-700">Deletion pending ({{ t.deletion_mode }}). {{ t.deletion_error }}</div>
               <div v-if="t.download_block" class="text-xs text-orange-700">Download blocked: {{ t.download_block }}. Resume manually after recovery.</div>
               <div v-if="t.storage_state && t.storage_state !== 'ready'" class="text-xs text-amber-700">Storage: {{ t.storage_state }}. {{ t.storage_error }}</div>
             </td>
@@ -316,6 +317,7 @@ const confirmDelete = async () => {
           
           <!-- Status tag + Size + Priority -->
           <TemporaryTorrentControl :torrent="t" />
+          <div v-if="t.deletion_mode" class="text-xs text-orange-700">Deletion pending ({{ t.deletion_mode }}). {{ t.deletion_error }}</div>
           <div v-if="t.download_block" class="text-xs text-orange-700">Download blocked: {{ t.download_block }}. Resume manually after recovery.</div>
           <div v-if="t.storage_state && t.storage_state !== 'ready'" class="text-xs text-amber-700">Storage: {{ t.storage_state }}. {{ t.storage_error }}</div>
           <div class="flex items-center gap-2 mb-2 text-xs">

@@ -69,3 +69,13 @@ it('shows a persistent download block separately from manual pause in both layou
     expect(text).toContain('Resume manually after recovery');
   }
 });
+
+it('shows pending deletion and its failure in both layouts', async () => {
+  const { wrapper, store } = setup();
+  store.torrents = [{ ...fixture('one'), deletion_mode: 'keep', deletion_error: 'database commit failed' }];
+  await nextTick();
+  for (const selector of ['tbody', '.md\\:hidden']) {
+    expect(wrapper.find(selector).text()).toContain('Deletion pending (keep)');
+    expect(wrapper.find(selector).text()).toContain('database commit failed');
+  }
+});

@@ -43,6 +43,8 @@ type TorrentUseCase struct {
 	transfers            map[string]int
 	protectedUntil       map[string]time.Time
 	storageWorkerStarted bool
+	// Optional rooted filesystem operation for deterministic failure injection.
+	payloadRemove func(*os.Root, string) error
 }
 
 type StreamOptions = engine.StreamOptions
@@ -457,19 +459,21 @@ func (uc *TorrentUseCase) SetTorrentFilesPriority(hash string, priority models.F
 		logging.Warnf("failed to persist torrent files priority hash=%s: %v", hash, err)
 		return err
 	}
+	priorities := make(map[int]models.FilePriority, len(saved.Files))
 	for _, file := range saved.Files {
 		if file == nil {
 			continue
 		}
-		if err := uc.engine.SetFilePriority(hash, file.Index, priority); err != nil && !errors.Is(err, engine.ErrTorrentNotFound) {
-			return err
-		}
+		priorities[file.Index] = priority
+	}
+	if err := uc.engine.SetFilePriorities(hash, priorities); err != nil && !errors.Is(err, engine.ErrTorrentNotFound) {
+		return err
 	}
 
 	return nil
 }
 
-func (uc *TorrentUseCase) Delete(hash string, deleteFiles bool) error {
+func (uc *TorrentUseCase) Delete(hash string, deleteFiles bool) (retErr error) {
 	uc.repo.Lifecycle.Lock()
 	defer uc.repo.Lifecycle.Unlock()
 	logging.Infof("usecase delete hash=%s delete_files=%t", hash, deleteFiles)
@@ -482,6 +486,14 @@ func (uc *TorrentUseCase) Delete(hash string, deleteFiles bool) error {
 		logging.Debugf("delete requested for missing torrent hash=%s", hash)
 		return TorrentNotFoundError{Hash: hash}
 	}
+	defer func() {
+		if retErr != nil && !deleteFiles {
+			retErr = errors.Join(retErr, uc.repo.SaveDeletionError(hash, retErr))
+		}
+	}()
+	if (t.DeletionMode == "keep" && deleteFiles) || (t.DeletionMode == "payload" && !deleteFiles) {
+		return ErrStorageConflict
+	}
 
 	if uc.transferProtected(hash) {
 		return ErrStorageConflict
@@ -493,6 +505,9 @@ func (uc *TorrentUseCase) Delete(hash string, deleteFiles bool) error {
 	}
 	if deleteFiles {
 		return uc.deletePayloadLocked(t)
+	}
+	if err := uc.repo.BeginForget(hash); err != nil {
+		return err
 	}
 	if err := uc.engine.Delete(hash); err != nil {
 		return err
@@ -799,6 +814,10 @@ func mergePersistedMetadata(runtime, persisted *models.Torrent) {
 		return
 	}
 	runtime.IsTemporary = persisted.IsTemporary
+	runtime.DeletionMode, runtime.DeletionError = persisted.DeletionMode, persisted.DeletionError
+	if persisted.DeletionMode != "" {
+		runtime.State = models.StatePaused
+	}
 	runtime.StorageState, runtime.StorageError = persisted.StorageState, persisted.StorageError
 	runtime.Title = firstNonEmpty(runtime.Title, persisted.Title)
 	runtime.Data = firstNonEmpty(runtime.Data, persisted.Data)

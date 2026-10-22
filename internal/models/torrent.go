@@ -37,6 +37,8 @@ const (
 
 // Torrent defines the core properties and state of a single torrent
 type Torrent struct {
+	DeletionMode  string       `json:"deletion_mode,omitempty"`
+	DeletionError string       `json:"deletion_error,omitempty"`
 	DownloadBlock string       `json:"download_block,omitempty"`
 	StorageState  string       `json:"storage_state,omitempty"`
 	StorageError  string       `json:"storage_error,omitempty"`

@@ -13,6 +13,9 @@ import (
 func (e *Engine) StageExistingRestore(saved *models.Torrent) error {
 	e.admissionMu.Lock()
 	defer e.admissionMu.Unlock()
+	if e.ctx.Err() != nil {
+		return e.ctx.Err()
+	}
 	e.mu.RLock()
 	mt := e.managedTorrents[saved.Hash]
 	e.mu.RUnlock()
@@ -43,6 +46,10 @@ func (e *Engine) StageExistingRestore(saved *models.Torrent) error {
 // RestoreTorrent stages persisted intent before the torrent becomes visible to
 // the scheduler. The caller must persist any application changes before FinishRestore.
 func (e *Engine) RestoreTorrent(spec *torrent.TorrentSpec, saved *models.Torrent) (*models.Torrent, error) {
+	if !e.beginWork() {
+		return nil, context.Canceled
+	}
+	defer e.wg.Done()
 	if spec.InfoHash.HexString() != saved.Hash && (!spec.InfoHashV2.Ok || spec.InfoHashV2.Value.ToShort().HexString() != saved.Hash) {
 		return nil, fmt.Errorf("restored source does not match persisted infohash")
 	}
@@ -67,6 +74,10 @@ func (e *Engine) RestoreTorrent(spec *torrent.TorrentSpec, saved *models.Torrent
 
 func (e *Engine) FinishRestore(hash string, state models.TorrentState, manualResume ...bool) error {
 	e.admissionMu.Lock()
+	if e.ctx.Err() != nil {
+		e.admissionMu.Unlock()
+		return e.ctx.Err()
+	}
 	e.mu.RLock()
 	mt := e.managedTorrents[hash]
 	e.mu.RUnlock()
@@ -138,6 +149,15 @@ func (e *Engine) FinishRestore(hash string, state models.TorrentState, manualRes
 	}
 	if state == models.StatePaused || (inactive && !diskBlocked) {
 		mt.t.DisallowDataUpload()
+	}
+	if inactive && mt.t.Info() != nil {
+		for _, file := range mt.t.Files() {
+			file.SetPriority(torrent.PiecePriorityNone)
+		}
+		mt.t.CancelPieces(0, mt.t.NumPieces())
+		if e.streamManager != nil {
+			_ = e.streamManager.refreshTorrentOverlayLocked(mt)
+		}
 	}
 	e.admissionMu.Unlock()
 	if !inactive {

@@ -360,6 +360,9 @@ func (e *Engine) logPeerSummaryLocked(hash string, summary models.PeerSummary, m
 }
 
 func (e *Engine) dhtStatus() string {
+	if e.ctx != nil && e.ctx.Err() != nil {
+		return "disabled"
+	}
 	if e.client == nil {
 		return "disabled"
 	}

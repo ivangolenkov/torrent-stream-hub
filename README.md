@@ -105,6 +105,49 @@ or read-only volume. Persistence is not guaranteed when the underlying filesyste
 cannot commit it: failure keeps the runtime gate closed, and startup rechecks disk
 space before any payload admission. Keep backups and leave free-space headroom.
 
+## Concurrent Commands, Shutdown And Deletion Recovery
+
+Pause, Resume, scheduler activation and stream priority reconcile share an engine
+admission lock. A delayed metadata/recheck/discovery/stream callback cannot undo
+a completed Pause or act on a deleted torrent generation. Stream overlays combine
+ranges across files, including shared boundary pieces. Seek debounce and stream
+reference counting remain active; old timer/session tokens cannot clear a new
+session or a re-added torrent with the same hash.
+
+The background scheduler reserves slots atomically, including metadata-pending
+downloads and active rechecks. A positive `HUB_MAX_ACTIVE_DOWNLOADS` limits
+background downloads; zero does not promote background downloads. Stream-driven
+queued requests remain separate and do not enable the whole background selection.
+Queue ordering and selected-files completion policy have not changed.
+
+Shutdown rejects new work, cancels torrent/reader contexts and timers, joins
+accepted engine tasks, and then closes library/storage resources. Cancellation
+cannot forcibly interrupt an already running filesystem syscall or an arbitrary
+blocking input reader supplied to an add operation. Internal ownership and lock
+ordering are documented in `internal/engine/CONCURRENCY.md`.
+
+Deletion records durable intent before stopping the runtime. With
+`delete_files=true`, a verified manifest is committed before unlink; with
+`delete_files=false`, mode `keep` forbids payload removal, including on retries.
+If deletion fails, REST/SSE and both GUI layouts show `deletion_mode` and
+`deletion_error`. Resume, transfers and re-add conflict with pending deletion;
+restart does not restore its download. Fix the reported problem and retry Delete
+**with the same delete-files mode**. A different mode returns a conflict, not an
+implicit escalation to destructive deletion. Missing files are safe on retry.
+
+Manual pending deletions are not automatically retried at startup; temporary
+payload cleanup retains its existing periodic retry policy. An unsafe/incomplete
+manifest is never guessed or treated as proof of an empty payload. Deletion errors
+return failure, not success with hidden pending work. If recording the error also
+fails, the already committed intent remains the recovery authority.
+
+Final database deletion is transactional. Payload deletion removes unused mapping
+aliases with their root; aliases still referenced by another torrent are retained.
+Keep-data deletion deliberately retains namespace reservations so a later re-add
+can reopen the same isolated data. Cached metainfo and application-owned files
+are not payload and are not removed. Schema upgrades import existing cleanup
+manifests as pending `payload` deletion; back up SQLite and payload before upgrades.
+
 ## Ports
 
 - `8080/tcp` - Web GUI and HTTP API.

@@ -111,6 +111,9 @@ func (e *Engine) blockDownloadLocked(mt *ManagedTorrent, reason string) error {
 	}
 	mt.mu.Unlock()
 	mt.t.DisallowDataDownload()
+	if e.streamManager != nil {
+		_ = e.streamManager.refreshTorrentOverlayLocked(mt)
+	}
 	if persist && e.saveDownloadBlock != nil {
 		if err := e.saveDownloadBlock(mt.hash, reason); err != nil {
 			logging.Warnf("failed to persist download block hash=%s: %v", mt.hash, err)
@@ -126,6 +129,9 @@ func (e *Engine) blockDownloadLocked(mt *ManagedTorrent, reason string) error {
 func (e *Engine) payloadWriteError(mt *ManagedTorrent, err error) {
 	e.admissionMu.Lock()
 	defer e.admissionMu.Unlock()
+	if e.ctx.Err() != nil {
+		return
+	}
 	e.mu.RLock()
 	current := e.managedTorrents[mt.hash]
 	e.mu.RUnlock()
@@ -166,7 +172,7 @@ func (e *Engine) admitPayloadLocked(mt *ManagedTorrent) error {
 		return e.ctx.Err()
 	}
 	mt.mu.Lock()
-	blocked, initializing, state := mt.downloadBlock, mt.initializing, mt.state
+	blocked, initializing, state := mt.downloadBlock, mt.initializing || mt.rechecking, mt.state
 	mt.mu.Unlock()
 	if blocked != "" {
 		return DownloadBlockedError{blocked}

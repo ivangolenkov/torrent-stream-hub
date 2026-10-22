@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/base32"
 	"io"
@@ -47,7 +48,17 @@ func (e *Engine) newTorrentClient() (*torrent.Client, storage.ClientImplCloser, 
 	clientConfig.MaxActivePieceHashers = 2
 	clientConfig.PieceHashersPerTorrent = 1
 	clientConfig.Callbacks.StatusUpdated = append(clientConfig.Callbacks.StatusUpdated, func(event torrent.StatusUpdatedEvent) {
-		e.handleStatusEvent(event)
+		owner, _ := e.statusTorrents.Load(strings.ToLower(event.InfoHash))
+		if owner == nil {
+			return
+		}
+		e.RunStorageTask(func(context.Context) {
+			e.admissionMu.Lock()
+			defer e.admissionMu.Unlock()
+			if mt, ok := owner.(*ManagedTorrent); ok && e.currentTorrent(mt) {
+				e.handleStatusEvent(event, mt)
+			}
+		})
 	})
 	clientConfig.Callbacks.PeerConnAdded = append(clientConfig.Callbacks.PeerConnAdded, func(conn *torrent.PeerConn) {
 		e.logPeerConnEvent("added", conn)
@@ -194,7 +205,7 @@ func randomPeerID(prefix string) string {
 	return (prefix + encoded)[:20]
 }
 
-func (e *Engine) handleStatusEvent(event torrent.StatusUpdatedEvent) {
+func (e *Engine) handleStatusEvent(event torrent.StatusUpdatedEvent, mt *ManagedTorrent) {
 	hash := strings.ToLower(event.InfoHash)
 	tracker := logging.SafeURLSummary(event.Url)
 	if event.Error != nil {
@@ -204,14 +215,6 @@ func (e *Engine) handleStatusEvent(event torrent.StatusUpdatedEvent) {
 	}
 
 	if hash == "" {
-		return
-	}
-
-	e.mu.RLock()
-	mt, ok := e.managedTorrents[hash]
-	e.mu.RUnlock()
-
-	if !ok {
 		return
 	}
 

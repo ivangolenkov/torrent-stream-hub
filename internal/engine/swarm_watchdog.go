@@ -101,7 +101,7 @@ func (e *Engine) checkSwarms() {
 		mt.mu.Unlock()
 
 		if refreshTorrent != nil {
-			go e.refreshPeerDiscovery(mt, refreshReason, refreshDownloadAll)
+			e.RunStorageTask(func(context.Context) { e.refreshPeerDiscovery(mt, refreshReason, refreshDownloadAll) })
 		}
 	}
 }
@@ -175,18 +175,26 @@ func (e *Engine) swarmRefreshCooldown() time.Duration {
 	return d
 }
 
-func (e *Engine) refreshDHTAsync(hash string, t *torrent.Torrent, reason string) {
+func (e *Engine) refreshDHTAsync(mt *ManagedTorrent, reason string) {
+	t := mt.t
+	hash := mt.hash
+	e.mu.RLock()
 	if e.client == nil {
+		e.mu.RUnlock()
 		return
 	}
 	servers := e.client.DhtServers()
+	e.mu.RUnlock()
 	if len(servers) == 0 {
 		logging.Debugf("swarm refresh skipped dht announce hash=%s reason=%s dht_servers=0", hash, reason)
 		return
 	}
 	for _, server := range servers {
 		server := server
-		go func() {
+		e.RunStorageTask(func(ctx context.Context) {
+			if ctx.Err() != nil || mt.ctx.Err() != nil {
+				return
+			}
 			done, stop, err := t.AnnounceToDht(server)
 			if err != nil {
 				logging.Warnf("swarm dht announce failed hash=%s reason=%s: %v", hash, reason, err)
@@ -194,17 +202,31 @@ func (e *Engine) refreshDHTAsync(hash string, t *torrent.Torrent, reason string)
 			}
 			defer stop()
 			select {
+			case <-mt.ctx.Done():
+			case <-ctx.Done():
+			case <-t.Closed():
 			case <-done:
 				logging.Debugf("swarm dht announce completed hash=%s reason=%s", hash, reason)
 			case <-time.After(30 * time.Second):
 				logging.Debugf("swarm dht announce timeboxed hash=%s reason=%s", hash, reason)
 			}
-		}()
+		})
 	}
 }
 
 func (e *Engine) refreshPeerDiscovery(mt *ManagedTorrent, reason string, downloadAll bool) {
 	if mt == nil || mt.t == nil {
+		return
+	}
+	e.admissionMu.Lock()
+	defer e.admissionMu.Unlock()
+	if !e.currentTorrent(mt) {
+		return
+	}
+	mt.mu.Lock()
+	inactive := mt.initializing || mt.rechecking || mt.state == models.StatePaused || mt.state == models.StateError || mt.state == models.StateMissingFiles
+	mt.mu.Unlock()
+	if inactive {
 		return
 	}
 	t := mt.t
@@ -221,6 +243,6 @@ func (e *Engine) refreshPeerDiscovery(mt *ManagedTorrent, reason string, downloa
 	if len(trackers) > 0 && !strings.EqualFold(strings.TrimSpace(e.cfg.BTRetrackersMode), "off") {
 		t.AddTrackers([][]string{trackers})
 	}
-	e.refreshDHTAsync(hash, t, reason)
+	e.refreshDHTAsync(mt, reason)
 	logging.Infof("peer discovery refreshed hash=%s reason=%s boost_conns=%d trackers=%d download_all=%t", hash, reason, e.cfg.BTSwarmBoostConns, len(trackers), downloadAll)
 }

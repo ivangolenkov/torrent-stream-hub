@@ -65,11 +65,6 @@ func VerifyStorage(ctx context.Context, dir, hash string, mi *metainfo.MetaInfo)
 }
 
 func (e *Engine) RunStorageTask(fn func(context.Context)) {
-	e.storageTaskMu.Lock()
-	defer e.storageTaskMu.Unlock()
-	if e.ctx.Err() != nil {
-		return
-	}
 	e.startBackground(fn)
 }
 
@@ -87,6 +82,10 @@ func (e *Engine) CheckMigrationSpace(path string, bytes uint64) error {
 
 // AddPausedMetainfo permits background verification without payload admission.
 func (e *Engine) AddPausedMetainfo(mi *metainfo.MetaInfo, identity ...string) (*torrent.Torrent, error) {
+	if !e.beginWork() {
+		return nil, context.Canceled
+	}
+	defer e.wg.Done()
 	spec, err := torrent.TorrentSpecFromMetaInfoErr(mi)
 	if err != nil {
 		return nil, err

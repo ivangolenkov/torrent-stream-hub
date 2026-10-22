@@ -163,6 +163,12 @@ func TestDBOnlyMetadataPendingResumeAndSyncPreserveIntent(t *testing.T) {
 	if raw.Info() != nil || raw.DataDownloadAllowed() {
 		t.Fatal("metadata-pending payload admitted")
 	}
+	if err := uc.SetTorrentFilesPriority(hash, models.PriorityHigh); err != nil {
+		t.Fatal(err)
+	}
+	if err := uc.SetFilePriority(hash, 1, models.PriorityNone); err != nil {
+		t.Fatal(err)
+	}
 	NewSyncWorker(uc.engine, repo).syncOnce()
 	saved, err := repo.GetTorrent(hash)
 	if err != nil {

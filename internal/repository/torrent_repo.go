@@ -47,8 +47,8 @@ func (r *TorrentRepo) saveTorrent(t *models.Torrent, policy *bool) error {
 			category=CASE WHEN excluded.category != '' THEN excluded.category ELSE torrents.category END,
 			size=excluded.size, 
 			downloaded=MAX(torrents.downloaded, excluded.downloaded), 
-			state=excluded.state, 
-			error=excluded.error,
+			state=CASE WHEN torrents.deletion_mode != '' THEN torrents.state ELSE excluded.state END,
+			error=CASE WHEN torrents.deletion_mode != '' THEN torrents.error ELSE excluded.error END,
 			source_uri=CASE WHEN excluded.source_uri != '' THEN excluded.source_uri ELSE torrents.source_uri END,
 			updated_at=CURRENT_TIMESTAMP
 	`, t.Hash, t.Name, t.Title, t.Data, t.Poster, t.Category, t.Size, t.Downloaded, string(t.State), string(t.Error), t.SourceURI, policy != nil && *policy)
@@ -110,6 +110,9 @@ func (r *TorrentRepo) GetTorrent(hash string) (*models.Torrent, error) {
 		return nil, err
 	}
 	t.DownloadBlock = block
+	if err := r.loadDeletionIntents(map[string]*models.Torrent{hash: t}); err != nil {
+		return nil, err
+	}
 
 	return t, nil
 }
@@ -141,6 +144,9 @@ func (r *TorrentRepo) GetAllTorrents() ([]*models.Torrent, error) {
 		return nil, err
 	}
 	if err := r.loadDownloadBlocks(byHash); err != nil {
+		return nil, err
+	}
+	if err := r.loadDeletionIntents(byHash); err != nil {
 		return nil, err
 	}
 
@@ -200,6 +206,11 @@ func (r *TorrentRepo) DeleteTorrent(hash string) error {
 		return err
 	}
 	defer tx.Rollback()
+	var mode, root string
+	err = tx.QueryRow(`SELECT deletion_mode,COALESCE((SELECT root FROM torrent_storage WHERE hash=torrents.hash),'') FROM torrents WHERE hash=?`, hash).Scan(&mode, &root)
+	if err != nil && err != sql.ErrNoRows {
+		return err
+	}
 	// Explicit deletes also cover legacy history without a foreign key and
 	// connections created by older SQLite pool configurations.
 	for _, query := range []string{
@@ -209,6 +220,18 @@ func (r *TorrentRepo) DeleteTorrent(hash string) error {
 		`DELETE FROM torrents WHERE hash = ?`,
 	} {
 		if _, err := tx.Exec(query, hash); err != nil {
+			return err
+		}
+	}
+	// Keep-data deletion intentionally retains namespace reservations: re-add
+	// must reopen the same isolated root, not guess an occupied new namespace.
+	if mode == "payload" {
+		if root == "" {
+			_, err = tx.Exec(`DELETE FROM torrent_storage WHERE hash=?`, hash)
+		} else {
+			_, err = tx.Exec(`DELETE FROM torrent_storage WHERE root=? AND NOT EXISTS (SELECT 1 FROM torrents t JOIN torrent_storage s ON s.hash=t.hash WHERE s.root=?)`, root, root)
+		}
+		if err != nil {
 			return err
 		}
 	}

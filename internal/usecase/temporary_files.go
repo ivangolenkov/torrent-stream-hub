@@ -120,7 +120,15 @@ func (uc *TorrentUseCase) deleteTemporaryLocked(hash string) error {
 }
 
 // Caller holds Lifecycle. Both manual deletion and FIFO use this workflow.
-func (uc *TorrentUseCase) deletePayloadLocked(t *models.Torrent) error {
+func (uc *TorrentUseCase) deletePayloadLocked(t *models.Torrent) (retErr error) {
+	defer func() {
+		if retErr != nil {
+			retErr = errors.Join(retErr, uc.repo.SaveDeletionError(t.Hash, retErr))
+		}
+	}()
+	if t.DeletionMode == "keep" {
+		return ErrStorageConflict
+	}
 	hash := t.Hash
 	if m, err := uc.repo.StorageMapping(hash); err != nil {
 		return err
@@ -200,8 +208,12 @@ func (uc *TorrentUseCase) deletePayloadLocked(t *models.Torrent) error {
 			return fmt.Errorf("%w: %v", ErrStorageConflict, err)
 		}
 	}
+	remove := uc.payloadRemove
+	if remove == nil {
+		remove = func(root *os.Root, path string) error { return root.Remove(path) }
+	}
 	for _, path := range owned {
-		if err := root.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		if err := remove(root, path); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
 		for dir := filepath.Dir(path); dir != "."; dir = filepath.Dir(dir) {

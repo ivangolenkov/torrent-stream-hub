@@ -30,6 +30,9 @@ func (e *Engine) resourceMonitor(ctx context.Context) {
 func (e *Engine) manageResources() {
 	e.admissionMu.Lock()
 	defer e.admissionMu.Unlock()
+	if e.ctx != nil && e.ctx.Err() != nil {
+		return
+	}
 	minFreeBytes := e.minimumDiskBytes()
 
 	freeSpace, err := GetFreeSpace(e.cfg.DownloadDir)
@@ -54,9 +57,13 @@ func (e *Engine) manageResources() {
 		}
 		mt.t.RefreshStorageCompletion()
 		mt.mu.Lock()
-		initializing := mt.initializing
+		initializing := mt.initializing || mt.rechecking
+		reserved := mt.state == models.StateDownloading
 		mt.mu.Unlock()
 		if initializing {
+			if reserved {
+				activeCount++
+			}
 			continue
 		}
 		if probeErr := e.diskError(mt.hash); probeErr != nil {
@@ -75,22 +82,26 @@ func (e *Engine) manageResources() {
 		}
 
 		if mt.state == models.StateDownloading {
-			activeCount++
 			if info := mt.t.Info(); info != nil {
 				if !mt.downloadAllStarted {
 					mt.downloadAllStarted = true
 					mt.mu.Unlock()
-					_ = e.admitPayloadLocked(mt)
+					admitErr := e.admitPayloadLocked(mt)
 					logging.Debugf("download all started hash=%s files=%d", mt.t.InfoHash().HexString(), len(mt.t.Files()))
 					mt.mu.Lock()
+					if admitErr != nil {
+						mt.downloadAllStarted = false
+					}
 				}
 				if mt.state == models.StateDownloading && mt.t.BytesCompleted() == info.TotalLength() {
 					mt.setStateLocked(models.StateSeeding, models.ErrNone, "download complete")
-					activeCount--
 				}
 			} else if !mt.metadataWaitLogged {
 				logging.Debugf("download waiting for metadata hash=%s", mt.t.InfoHash().HexString())
 				mt.metadataWaitLogged = true
+			}
+			if mt.state == models.StateDownloading {
+				activeCount++
 			}
 		}
 		mt.mu.Unlock()
@@ -105,19 +116,24 @@ func (e *Engine) manageResources() {
 			mt.mu.Unlock()
 			break
 		}
-		if mt.state == models.StateQueued && !mt.initializing && mt.downloadBlock == "" {
+		if mt.state == models.StateQueued && !mt.initializing && !mt.rechecking && mt.downloadBlock == "" {
 			mt.setStateLocked(models.StateDownloading, models.ErrNone, "resource slot available")
 			if mt.t.Info() != nil {
 				mt.downloadAllStarted = true
 				mt.mu.Unlock()
-				_ = e.admitPayloadLocked(mt)
+				admitErr := e.admitPayloadLocked(mt)
 				logging.Debugf("download all started hash=%s files=%d", mt.t.InfoHash().HexString(), len(mt.t.Files()))
 				mt.mu.Lock()
+				if admitErr != nil {
+					mt.downloadAllStarted = false
+				}
 			} else if !mt.metadataWaitLogged {
 				logging.Debugf("torrent promoted to downloading while metadata is pending hash=%s", mt.t.InfoHash().HexString())
 				mt.metadataWaitLogged = true
 			}
-			activeCount++
+			if mt.state == models.StateDownloading {
+				activeCount++
+			}
 		}
 		mt.mu.Unlock()
 	}

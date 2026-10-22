@@ -29,11 +29,12 @@ type FileKey struct {
 }
 
 type StreamState struct {
+	Torrent        *ManagedTorrent
+	TimerVersion   uint64
 	ActiveStreams  int
 	ActivePreloads int
 	DebounceTimer  *time.Timer
 	Sessions       map[int64]StreamSession
-	NextSessionID  int64
 	AppliedRanges  []streamPieceRange
 	// Track when it's fully downloaded so we can remove sequential mode
 	FullyDownloaded bool
@@ -50,6 +51,7 @@ type StreamOptions struct {
 }
 
 type StreamSession struct {
+	Done           chan struct{}
 	ID             int64
 	Options        StreamOptions
 	Preload        bool
@@ -82,6 +84,7 @@ type StreamManager struct {
 	states        map[FileKey]*StreamState
 	directStreams map[int64]*directStreamHandle
 	nextDirectID  int64
+	nextSessionID int64
 	closed        bool
 }
 
@@ -172,7 +175,24 @@ func (sm *StreamManager) RegisterDirectStream(hash string, expected *ManagedTorr
 }
 
 func (sm *StreamManager) CloseStreamsForTorrent(mt *ManagedTorrent) {
+	sm.engine.admissionMu.Lock()
+	defer sm.engine.admissionMu.Unlock()
+	sm.closeStreamsForTorrentLocked(mt)
+}
+
+func (sm *StreamManager) closeStreamsForTorrentLocked(mt *ManagedTorrent) {
 	sm.mu.Lock()
+	for key, state := range sm.states {
+		if state.Torrent == mt {
+			if state.DebounceTimer != nil {
+				state.DebounceTimer.Stop()
+			}
+			for _, session := range state.Sessions {
+				close(session.Done)
+			}
+			delete(sm.states, key)
+		}
+	}
 	var toClose []*directStreamHandle
 	for id, handle := range sm.directStreams {
 		if handle.torrent == mt {
@@ -191,8 +211,19 @@ func (sm *StreamManager) CloseStreamsForTorrent(mt *ManagedTorrent) {
 }
 
 func (sm *StreamManager) CloseAllStreams() {
+	sm.engine.admissionMu.Lock()
+	defer sm.engine.admissionMu.Unlock()
 	sm.mu.Lock()
 	sm.closed = true
+	for key, state := range sm.states {
+		if state.DebounceTimer != nil {
+			state.DebounceTimer.Stop()
+		}
+		for _, session := range state.Sessions {
+			close(session.Done)
+		}
+		delete(sm.states, key)
+	}
 	toClose := make([]*directStreamHandle, 0, len(sm.directStreams))
 	for id, handle := range sm.directStreams {
 		toClose = append(toClose, handle)
@@ -225,17 +256,8 @@ func (sm *StreamManager) AddStream(ctx context.Context, hash string, fileIndex i
 		return err
 	}
 
-	if err := sm.refreshStreamOverlay(hash, fileIndex); err != nil {
-		sm.rollbackSession(hash, fileIndex, sessionID)
-		logging.Warnf("failed to apply stream QoS hash=%s file_index=%d: %v", hash, fileIndex, err)
-		return err
-	}
-
 	// Watch for context cancellation to remove the stream.
-	go func() {
-		<-ctx.Done()
-		sm.removeSession(hash, fileIndex, sessionID, true)
-	}()
+	sm.watchSession(ctx, hash, fileIndex, sessionID, true)
 
 	return nil
 }
@@ -254,22 +276,61 @@ func (sm *StreamManager) AddPreload(ctx context.Context, hash string, fileIndex 
 	if err != nil {
 		return nil, err
 	}
-	if err := sm.refreshStreamOverlay(hash, fileIndex); err != nil {
-		sm.rollbackSession(hash, fileIndex, sessionID)
-		return nil, err
-	}
-
 	var once sync.Once
 	cleanup := func() {
 		once.Do(func() {
 			sm.removeSession(hash, fileIndex, sessionID, false)
 		})
 	}
+	sm.watchSession(ctx, hash, fileIndex, sessionID, false)
 	return cleanup, nil
 }
 
-func (sm *StreamManager) addSession(hash string, fileIndex int, opts StreamOptions, preload bool) (int64, error) {
+func (sm *StreamManager) watchSession(ctx context.Context, hash string, index int, id int64, debounce bool) {
 	sm.mu.Lock()
+	state := sm.states[FileKey{Hash: hash, Index: index}]
+	if state == nil {
+		sm.mu.Unlock()
+		return
+	}
+	session, ok := state.Sessions[id]
+	owner := state.Torrent
+	sm.mu.Unlock()
+	if !ok || owner == nil {
+		return
+	}
+	sm.engine.RunStorageTask(func(engineCtx context.Context) {
+		select {
+		case <-session.Done:
+			return
+		case <-ctx.Done():
+		case <-owner.ctx.Done():
+		case <-engineCtx.Done():
+		}
+		sm.removeSession(hash, index, id, debounce)
+	})
+}
+
+func (sm *StreamManager) addSession(hash string, fileIndex int, opts StreamOptions, preload bool) (int64, error) {
+	sm.engine.admissionMu.Lock()
+	defer sm.engine.admissionMu.Unlock()
+	if sm.engine.ctx.Err() != nil {
+		return 0, sm.engine.ctx.Err()
+	}
+	mt, file, err := sm.streamFile(hash, fileIndex)
+	if err != nil {
+		return 0, err
+	}
+	if !opts.AccountingOnly && !file.ReadyForDirectRead() {
+		if err := sm.engine.admitPayloadLocked(mt); err != nil {
+			return 0, err
+		}
+	}
+	sm.mu.Lock()
+	if sm.closed {
+		sm.mu.Unlock()
+		return 0, context.Canceled
+	}
 
 	key := FileKey{Hash: hash, Index: fileIndex}
 	state, exists := sm.states[key]
@@ -277,6 +338,7 @@ func (sm *StreamManager) addSession(hash string, fileIndex int, opts StreamOptio
 
 	if !exists {
 		state = &StreamState{
+			Torrent:  mt,
 			Sessions: make(map[int64]StreamSession),
 		}
 		sm.states[key] = state
@@ -290,10 +352,12 @@ func (sm *StreamManager) addSession(hash string, fileIndex int, opts StreamOptio
 		state.DebounceTimer = nil
 		logging.Debugf("stream debounce cancelled hash=%s file_index=%d", hash, fileIndex)
 	}
+	state.TimerVersion++
 
-	state.NextSessionID++
-	sessionID := state.NextSessionID
+	sm.nextSessionID++
+	sessionID := sm.nextSessionID
 	state.Sessions[sessionID] = StreamSession{
+		Done:           make(chan struct{}),
 		ID:             sessionID,
 		Options:        opts,
 		Preload:        preload,
@@ -308,10 +372,20 @@ func (sm *StreamManager) addSession(hash string, fileIndex int, opts StreamOptio
 	}
 	sm.mu.Unlock()
 
+	if err := sm.refreshTorrentOverlayLocked(mt); err != nil {
+		sm.rollbackSessionLocked(hash, fileIndex, sessionID)
+		return 0, err
+	}
 	return sessionID, nil
 }
 
 func (sm *StreamManager) rollbackSession(hash string, fileIndex int, sessionID int64) {
+	sm.engine.admissionMu.Lock()
+	defer sm.engine.admissionMu.Unlock()
+	sm.rollbackSessionLocked(hash, fileIndex, sessionID)
+}
+
+func (sm *StreamManager) rollbackSessionLocked(hash string, fileIndex int, sessionID int64) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 	key := FileKey{Hash: hash, Index: fileIndex}
@@ -324,6 +398,7 @@ func (sm *StreamManager) rollbackSession(hash string, fileIndex int, sessionID i
 		return
 	}
 	delete(state.Sessions, sessionID)
+	close(session.Done)
 	if session.Preload {
 		state.ActivePreloads--
 	} else {
@@ -342,6 +417,8 @@ func (sm *StreamManager) rollbackSession(hash string, fileIndex int, sessionID i
 
 // RemoveStream keeps the legacy behavior used by tests and removes one active stream session.
 func (sm *StreamManager) RemoveStream(hash string, fileIndex int) {
+	sm.engine.admissionMu.Lock()
+	defer sm.engine.admissionMu.Unlock()
 	sm.mu.Lock()
 	key := FileKey{Hash: hash, Index: fileIndex}
 	state, exists := sm.states[key]
@@ -363,18 +440,24 @@ func (sm *StreamManager) RemoveStream(hash string, fileIndex int) {
 		state.ActiveStreams = maxInt(0, state.ActiveStreams)
 		sm.mu.Unlock()
 		if shouldDebounce {
-			sm.scheduleDebounce(hash, fileIndex)
+			sm.scheduleDebounceLocked(hash, fileIndex)
 		}
 		return
 	}
 	sm.mu.Unlock()
 
 	if sessionID != 0 {
-		sm.removeSession(hash, fileIndex, sessionID, true)
+		sm.removeSessionLocked(hash, fileIndex, sessionID, true)
 	}
 }
 
 func (sm *StreamManager) removeSession(hash string, fileIndex int, sessionID int64, debounce bool) {
+	sm.engine.admissionMu.Lock()
+	defer sm.engine.admissionMu.Unlock()
+	sm.removeSessionLocked(hash, fileIndex, sessionID, debounce)
+}
+
+func (sm *StreamManager) removeSessionLocked(hash string, fileIndex int, sessionID int64, debounce bool) {
 	sm.mu.Lock()
 
 	key := FileKey{Hash: hash, Index: fileIndex}
@@ -385,8 +468,13 @@ func (sm *StreamManager) removeSession(hash string, fileIndex int, sessionID int
 	}
 
 	session, sessionExists := state.Sessions[sessionID]
+	if !sessionExists {
+		sm.mu.Unlock()
+		return
+	}
 	if sessionExists {
 		delete(state.Sessions, sessionID)
+		close(session.Done)
 		if session.Preload {
 			state.ActivePreloads--
 			logging.Debugf("stream preload reference decremented hash=%s file_index=%d active_preloads=%d", hash, fileIndex, state.ActivePreloads)
@@ -407,20 +495,26 @@ func (sm *StreamManager) removeSession(hash string, fileIndex int, sessionID int
 	sm.mu.Unlock()
 
 	if activeStreams > 0 || activePreloads > 0 {
-		if err := sm.refreshStreamOverlay(hash, fileIndex); err != nil {
+		if err := sm.refreshTorrentOverlayLocked(state.Torrent); err != nil {
 			logging.Warnf("failed to refresh stream QoS hash=%s file_index=%d: %v", hash, fileIndex, err)
 		}
 		return
 	}
 
 	if debounce {
-		sm.scheduleDebounce(hash, fileIndex)
+		sm.scheduleDebounceLocked(hash, fileIndex)
 		return
 	}
-	sm.clearStreamOverlay(hash, fileIndex)
+	sm.clearStreamOverlayLocked(hash, fileIndex)
 }
 
 func (sm *StreamManager) scheduleDebounce(hash string, fileIndex int) {
+	sm.engine.admissionMu.Lock()
+	defer sm.engine.admissionMu.Unlock()
+	sm.scheduleDebounceLocked(hash, fileIndex)
+}
+
+func (sm *StreamManager) scheduleDebounceLocked(hash string, fileIndex int) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
@@ -429,97 +523,120 @@ func (sm *StreamManager) scheduleDebounce(hash string, fileIndex int) {
 	if !exists || state == nil {
 		return
 	}
+	if sm.closed || state.ActiveStreams != 0 || state.ActivePreloads != 0 {
+		return
+	}
 	if state.DebounceTimer != nil {
 		state.DebounceTimer.Stop()
 	}
 
+	state.TimerVersion++
+	version := state.TimerVersion
 	state.DebounceTimer = time.AfterFunc(DebounceDelay, func() {
-		sm.mu.Lock()
-
-		// Verify if it's still inactive after delay.
-		st, ok := sm.states[key]
-		if ok && st.ActiveStreams == 0 && st.ActivePreloads == 0 {
-			sm.mu.Unlock()
-			sm.clearStreamOverlay(hash, fileIndex)
-			logging.Infof("stream debounce elapsed hash=%s file_index=%d qos_cleared=%t", hash, fileIndex, true)
-			return
-		}
-		sm.mu.Unlock()
+		sm.engine.RunStorageTask(func(context.Context) { sm.expireDebounce(key, state, version) })
 	})
 	logging.Debugf("stream debounce scheduled hash=%s file_index=%d delay=%s", hash, fileIndex, DebounceDelay)
 }
 
+func (sm *StreamManager) expireDebounce(key FileKey, expected *StreamState, version uint64) {
+	sm.engine.admissionMu.Lock()
+	defer sm.engine.admissionMu.Unlock()
+	sm.mu.Lock()
+	state := sm.states[key]
+	valid := !sm.closed && state != nil && state == expected && state.TimerVersion == version && state.ActiveStreams == 0 && state.ActivePreloads == 0
+	sm.mu.Unlock()
+	if valid {
+		sm.clearStreamOverlayLocked(key.Hash, key.Index)
+	}
+}
+
 func (sm *StreamManager) refreshStreamOverlay(hash string, fileIndex int) error {
-	mt, file, err := sm.streamFile(hash, fileIndex)
+	sm.engine.admissionMu.Lock()
+	defer sm.engine.admissionMu.Unlock()
+	mt, _, err := sm.streamFile(hash, fileIndex)
 	if err != nil {
 		return err
 	}
+	return sm.refreshTorrentOverlayLocked(mt)
+}
 
-	key := FileKey{Hash: hash, Index: fileIndex}
-	sm.mu.Lock()
-	state, ok := sm.states[key]
-	if !ok || state == nil {
-		sm.mu.Unlock()
+// admissionMu protects the entire snapshot/apply/publish sequence, including
+// shared boundary pieces belonging to sessions on different files.
+func (sm *StreamManager) refreshTorrentOverlayLocked(mt *ManagedTorrent) error {
+	if !sm.engine.currentTorrent(mt) {
+		return context.Canceled
+	}
+	if mt.t.Info() == nil {
 		return nil
 	}
-	sessions := make([]StreamSession, 0, len(state.Sessions))
-	for _, session := range state.Sessions {
-		sessions = append(sessions, session)
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	if sm.closed {
+		return context.Canceled
 	}
-	oldRanges := cloneStreamPieceRanges(state.AppliedRanges)
-	sm.mu.Unlock()
-
-	var newRanges []streamPieceRange
-	fullyDownloaded := file.BytesCompleted() == file.Length()
-	if !fullyDownloaded {
-		for _, session := range sessions {
-			if session.AccountingOnly {
-				continue
+	mt.mu.Lock()
+	inactive := mt.initializing || mt.rechecking || mt.downloadBlock != "" || (mt.state != models.StateDownloading && mt.state != models.StateQueued && mt.state != models.StateSeeding)
+	mt.mu.Unlock()
+	var oldRanges, newRanges []streamPieceRange
+	files := mt.t.Files()
+	for key, state := range sm.states {
+		if key.Hash != mt.hash || state.Torrent != mt {
+			continue
+		}
+		oldRanges = append(oldRanges, state.AppliedRanges...)
+		var ranges []streamPieceRange
+		if !inactive && key.Index >= 0 && key.Index < len(files) {
+			file := files[key.Index]
+			state.FullyDownloaded = file.BytesCompleted() == file.Length()
+			if !state.FullyDownloaded {
+				if len(state.Sessions) == 0 && state.DebounceTimer != nil {
+					ranges = cloneStreamPieceRanges(state.AppliedRanges)
+				}
+				for _, session := range state.Sessions {
+					if !session.AccountingOnly {
+						ranges = append(ranges, sm.computeStreamPieceRanges(file, session.Options)...)
+					}
+				}
 			}
-			newRanges = append(newRanges, sm.computeStreamPieceRanges(file, session.Options)...)
 		}
-		newRanges = mergeStreamPieceRanges(newRanges)
+		state.AppliedRanges = mergeStreamPieceRanges(ranges)
+		newRanges = append(newRanges, state.AppliedRanges...)
 	}
-
-	if fullyDownloaded {
-		logging.Debugf("stream QoS skipped for completed file hash=%s file_index=%d", hash, fileIndex)
-	}
-
-	if len(oldRanges) == 0 && len(newRanges) == 0 {
-		sm.mu.Lock()
-		if st, ok := sm.states[key]; ok && st != nil {
-			st.AppliedRanges = nil
-			st.FullyDownloaded = fullyDownloaded
+	oldRanges = mergeStreamPieceRanges(oldRanges)
+	newRanges = mergeStreamPieceRanges(newRanges)
+	for _, r := range oldRanges {
+		for p := r.Begin; p < r.End; p++ {
+			if !streamRangesContainPiece(newRanges, p) {
+				mt.t.Piece(p).SetPriority(torrent.PiecePriorityNone)
+			}
 		}
-		sm.mu.Unlock()
-		logging.Debugf("stream QoS refreshed (no ranges) hash=%s file_index=%d sessions=%d", hash, fileIndex, len(sessions))
-		return nil
 	}
-
-	if err := sm.applyOverlayDiff(mt, key, oldRanges, newRanges); err != nil {
-		return err
+	for _, r := range newRanges {
+		for p := r.Begin; p < r.End; p++ {
+			mt.t.Piece(p).SetPriority(torrent.PiecePriorityHigh)
+		}
 	}
-
-	sm.mu.Lock()
-	if st, ok := sm.states[key]; ok && st != nil {
-		st.AppliedRanges = cloneStreamPieceRanges(newRanges)
-		st.FullyDownloaded = fullyDownloaded
-	}
-	sm.mu.Unlock()
-
-	logging.Debugf("stream QoS refreshed hash=%s file_index=%d sessions=%d ranges=%v", hash, fileIndex, len(sessions), newRanges)
 	return nil
 }
 
 func (sm *StreamManager) clearStreamOverlay(hash string, fileIndex int) {
+	sm.engine.admissionMu.Lock()
+	defer sm.engine.admissionMu.Unlock()
+	sm.clearStreamOverlayLocked(hash, fileIndex)
+}
+
+func (sm *StreamManager) clearStreamOverlayLocked(hash string, fileIndex int) {
 	key := FileKey{Hash: hash, Index: fileIndex}
 	sm.mu.Lock()
 	state, ok := sm.states[key]
-	if !ok || state == nil {
+	if !ok || state == nil || state.ActiveStreams != 0 || state.ActivePreloads != 0 {
 		sm.mu.Unlock()
 		return
 	}
 	oldRanges := cloneStreamPieceRanges(state.AppliedRanges)
+	if state.DebounceTimer != nil {
+		state.DebounceTimer.Stop()
+	}
 	delete(sm.states, key)
 	sm.mu.Unlock()
 
@@ -532,6 +649,9 @@ func (sm *StreamManager) clearStreamOverlay(hash string, fileIndex int) {
 	mt, _, err := sm.streamFile(hash, fileIndex)
 	if err != nil {
 		logging.Warnf("failed to clear stream QoS hash=%s file_index=%d: %v", hash, fileIndex, err)
+		return
+	}
+	if state.Torrent != mt {
 		return
 	}
 

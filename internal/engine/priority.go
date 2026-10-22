@@ -26,7 +26,12 @@ func (e *Engine) applyFilePrioritiesAndDownload(mt *ManagedTorrent) error {
 	}
 
 	mt.mu.Lock()
-	defer mt.mu.Unlock()
+	defer func() {
+		mt.mu.Unlock()
+		if e.streamManager != nil {
+			_ = e.streamManager.refreshTorrentOverlayLocked(mt)
+		}
+	}()
 	if mt.initializing {
 		return fmt.Errorf("torrent initialization is not complete")
 	}
@@ -48,7 +53,7 @@ func (e *Engine) applyFilePrioritiesAndDownload(mt *ManagedTorrent) error {
 		prio := mt.filePriorities[i]
 		// Queued torrents may serve a reader/stream overlay without turning
 		// their entire base selection into another background download.
-		if mt.state == models.StateQueued {
+		if mt.state != models.StateDownloading && mt.state != models.StateSeeding || mt.downloadBlock != "" || mt.rechecking {
 			f.SetPriority(torrent.PiecePriorityNone)
 			continue
 		}
@@ -58,6 +63,11 @@ func (e *Engine) applyFilePrioritiesAndDownload(mt *ManagedTorrent) error {
 }
 
 func (e *Engine) SetFilePriority(hash string, fileIndex int, priority models.FilePriority) error {
+	e.admissionMu.Lock()
+	defer e.admissionMu.Unlock()
+	if e.ctx.Err() != nil {
+		return e.ctx.Err()
+	}
 	if fileIndex < 0 || (priority != models.PriorityNormal && priority != models.PriorityHigh && priority != models.PriorityNone) {
 		return fmt.Errorf("invalid file priority")
 	}
@@ -75,13 +85,13 @@ func (e *Engine) SetFilePriority(hash string, fileIndex int, priority models.Fil
 		files := mt.t.Files()
 		if fileIndex >= 0 && fileIndex < len(files) {
 			mt.filePriorities[fileIndex] = priority
-			files[fileIndex].SetPriority(mapToPiecePriority(priority))
 			logging.Debugf("set file priority hash=%s index=%d priority=%d", hash, fileIndex, priority)
 		} else {
 			mt.mu.Unlock()
 			return fmt.Errorf("file index out of bounds")
 		}
 		mt.mu.Unlock()
+		return e.applyFilePrioritiesAndDownload(mt)
 	} else {
 		mt.mu.Lock()
 		mt.filePriorities[fileIndex] = priority
@@ -92,6 +102,14 @@ func (e *Engine) SetFilePriority(hash string, fileIndex int, priority models.Fil
 }
 
 func (e *Engine) SetTorrentFilesPriority(hash string, priority models.FilePriority) error {
+	e.admissionMu.Lock()
+	defer e.admissionMu.Unlock()
+	if e.ctx.Err() != nil {
+		return e.ctx.Err()
+	}
+	if priority != models.PriorityNormal && priority != models.PriorityHigh && priority != models.PriorityNone {
+		return fmt.Errorf("invalid file priority")
+	}
 	e.mu.RLock()
 	mt, ok := e.managedTorrents[hash]
 	e.mu.RUnlock()
@@ -106,25 +124,42 @@ func (e *Engine) SetTorrentFilesPriority(hash string, priority models.FilePriori
 		for i := range mt.t.Files() {
 			mt.filePriorities[i] = priority
 		}
-	} else {
-		// If metadata is not ready, we can't easily iterate file indexes.
-		// However, we can clear the map, and when metadata is ready we'll handle it?
-		// Better yet, maybe we shouldn't allow SetTorrentFilesPriority before metadata is ready.
-		// But in RestoreTorrents, we just use SetFilePriority.
 	}
 	mt.mu.Unlock()
 
 	if mt.t.Info() != nil {
-		mt.mu.Lock()
-		for i, f := range mt.t.Files() {
-			mt.filePriorities[i] = priority
-			f.SetPriority(mapToPiecePriority(priority))
-		}
-		mt.mu.Unlock()
 		logging.Debugf("set torrent files priority hash=%s priority=%d", hash, priority)
-	} else {
-		return fmt.Errorf("metadata not ready")
+		return e.applyFilePrioritiesAndDownload(mt)
 	}
+	return fmt.Errorf("metadata not ready")
+}
 
+// SetFilePriorities applies a committed bulk selection as one runtime command,
+// including known file indices whose metadata is still pending.
+func (e *Engine) SetFilePriorities(hash string, priorities map[int]models.FilePriority) error {
+	e.admissionMu.Lock()
+	defer e.admissionMu.Unlock()
+	if e.ctx.Err() != nil {
+		return e.ctx.Err()
+	}
+	e.mu.RLock()
+	mt := e.managedTorrents[hash]
+	e.mu.RUnlock()
+	if mt == nil {
+		return TorrentNotFoundError{Hash: hash}
+	}
+	for index, priority := range priorities {
+		if index < 0 || (mt.t.Info() != nil && index >= len(mt.t.Files())) || (priority != models.PriorityNormal && priority != models.PriorityHigh && priority != models.PriorityNone) {
+			return fmt.Errorf("invalid file priority")
+		}
+	}
+	mt.mu.Lock()
+	for index, priority := range priorities {
+		mt.filePriorities[index] = priority
+	}
+	mt.mu.Unlock()
+	if mt.t.Info() != nil {
+		return e.applyFilePrioritiesAndDownload(mt)
+	}
 	return nil
 }

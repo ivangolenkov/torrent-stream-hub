@@ -40,7 +40,7 @@ func TestConcurrencyPauseRejectsLatePriorityApply(t *testing.T) {
 	}
 	// These are delayed operations created before Pause. None may restore High.
 	var wg sync.WaitGroup
-	for _, fn := range []func(){func() { _ = sm.refreshStreamOverlay(mt.hash, 0) }, func() { e.refreshPeerDiscovery(mt, "late", true) }, e.manageResources, func() { _ = e.SetFilePriority(mt.hash, 0, models.PriorityHigh) }, func() { e.finishRecheck(mt) }} {
+	for _, fn := range []func(){func() { _ = sm.refreshStreamOverlay(mt.hash, 0) }, func() { e.refreshPeerDiscovery(mt, "late", true) }, e.manageResources, func() { _ = e.SetFilePriority(mt.hash, 0, models.PriorityHigh) }, func() { _ = e.finishVerification(mt, &verificationAttempt{}, nil) }} {
 		wg.Add(1)
 		go func(fn func()) { defer wg.Done(); fn() }(fn)
 	}
@@ -107,7 +107,7 @@ func TestConcurrencyStaleDebounceAndReleaseAfterReadd(t *testing.T) {
 	if currentID == newID {
 		t.Fatal("session token reused across generations")
 	}
-	e.finishRecheck(mt)
+	_ = e.finishVerification(mt, &verificationAttempt{}, nil)
 	sm.removeSession(mt.hash, 0, newID, false)
 	sm.rollbackSession(mt.hash, 0, newID)
 	sm.expireDebounce(key, old, version)

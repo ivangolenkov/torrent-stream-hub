@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"torrent-stream-hub/internal/logging"
-	"torrent-stream-hub/internal/models"
 )
 
 // resourceMonitor checks disk space and manages active downloads limit.
@@ -29,13 +28,15 @@ func (e *Engine) resourceMonitor(ctx context.Context) {
 }
 
 func (e *Engine) manageResources() {
-	e.admissionMu.Lock()
-	defer e.admissionMu.Unlock()
-	if e.ctx != nil && e.ctx.Err() != nil {
+	if !e.beginWork() {
 		return
 	}
+	defer e.wg.Done()
+	e.admissionMu.Lock()
 	minFreeBytes := e.minimumDiskBytes()
-
+	e.admissionMu.Unlock()
+	// Global filesystem health is diagnostic. Per-runtime admission does its own
+	// probe under a fenced preparation ticket, never while holding admissionMu.
 	freeSpace, err := GetFreeSpace(e.cfg.DownloadDir)
 	if err != nil {
 		logging.Warnf("failed to check free disk space dir=%s: %v", e.cfg.DownloadDir, err)
@@ -81,94 +82,155 @@ func (e *Engine) manageResources() {
 		torrents = append(torrents, entry.mt)
 	}
 
-	activeCount := 0
-
 	for _, mt := range torrents {
 		if mt == nil || mt.t == nil {
 			continue
 		}
+		// Refresh may stat storage; it cannot own the global admission lock.
 		mt.t.RefreshStorageCompletion()
+		e.admissionMu.Lock()
+		if !e.currentTorrent(mt) {
+			e.admissionMu.Unlock()
+			continue
+		}
+		// Coalesce health probes per attachment. A blocked probe for A must not
+		// make every other scheduler pass wait for A before it can process B.
+		if mt.healthProbe != nil {
+			e.admissionMu.Unlock()
+			continue
+		}
+		mt.mu.Lock()
+		probeTicket := &payloadPreparation{epoch: mt.policyEpoch, fence: mt.runtimeFence}
+		mt.mu.Unlock()
+		mt.healthProbe = probeTicket
+		probe, minimum := e.diskProbe, e.minimumDiskBytes()
+		e.admissionMu.Unlock()
+		probeErr := e.diskErrorWithProbe(mt.hash, probe, minimum)
+		e.admissionMu.Lock()
+		mt.mu.Lock()
+		valid := mt.policyEpoch == probeTicket.epoch && mt.runtimeFence == probeTicket.fence
+		mt.mu.Unlock()
+		valid = valid && e.currentTorrent(mt) && mt.healthProbe == probeTicket
+		if mt.healthProbe == probeTicket {
+			mt.healthProbe = nil
+		}
+		if !valid {
+			e.admissionMu.Unlock()
+			continue
+		}
+		if probeErr != nil {
+			_ = e.blockDownloadLocked(mt, probeErr.Error())
+			e.admissionMu.Unlock()
+			continue
+		}
 		e.reconcileSelectionLocked(mt)
 		mt.mu.Lock()
-		initializing := mt.initializing || mt.rechecking || mt.verificationUncertain
-		reserved := mt.state == models.StateDownloading
+		reserved := mt.policy.slot
 		mt.mu.Unlock()
-		if initializing {
-			if reserved {
-				activeCount++
-			}
-			continue
-		}
-		if probeErr := e.diskError(mt.hash); probeErr != nil {
-			_ = e.blockDownloadLocked(mt, probeErr.Error())
-			continue
-		}
-
-		mt.mu.Lock()
-		if mt.downloadBlock != "" || mt.state == models.StateDiskFull {
-			reason := mt.downloadBlock
+		if !reserved {
+			// Recount actual reservations after every unlocked preparation; a
+			// concurrent scheduler pass may have reserved capacity in the meantime.
+			available := e.slotCountLocked() < e.cfg.MaxActiveDownloads && e.schedulerHeadLocked() == mt
+			mt.mu.Lock()
+			_, grantErr := mt.applyStateEventLocked(stateEvent{kind: stateSlotRequested, slotAvailable: available})
 			mt.mu.Unlock()
-			if reason != "" {
-				_ = e.blockDownloadLocked(mt, reason)
+			if grantErr != nil {
+				e.admissionMu.Unlock()
+				continue
 			}
-			continue
-		}
-
-		if mt.state == models.StateDownloading {
-			if info := mt.t.Info(); info != nil {
-				if !mt.downloadAllStarted {
-					mt.downloadAllStarted = true
-					mt.mu.Unlock()
-					admitErr := e.admitPayloadLocked(mt)
-					logging.Debugf("download all started hash=%s files=%d", mt.t.InfoHash().HexString(), len(mt.t.Files()))
-					mt.mu.Lock()
-					if admitErr != nil {
-						mt.downloadAllStarted = false
-					}
-				}
-			} else if !mt.metadataWaitLogged {
-				logging.Debugf("download waiting for metadata hash=%s", mt.t.InfoHash().HexString())
-				mt.metadataWaitLogged = true
-			}
-			if mt.state == models.StateDownloading {
-				activeCount++
-			}
-		}
-		mt.mu.Unlock()
-	}
-
-	for _, mt := range torrents {
-		if mt == nil || mt.t == nil {
-			continue
 		}
 		mt.mu.Lock()
-		if activeCount >= e.cfg.MaxActiveDownloads {
-			mt.mu.Unlock()
-			break
+		token := mt.slotToken
+		prepare := mt.policy.slot && mt.policy.payloadEligible() && !mt.downloadAllStarted && mt.preparation == nil && mt.t.Info() != nil
+		if prepare {
+			mt.downloadAllStarted = true
 		}
-		if mt.state == models.StateQueued && !mt.selectionComplete && !mt.initializing && !mt.rechecking && mt.downloadBlock == "" {
-			mt.setStateLocked(models.StateDownloading, models.ErrNone, "resource slot available")
-			if mt.t.Info() != nil {
-				mt.downloadAllStarted = true
-				mt.mu.Unlock()
-				admitErr := e.admitPayloadLocked(mt)
-				logging.Debugf("download all started hash=%s files=%d", mt.t.InfoHash().HexString(), len(mt.t.Files()))
+		mt.mu.Unlock()
+		if prepare {
+			if admitErr := e.admitPayloadLocked(mt); admitErr != nil {
 				mt.mu.Lock()
-				if admitErr != nil {
+				owned := mt.policy.slot && mt.slotToken == token
+				if owned {
 					mt.downloadAllStarted = false
 				}
-			} else if !mt.metadataWaitLogged {
-				logging.Debugf("torrent promoted to downloading while metadata is pending hash=%s", mt.t.InfoHash().HexString())
-				mt.metadataWaitLogged = true
+				mt.mu.Unlock()
+				if owned {
+					e.releaseFailedSlotLocked(mt)
+				}
 			}
-			if mt.state == models.StateDownloading {
-				activeCount++
-			}
+		}
+		e.admissionMu.Unlock()
+	}
+	e.admissionMu.Lock()
+	activeCount := e.slotCountLocked()
+	e.admissionMu.Unlock()
+	e.logResourceSummary(totalTorrents, activeCount, diskFull, freeSpace, err)
+}
+
+// admissionMu is held. Pending preparations count as reserved, not free slots.
+func (e *Engine) slotCountLocked() int {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	n := 0
+	for _, mt := range e.managedTorrents {
+		mt.mu.Lock()
+		if mt.policy.slot {
+			n++
 		}
 		mt.mu.Unlock()
 	}
+	return n
+}
 
-	e.logResourceSummary(totalTorrents, activeCount, diskFull, freeSpace, err)
+// Re-evaluate FIFO under reservation serialization, not the earlier sort snapshot.
+// A concurrent Add/priority/queue update cannot grant a later candidate merely
+// because an older pass captured a now-obsolete ordering.
+func (e *Engine) schedulerHeadLocked() *ManagedTorrent {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	var first *ManagedTorrent
+	var position int64
+	var added time.Time
+	for _, mt := range e.managedTorrents {
+		mt.mu.Lock()
+		eligible := mt.policy.payloadEligible() && !mt.policy.slot && !mt.policy.selectedComplete && !mt.policy.payloadComplete
+		p, a := mt.queuePosition, mt.addedAt
+		mt.mu.Unlock()
+		if !eligible {
+			continue
+		}
+		before := first == nil
+		if first != nil {
+			switch {
+			case p > 0 && position > 0 && p != position:
+				before = p < position
+			case (p > 0) != (position > 0):
+				before = p > 0
+			case !a.Equal(added):
+				before = a.Before(added)
+			default:
+				before = mt.hash < first.hash
+			}
+		}
+		if before {
+			first, position, added = mt, p, a
+		}
+	}
+	return first
+}
+
+// An admission error may already have installed Error/DiskFull. Only the still
+// owned Downloading slot can be released; never erase the actual failure phase.
+func (e *Engine) releaseFailedSlotLocked(mt *ManagedTorrent) {
+	if !e.currentTorrent(mt) {
+		return
+	}
+	mt.mu.Lock()
+	d, err := mt.applyStateEventLocked(stateEvent{kind: stateSlotReleased})
+	mt.mu.Unlock()
+	if err == nil {
+		e.applyBackgroundReleaseLocked(mt, d)
+	}
 }
 
 func (e *Engine) logResourceSummary(totalTorrents, activeCount int, diskFull bool, freeSpace uint64, freeSpaceErr error) {

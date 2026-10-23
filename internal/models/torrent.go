@@ -1,12 +1,13 @@
 package models
 
-// TorrentState represents the strictly defined finite state machine of a torrent
+// TorrentState is the compatible operational phase projection. Streaming and
+// verification activity are independent runtime axes, not mutually exclusive phases.
 type TorrentState string
 
 const (
 	StateQueued       TorrentState = "Queued"
 	StateDownloading  TorrentState = "Downloading"
-	StateStreaming    TorrentState = "Streaming"
+	StateStreaming    TorrentState = "Streaming" // Legacy persisted/API alias; runtime streaming is session activity.
 	StateSeeding      TorrentState = "Seeding"
 	StatePaused       TorrentState = "Paused"
 	StateError        TorrentState = "Error"
@@ -18,12 +19,18 @@ const (
 type ErrorReason string
 
 const (
-	ErrInvalidTorrent     ErrorReason = "Invalid torrent"
-	ErrTrackerUnreachable ErrorReason = "Tracker unreachable"
-	ErrNoPeers            ErrorReason = "No peers"
-	ErrDiskFull           ErrorReason = "Disk full"
-	ErrMissingFiles       ErrorReason = "Missing files"
-	ErrNone               ErrorReason = ""
+	// Legacy persisted/API diagnosis strings. New runtime selection failures use
+	// ErrInvalidSelection; peer/tracker diagnostics do not imply invalid payload.
+	ErrInvalidTorrent      ErrorReason = "Invalid torrent"
+	ErrTrackerUnreachable  ErrorReason = "Tracker unreachable"
+	ErrNoPeers             ErrorReason = "No peers"
+	ErrDiskFull            ErrorReason = "Disk full" // Legacy fixed reason; live disk latches carry a specific reason.
+	ErrMissingFiles        ErrorReason = "Missing files"
+	ErrVerificationFailed  ErrorReason = "Verification failed"
+	ErrActivationBlocked   ErrorReason = "Activation blocked"
+	ErrMetadataPersistence ErrorReason = "metadata persistence failed"
+	ErrInvalidSelection    ErrorReason = "Invalid file selection"
+	ErrNone                ErrorReason = ""
 )
 
 // FilePriority dictates the download priority for specific files in a torrent
@@ -41,21 +48,22 @@ func ValidFilePriority(priority FilePriority) bool {
 
 // Torrent defines the core properties and state of a single torrent
 type Torrent struct {
-	DeletionMode  string  `json:"deletion_mode,omitempty"`
-	DeletionError string  `json:"deletion_error,omitempty"`
-	DownloadBlock string  `json:"download_block,omitempty"`
-	StorageState  string  `json:"storage_state,omitempty"`
-	StorageError  string  `json:"storage_error,omitempty"`
-	IsTemporary   bool    `json:"is_temporary"`
-	Hash          string  `json:"hash"`
-	Name          string  `json:"name"`
-	Title         string  `json:"title,omitempty"`
-	Data          string  `json:"data,omitempty"`
-	Poster        string  `json:"poster,omitempty"`
-	Category      string  `json:"category,omitempty"`
-	Size          int64   `json:"size"`
-	Downloaded    int64   `json:"downloaded"`
-	Progress      float64 `json:"progress"`
+	Control       *TorrentControl `json:"control,omitempty"`
+	DeletionMode  string          `json:"deletion_mode,omitempty"`
+	DeletionError string          `json:"deletion_error,omitempty"`
+	DownloadBlock string          `json:"download_block,omitempty"`
+	StorageState  string          `json:"storage_state,omitempty"`
+	StorageError  string          `json:"storage_error,omitempty"`
+	IsTemporary   bool            `json:"is_temporary"`
+	Hash          string          `json:"hash"`
+	Name          string          `json:"name"`
+	Title         string          `json:"title,omitempty"`
+	Data          string          `json:"data,omitempty"`
+	Poster        string          `json:"poster,omitempty"`
+	Category      string          `json:"category,omitempty"`
+	Size          int64           `json:"size"`
+	Downloaded    int64           `json:"downloaded"`
+	Progress      float64         `json:"progress"`
 	// Persisted observations never grant file readiness. LegacyDownloaded is
 	// the pre-upgrade observation, NOT a cumulative network transfer counter.
 	ProgressSource     string            `json:"progress_source"`
@@ -65,6 +73,7 @@ type Torrent struct {
 	QueuePosition      int64             `json:"-"`
 	SelectionComplete  bool              `json:"selection_complete"`
 	Recheck            *RecheckOperation `json:"recheck,omitempty"`
+	Activity           TorrentActivity   `json:"activity"`
 	SnapshotAt         int64             `json:"snapshot_at_ns,omitempty"`
 	State              TorrentState      `json:"state"`
 	Error              ErrorReason       `json:"error,omitempty"`

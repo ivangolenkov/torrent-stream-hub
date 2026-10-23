@@ -9,7 +9,7 @@ import (
 func TestSyncWorkerStopsBeforeNextTick(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
-	worker := NewSyncWorker(nil, nil)
+	worker := NewSyncWorker(nil)
 	go func() { defer close(done); worker.StartContext(ctx) }()
 	cancel()
 	select {

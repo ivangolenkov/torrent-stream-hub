@@ -11,7 +11,7 @@ import (
 )
 
 // UseFiles installs the shared destination. Close it after all producers stop.
-func UseFiles(files *Files) func() {
+func UseFiles(files io.Writer) func() {
 	oldSlog := slog.Default()
 	oldOutput, oldFlags, oldPrefix := log.Writer(), log.Flags(), log.Prefix()
 	defaultLogger.mu.Lock()

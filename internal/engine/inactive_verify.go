@@ -7,7 +7,7 @@ import (
 	"torrent-stream-hub/internal/models"
 )
 
-// Used under application Lifecycle: no Resume/Delete or second inactive open
+// Used under application record/root handles: no Resume/Delete or second inactive open
 // may race the local verification. Engine task accounting protects storage.
 func (e *Engine) VerifyInactive(ctx context.Context, hash string) error {
 	if !e.beginWork() {
@@ -23,27 +23,31 @@ func (e *Engine) VerifyInactive(ctx context.Context, hash string) error {
 		return TorrentNotFoundError{Hash: hash}
 	}
 	mt.mu.Lock()
-	if mt.state != models.StatePaused || mt.rechecking {
+	if mt.policy.run != models.RunPaused || mt.policy.checking || mt.policy.terminal {
 		mt.mu.Unlock()
 		e.admissionMu.Unlock()
 		return fmt.Errorf("inactive verification conflicts with current operation")
 	}
-	mt.rechecking = true
-	mt.verificationUncertain = true
+	if _, err := mt.applyVerificationEventLocked(verificationBegin); err != nil {
+		mt.mu.Unlock()
+		e.admissionMu.Unlock()
+		return err
+	}
+	attempt := &verificationAttempt{}
+	mt.verificationAttempt = attempt
 	mt.mu.Unlock()
 	mt.t.DisallowDataDownload()
 	mt.t.DisallowDataUpload()
+	if err := e.persistVerificationLocked(mt, true, "Verification incomplete; successful local check required"); err != nil {
+		e.completeVerificationLocked(mt, attempt, err)
+		e.admissionMu.Unlock()
+		return err
+	}
 	e.admissionMu.Unlock()
 	verifyCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	stop := context.AfterFunc(mt.ctx, cancel)
 	defer stop()
 	err := mt.t.VerifyDataContext(verifyCtx)
-	e.admissionMu.Lock()
-	mt.mu.Lock()
-	mt.rechecking = false
-	mt.verificationUncertain = err != nil
-	mt.mu.Unlock()
-	e.admissionMu.Unlock()
-	return err
+	return e.finishVerification(mt, attempt, err)
 }

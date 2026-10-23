@@ -82,7 +82,7 @@ func TestPausedPrioritiesAndDiskLatchSurviveReopen(t *testing.T) {
 	if raw == nil || raw.DataDownloadAllowed() {
 		t.Fatal("paused startup admitted payload")
 	}
-	NewSyncWorker(uc.engine, uc.repo).syncOnce()
+	NewSyncWorker(uc).syncOnce()
 	saved, err := uc.repo.GetTorrent(tor.Hash)
 	if err != nil {
 		t.Fatal(err)
@@ -169,7 +169,7 @@ func TestDBOnlyMetadataPendingResumeAndSyncPreserveIntent(t *testing.T) {
 	if err := uc.SetFilePriority(hash, 1, models.PriorityNone); err != nil {
 		t.Fatal(err)
 	}
-	NewSyncWorker(uc.engine, repo).syncOnce()
+	NewSyncWorker(uc).syncOnce()
 	saved, err := repo.GetTorrent(hash)
 	if err != nil {
 		t.Fatal(err)

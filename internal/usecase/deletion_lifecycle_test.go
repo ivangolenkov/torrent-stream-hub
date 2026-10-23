@@ -177,15 +177,15 @@ func TestDeletionPartialUnlinkAndStoppedEngineFailure(t *testing.T) {
 	if _, err := os.Stat(full + ".part"); !os.IsNotExist(err) {
 		t.Fatal("retry did not finish", err)
 	}
-	// Engine refusal after intent commit must also preserve pending state.
+	// Shutdown now closes application admission before any new intent commit.
 	tor, full = completedSafetyFile(t, uc, "stopped-delete", true)
 	uc.engine.Close()
 	if err := uc.Delete(tor.Hash, true); err == nil {
 		t.Fatal("stopped engine error ignored")
 	}
 	saved, err = repo.GetTorrent(tor.Hash)
-	if err != nil || saved.DeletionMode != "payload" {
-		t.Fatal("failed Drop lost intent", err)
+	if err != nil || saved.DeletionMode != "" {
+		t.Fatal("shutdown admitted a new deletion intent", err)
 	}
 	if _, err := os.Stat(full); err != nil {
 		t.Fatal("unlinked after engine stop failure", err)

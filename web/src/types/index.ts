@@ -14,6 +14,10 @@ export type ErrorReason =
   | 'No peers'
   | 'Disk full'
   | 'Missing files'
+	| 'Verification failed'
+	| 'Activation blocked'
+	| 'metadata persistence failed'
+	| 'Invalid file selection'
   | '';
 
 export interface File {
@@ -41,6 +45,22 @@ export interface PeerSummary {
 }
 
 export interface Torrent {
+	control?: {
+		record_id: string;
+		desired_run: 'paused' | 'enabled';
+		desired_revision: string;
+		applied_revision: string;
+		runtime_attachment?: string;
+		reconcile_pending: boolean;
+		reconcile_reason?: string;
+		apply_failure?: {
+			record_id: string;
+			revision: string;
+			code: 'intent_commit_failed' | 'runtime_stage_failed' | 'runtime_apply_failed' | 'runtime_bind_failed';
+			retry: 'explicit_pause_or_resume';
+		};
+		activation_blocks: { kind: 'verification' | 'missing_files' | 'legacy_error' | 'metadata_persistence' | 'invalid_selection'; reason: string }[];
+	};
 	download_block?: string;
 	deletion_mode?: string;
 	deletion_error?: string;
@@ -63,6 +83,7 @@ export interface Torrent {
 	selection_complete?: boolean;
 	snapshot_at_ns?: number;
 	recheck?: { id: number; status: 'pending' | 'running' | 'succeeded' | 'failed' | 'cancelled'; error?: string };
+	activity?: { streaming: boolean; streams: number; direct_readers: number; preloads: number; debouncing: boolean; verifying: boolean };
   state: TorrentState;
   error?: ErrorReason;
   files?: File[];

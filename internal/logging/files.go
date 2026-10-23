@@ -6,8 +6,8 @@ import (
 	"io"
 	"os"
 	"sort"
-	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -21,26 +21,43 @@ type FileOptions struct {
 	Errors          io.Writer
 	Now             func() time.Time
 	CleanupInterval time.Duration
+	MaxFileBytes    int64
+	MaxTotalBytes   int64
 }
 
 // Files owns the writer and retention worker. Readers hold independent descriptors;
 // their names are pinned against retention until the snapshot is closed.
 type Files struct {
-	mu        sync.Mutex
-	opts      FileOptions
-	root      *os.Root
-	file      io.WriteCloser
-	active    string
-	refs      map[string]int
-	retryAt   time.Time
-	reportAt  time.Time
-	stop      chan struct{}
-	done      chan struct{}
-	closed    bool
-	closeOnce sync.Once
+	mu            sync.Mutex
+	opts          FileOptions
+	root          *os.Root
+	file          io.WriteCloser
+	active        string
+	refs          map[string]int
+	retryAt       time.Time
+	reportAt      time.Time
+	stop          chan struct{}
+	done          chan struct{}
+	closed        bool
+	closeOnce     sync.Once
+	activeSize    int64
+	storageErrors atomic.Uint64
+	lostRecords   atomic.Uint64
+	lostBytes     atomic.Uint64
+	quotaPaused   atomic.Bool
+	quotaRetryAt  time.Time
 }
 
 func NewFiles(opts FileOptions) (*Files, error) {
+	if opts.MaxFileBytes == 0 {
+		opts.MaxFileBytes = 16 << 20
+	}
+	if opts.MaxTotalBytes == 0 {
+		opts.MaxTotalBytes = 128 << 20
+	}
+	if opts.MaxFileBytes < 1 || opts.MaxTotalBytes < opts.MaxFileBytes {
+		return nil, errors.New("invalid log byte limits")
+	}
 	if opts.RetentionDays < 0 || opts.RetentionDays > 36500 {
 		return nil, errors.New("log retention days must be between 0 and 36500")
 	}
@@ -84,6 +101,7 @@ func NewFiles(opts FileOptions) (*Files, error) {
 }
 
 func (f *Files) reportLocked(err error) {
+	f.storageErrors.Add(1)
 	now := f.opts.Now()
 	if now.Before(f.reportAt) {
 		return
@@ -108,12 +126,8 @@ func (f *Files) rootLocked() error {
 }
 
 func logDate(name string) (string, bool) {
-	if len(name) != len("hub-2006-01-02.log") || !strings.HasPrefix(name, "hub-") || !strings.HasSuffix(name, ".log") {
-		return "", false
-	}
-	date := name[4:14]
-	t, err := time.Parse(dateLayout, date)
-	return date, err == nil && t.Format(dateLayout) == date
+	date, _, ok := logSegment(name)
+	return date, ok
 }
 
 func (f *Files) namesLocked() ([]string, error) {
@@ -142,7 +156,14 @@ func (f *Files) namesLocked() ([]string, error) {
 			names = append(names, entry.Name())
 		}
 	}
-	sort.Strings(names)
+	sort.Slice(names, func(i, j int) bool {
+		a, ai, _ := logSegment(names[i])
+		b, bi, _ := logSegment(names[j])
+		if a != b {
+			return a < b
+		}
+		return ai < bi
+	})
 	return names, nil
 }
 
@@ -165,9 +186,20 @@ func (f *Files) cleanupLocked() {
 }
 
 func (f *Files) Write(p []byte) (int, error) {
+	return f.writeAt(p, f.opts.Now())
+}
+
+func (f *Files) writeAt(p []byte, at time.Time) (int, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	originalLen := len(p)
+	written := false
+	defer func() {
+		if !written {
+			f.lostRecords.Add(1)
+			f.lostBytes.Add(uint64(originalLen))
+		}
+	}()
 	// Sanitize every source, including standard log and library adapters.
 	p = []byte(SanitizeText(string(p)))
 	_, consoleErr := f.opts.Console.Write(p)
@@ -175,8 +207,9 @@ func (f *Files) Write(p []byte) (int, error) {
 		return originalLen, consoleErr
 	}
 	now := f.opts.Now()
-	name := "hub-" + now.Format(dateLayout) + ".log"
-	if f.active != name && f.file != nil {
+	date := at.Format(dateLayout)
+	activeDate, _ := logDate(f.active)
+	if f.file != nil && (activeDate != date || int64(len(p)) > f.opts.MaxFileBytes-f.activeSize) {
 		if err := f.file.Close(); err != nil {
 			f.reportLocked(err)
 		}
@@ -185,6 +218,10 @@ func (f *Files) Write(p []byte) (int, error) {
 	}
 	if f.file == nil && !now.Before(f.retryAt) {
 		err := f.rootLocked()
+		name := ""
+		if err == nil {
+			name, err = f.appendTargetLocked(date, int64(len(p)))
+		}
 		if err == nil {
 			info, statErr := f.root.Lstat(name)
 			if statErr == nil && !info.Mode().IsRegular() {
@@ -205,9 +242,21 @@ func (f *Files) Write(p []byte) (int, error) {
 			f.reportLocked(err)
 		} else {
 			f.active = name
+			info, statErr := f.root.Stat(name)
+			if statErr != nil {
+				f.reportLocked(statErr)
+				_ = f.file.Close()
+				f.file = nil
+				f.active = ""
+				return originalLen, consoleErr
+			}
+			f.activeSize = info.Size()
 		}
 	}
 	if f.file != nil {
+		if !f.reserveBytesLocked(int64(len(p))) {
+			return originalLen, consoleErr
+		}
 		if n, err := f.file.Write(p); err != nil || n != len(p) {
 			if err == nil {
 				err = io.ErrShortWrite
@@ -216,6 +265,9 @@ func (f *Files) Write(p []byte) (int, error) {
 			_ = f.file.Close()
 			f.file, f.active = nil, ""
 			f.retryAt = now.Add(time.Minute)
+		} else {
+			f.activeSize += int64(n)
+			written = true
 		}
 	}
 	// A file failure must not disable console output or fail the caller.

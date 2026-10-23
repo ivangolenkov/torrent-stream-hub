@@ -49,13 +49,19 @@ func (h *APIHandler) RegisterRoutes(r chi.Router) {
 }
 
 func (h *APIHandler) GetAllTorrents(w http.ResponseWriter, r *http.Request) {
+	version := h.uc.NextSnapshotVersion()
 	torrents, err := h.uc.GetAllTorrents()
 	if err != nil {
 		logging.Warnf("api get torrents failed: %v", err)
+		if errors.Is(err, usecase.ErrSnapshotConflict) {
+			response.Error(w, http.StatusConflict, err.Error())
+			return
+		}
 		response.Error(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	logging.Debugf("api get torrents count=%d", len(torrents))
+	w.Header().Set("X-Hub-Snapshot", version)
 	response.JSON(w, http.StatusOK, torrents)
 }
 
@@ -113,16 +119,17 @@ func (h *APIHandler) TorrentAction(w http.ResponseWriter, r *http.Request) {
 	var err error
 	switch req.Action {
 	case "make_permanent":
-		err = h.uc.MakePermanent(hash)
+		err = h.uc.MakePermanent(hash, r.Context())
 	case "pause":
-		err = h.uc.Pause(hash)
+		err = h.uc.Pause(hash, r.Context())
 	case "resume":
-		err = h.uc.Resume(hash)
+		err = h.uc.Resume(hash, r.Context())
 	case "delete":
-		err = h.uc.Delete(hash, req.DeleteFiles)
+		err = h.uc.Delete(hash, req.DeleteFiles, r.Context())
 	case "recheck":
-		operation, opErr := h.uc.Recheck(hash)
+		operation, opErr := h.uc.Recheck(hash, r.Context())
 		if opErr == nil {
+			w.Header().Set("X-Hub-Snapshot", h.uc.NextSnapshotVersion())
 			response.JSON(w, http.StatusAccepted, operation)
 			return
 		}
@@ -156,7 +163,7 @@ func (h *APIHandler) TorrentAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	commandStatus(w)
+	h.commandStatus(w)
 }
 
 type PriorityReq struct {
@@ -175,7 +182,7 @@ func (h *APIHandler) SetTorrentPriority(w http.ResponseWriter, r *http.Request) 
 		response.Error(w, http.StatusBadRequest, "Priority is required")
 		return
 	}
-	err := h.uc.SetTorrentFilesPriority(hash, models.FilePriority(*req.Priority))
+	err := h.uc.SetTorrentFilesPriority(hash, models.FilePriority(*req.Priority), r.Context())
 	if err != nil {
 		if priorityError(w, err) {
 			return
@@ -187,7 +194,7 @@ func (h *APIHandler) SetTorrentPriority(w http.ResponseWriter, r *http.Request) 
 		response.Error(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	commandStatus(w)
+	h.commandStatus(w)
 }
 
 func (h *APIHandler) SetFilePriority(w http.ResponseWriter, r *http.Request) {
@@ -210,7 +217,7 @@ func (h *APIHandler) SetFilePriority(w http.ResponseWriter, r *http.Request) {
 		response.Error(w, http.StatusBadRequest, "Priority is required")
 		return
 	}
-	err = h.uc.SetFilePriority(hash, index, models.FilePriority(*req.Priority))
+	err = h.uc.SetFilePriority(hash, index, models.FilePriority(*req.Priority), r.Context())
 	if err != nil {
 		if priorityError(w, err) {
 			return
@@ -222,10 +229,11 @@ func (h *APIHandler) SetFilePriority(w http.ResponseWriter, r *http.Request) {
 		response.Error(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	commandStatus(w)
+	h.commandStatus(w)
 }
 
-func commandStatus(w http.ResponseWriter) {
+func (h *APIHandler) commandStatus(w http.ResponseWriter) {
+	w.Header().Set("X-Hub-Snapshot", h.uc.NextSnapshotVersion())
 	response.JSON(w, http.StatusOK, map[string]any{"status": "ok", "command_at_ns": time.Now().UnixNano()})
 }
 
@@ -251,6 +259,10 @@ func (h *APIHandler) GetTorrentFiles(w http.ResponseWriter, r *http.Request) {
 	t, err := h.uc.GetTorrent(hash)
 	if err != nil {
 		logging.Warnf("api get torrent files failed hash=%s: %v", hash, err)
+		if errors.Is(err, usecase.ErrSnapshotConflict) {
+			response.Error(w, http.StatusConflict, err.Error())
+			return
+		}
 		response.Error(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -305,9 +317,9 @@ func (h *APIHandler) SSEEvents(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 
-	ch := make(chan []byte, 1)
-	h.syncWorker.AddClient(ch)
-	defer h.syncWorker.RemoveClient(ch)
+	ch := make(chan usecase.PublishedSnapshot, 1)
+	h.syncWorker.AddSnapshotClient(ch)
+	defer h.syncWorker.RemoveSnapshotClient(ch)
 	logging.Infof("api sse client connected remote=%s", r.RemoteAddr)
 	heartbeat := time.NewTicker(15 * time.Second)
 	defer heartbeat.Stop()
@@ -327,7 +339,7 @@ func (h *APIHandler) SSEEvents(w http.ResponseWriter, r *http.Request) {
 			if !ok {
 				return
 			}
-			if !write(fmt.Sprintf("data: %s\n\n", data)) {
+			if !write(fmt.Sprintf("id: %s\ndata: %s\n\n", data.Version, data.Data)) {
 				return
 			}
 		case <-heartbeat.C:

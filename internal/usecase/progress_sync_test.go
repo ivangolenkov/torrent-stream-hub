@@ -10,7 +10,7 @@ func TestProgressSyncCannotRestoreReplacedPayloadBytes(t *testing.T) {
 	uc, repo, cleanup := setupTorrentUseCase(t)
 	defer cleanup()
 	tor, path := completedSafetyFile(t, uc, "sync-replaced", true)
-	sw := NewSyncWorker(uc.engine, repo)
+	sw := NewSyncWorker(uc)
 	defer sw.Close()
 	sw.Refresh()
 	stale, err := uc.GetTorrent(tor.Hash)

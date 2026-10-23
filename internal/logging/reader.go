@@ -7,6 +7,7 @@ import (
 	"os"
 	"sort"
 	"sync"
+	"time"
 )
 
 // Selection uses validated inclusive ISO calendar dates. Tail=0 means full output.
@@ -188,6 +189,7 @@ func (s *logSnapshot) Close() error {
 				s.owner.refs[part.name]--
 				if s.owner.refs[part.name] == 0 {
 					delete(s.owner.refs, part.name)
+					s.owner.quotaRetryAt = time.Time{}
 				}
 			}
 		}

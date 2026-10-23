@@ -566,7 +566,7 @@ func (h *TorrServerHandler) servePreload(w http.ResponseWriter, r *http.Request,
 			h.mu.Unlock()
 		}
 	}()
-	release, err := h.uc.AcquireTransfer(hash)
+	release, err := h.uc.AcquireTransfer(hash, r.Context())
 	if err != nil {
 		status := http.StatusNotFound
 		if errors.Is(err, usecase.ErrStorageConflict) {
@@ -758,7 +758,7 @@ func (h *TorrServerHandler) PlayAlias(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *TorrServerHandler) serveStream(w http.ResponseWriter, r *http.Request, hash string, index int) {
-	release, err := h.uc.AcquireTransfer(hash)
+	release, err := h.uc.AcquireTransfer(hash, r.Context())
 	if err != nil {
 		status := http.StatusNotFound
 		if errors.Is(err, usecase.ErrStorageConflict) {

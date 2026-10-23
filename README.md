@@ -174,6 +174,85 @@ transfers, missing metadata and deletion/migration return 409; missing torrents
 return 404. A failed check keeps readiness revoked until a successful local check;
 Resume cannot bypass it. Pause is not undone by a late result.
 
+The verification safety block is stored independently of operation history and
+survives restart. An interrupted check, or failure to persist its successful
+result, does not reopen read/upload/download gates. Rechecking successfully clears
+only that verification block, not a disk latch or deletion/migration restriction.
+Background snapshots do not change saved Pause/Resume intent or file selection;
+startup uses that intent instead of a previously observed Downloading/Seeding
+phase. New additions stay payload/upload-disabled until their record and catalog
+have committed. Phase 39's broader state/coordinator refactor remains in progress.
+
+Torrent REST/SSE views include `control`: record identity, desired run/revision,
+live applied revision/attachment, activation blocks and reconcile pending/reason.
+Revisions are decimal strings (not JavaScript numbers). A DB-only record reports
+applied revision `"0"`; an older process's saved observation is not acknowledgment
+by a live runtime. The UI displays pending apply separately from operational state.
+Pending diagnostics do not promise an automatic retry. Explicit Resume may retry
+legacy errors/missing payload and authorize network repair, but never bypasses a
+verification block or certifies existing bytes. DiskFull still requires the
+existing explicit Resume disk/write-generation checks and persistence.
+
+When a command partially fails against a live runtime, `control.apply_failure`
+identifies its failed commit/stage/apply/bind step without exposing raw paths.
+Transfer admission stays closed, and applied revision becomes `"0"` until an
+explicit full Pause/Resume successfully reconciles the saved intent. Metadata and
+snapshot delivery cannot silently clear this failure. This diagnostic is runtime
+only: restart replays SQLite intent and durable safety blocks, not error history.
+
+Failed or cancelled verification retains its own activation veto; it is not an
+`Invalid torrent` diagnosis. A successful local retry clears only that verification
+error/block, preserving Pause, disk latch and unrelated errors. Verification owns
+no background download slot, and a late completion cannot finalize a newer check.
+
+DB-only REST/SSE and startup restore project state from saved intent and typed
+activation keys, not a historical Downloading/Seeding snapshot. Detailed block
+reasons remain in `control.activation_blocks`; legacy activation errors display
+`Activation blocked` so diagnostic text cannot grant verification-recovery rights.
+Blocked restore stays offline even when a coexisting disk latch displays DiskFull.
+
+Staging a full Resume closes download/upload and reports applied revision `"0"`
+until full application and binding succeed; this is not itself a committed Pause.
+Runtime metadata/selection faults also revoke admission and acknowledgment. Invalid
+file selection is diagnosed separately from invalid metainfo. Typed durable keys
+`metadata_persistence` and `invalid_selection` prevent automatic activation after
+restart; explicit Resume authorizes retry after preparation of the saved settings.
+Verification never removes those keys. Schema migration 0010 preserves the existing
+0009 keys, including databases created during phase 39 development.
+
+`missing_files` is raised on read-time confirmation that a previously verified
+current-open payload disappeared (both final and `.part` names absent). Ordinary
+incomplete files, metadata pending and hash mismatch do not prove disappearance.
+No background filesystem scan is added. Explicit Resume authorizes repair, not
+readiness. Failed SQLite persistence returns an error and keeps live gates closed;
+like other failed commits it cannot promise durability across power loss.
+
+`activity` reports live `streaming`, session `streams`, `direct_readers`, `preloads`,
+`debouncing` and `verifying` independently of operational phase and saved intent.
+A disk reader and its accounting session can belong to the same HTTP request, so
+their counters must not be summed as distinct viewers. HEAD creates neither.
+Detached views report no activity. Engine run/operation/slot/fault authorities are
+independent; phase is a projection, not scheduler/gate authority. Scheduler probes
+and payload preparation run outside global admission with generation/epoch/slot
+tickets. REST/SSE assembly validates durable snapshots against runtime identity
+and policy/binding, retries once, then reports a snapshot conflict (HTTP 409 for
+list/files) rather than publishing guessed/empty state. Live speed/peer/activity
+counters are still sampled telemetry. Commands, sync, cleanup and migration share
+a keyed hash/root coordinator; repository no longer owns a global Lifecycle mutex.
+Registration, Drop/reader close, Resume/restore cache/probe and absence checks use
+reserved, generation-validated I/O outside global admission. Transfer leases carry
+record ID; eviction rechecks FIFO/policy/protection before destructive work. SQLite
+write transactions use `BEGIN IMMEDIATE`, while WAL read snapshots stay deferred.
+
+REST list and command receipts expose `X-Hub-Snapshot` (also exposed through CORS).
+SSE retains its array payload and adds `id: epoch/decimal-sequence`, even for empty
+lists. Vue compares lossless server sequences within an epoch, retires pre-command
+publications and confirms process changes through fresh REST; old lists/empty
+lists/command responses cannot resurrect deletion or erase re-add. These versions
+are not browser timestamps or persistent audit history. Shutdown closes task and
+command admission: late commands fail before creating new intent, while previously
+committed deletion/migration journals remain recoverable.
+
 After restart, Paused torrents with cached hash-matching metainfo reopen with
 networking, upload and payload download disabled. A local hash pass can establish
 direct read readiness for streaming/HEAD/Range/download without implicit Resume.
@@ -346,9 +425,11 @@ The service can be configured with command-line flags or environment variables. 
 | `HUB_DOWNLOAD_LIMIT` | `0` | Download limit in bytes per second, `0` means unlimited. |
 | `HUB_UPLOAD_LIMIT` | `0` | Upload limit in bytes per second, `0` means unlimited. |
 | `HUB_STREAM_CACHE_SIZE` | `209715200` | Streaming sliding-window cache size in bytes. |
-| `HUB_LOG_LEVEL` | `debug` | Log level. |
+| `HUB_LOG_LEVEL` | `info` | Log level; set `debug` explicitly for verbose diagnostics. |
 | `HUB_LOG_DIR` | `logs` beside the database | Daily log directory (`--log-dir`). |
 | `HUB_LOG_RETENTION_DAYS` | `3` | Previous calendar days to keep, in addition to today (`--log-retention-days`). `0` keeps today only; valid range: 0–36500. |
+| `HUB_LOG_MAX_FILE_BYTES` | `16777216` | Maximum log segment bytes (`--log-max-file-bytes`); at least 65536. |
+| `HUB_LOG_MAX_TOTAL_BYTES` | `134217728` | Managed log disk budget (`--log-max-total-bytes`); at least the file limit. |
 
 BitTorrent-related options are also available, including DHT/PEX/UPnP toggles, retracker configuration and swarm watchdog tuning. See `internal/config/config.go` for the full list.
 
@@ -392,7 +473,34 @@ Application, standard Go log, HTTP access and torrent library logs go to the con
 
 With the standard database path, files live in `/config/logs` (host directory `./config/logs` in Compose), so they survive container restarts. The service user must be able to write there. New directories use permissions `0700`, new files `0600`; existing permissions are not changed.
 
-Retention `3` keeps today plus the previous three calendar dates: on October 20, October 17–20 are retained. Cleanup runs on startup, on rotation and hourly even without new messages. It only removes matching regular daily files, excluding the active writer and files being downloaded. A completed download releases its retention pin; removal occurs at the next cleanup. Retention does **not** limit the size of today's file. File errors (including a full disk) are reported to stderr at most once a minute; console logging continues and file writes are retried after a minute.
+Retention `3` keeps today plus the previous three calendar dates: on October 20, October 17–20 are retained. Cleanup runs on startup, on rotation and hourly even without new messages. It only removes matching regular log files, excluding the active writer and files being downloaded. File errors (including a full disk) are queued to console at most once a minute; file writes are retried after a minute.
+
+Files rotate at the per-file byte limit into numbered segments such as
+`hub-2026-10-20.000000000001.log`. Reads/tail include legacy daily files followed
+by segments in numeric order; restarting appends rather than overwrites. The
+date is captured on enqueue, so midnight backlog retains its event date. Before
+append, the total budget removes the oldest unpinned inactive managed files,
+even within retention dates. Existing oversized legacy files are never enlarged
+or truncated. If protected files or deletion failures prevent freeing space,
+file output pauses instead of growing beyond the budget. Quota retries are at
+most once per minute, or on the next write after a snapshot releases its pin.
+Already oversized protected history cannot be shrunk until it is unpinned.
+
+Production log delivery is asynchronous, with independent file/console queues:
+each retains at most 512 waiting records / 2 MiB, plus one in-flight record.
+Messages are masked before enqueue and truncated to 64 KiB with a visible marker.
+Saturation drops new records, including warnings/errors, rather than blocking the
+engine. Logs are best-effort diagnostics, not a durable audit journal. Log reads
+show completed writes and do not implicitly flush queues. Graceful logging close
+waits up to two seconds; an uninterruptible sink may keep its fixed worker until
+the write returns, without unsafe concurrent closure or replacement workers.
+`GET /api/v1/logs/status` reports independent queue, drop/severity, truncation,
+storage-error/loss/quota and close-timeout statistics without opening files or
+waiting for sink I/O. Completed counts mean attempted delivery, not fsync or
+success: also inspect errors and storage losses. A close timeout reports pending
+work, not proven data loss: the worker may still finish. Post-close writes are
+counted separately as rejected. These diagnostics require the same network
+protection as the logs endpoint.
 
 ```bash
 # Today; optional last N physical lines

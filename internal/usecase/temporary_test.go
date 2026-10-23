@@ -114,9 +114,9 @@ func TestTemporaryTransferProtectionAndRetry(t *testing.T) {
 	if len(q) != 3 {
 		t.Fatal("debounce was ignored")
 	}
-	uc.repo.Lifecycle.Lock()
+	uc.policyMu.Lock()
 	uc.protectedUntil[a.Hash] = time.Now().Add(-time.Second)
-	uc.repo.Lifecycle.Unlock()
+	uc.policyMu.Unlock()
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() { defer close(done); uc.runTemporaryCleanup(ctx, time.Millisecond) }()
@@ -268,7 +268,7 @@ func TestTemporaryCleanupRejectsUnsafeAndSharedPaths(t *testing.T) {
 func TestTemporaryConcurrentSyncAddPinAndTransfer(t *testing.T) {
 	uc, repo, cleanup := setupTorrentUseCase(t)
 	defer cleanup()
-	sw := NewSyncWorker(uc.engine, repo)
+	sw := NewSyncWorker(uc)
 	ch := make(chan []byte, 100)
 	sw.AddClient(ch)
 	defer sw.RemoveClient(ch)

@@ -26,7 +26,7 @@ import (
 
 func (h *APIHandler) DownloadTorrentFile(w http.ResponseWriter, r *http.Request) {
 	hash := chi.URLParam(r, "hash")
-	release, err := h.uc.AcquireTransfer(hash)
+	release, err := h.uc.AcquireTransfer(hash, r.Context())
 	if err != nil {
 		h.handleDownloadError(w, hash, err)
 		return
@@ -48,7 +48,7 @@ func (h *APIHandler) DownloadTorrentFile(w http.ResponseWriter, r *http.Request)
 
 func (h *APIHandler) DownloadTorrent(w http.ResponseWriter, r *http.Request) {
 	hash := chi.URLParam(r, "hash")
-	release, err := h.uc.AcquireTransfer(hash)
+	release, err := h.uc.AcquireTransfer(hash, r.Context())
 	if err != nil {
 		h.handleDownloadError(w, hash, err)
 		return

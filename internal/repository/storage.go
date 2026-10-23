@@ -46,3 +46,26 @@ func (r *TorrentRepo) SaveStorageMapping(m *StorageMapping) error {
 	_, err := r.db.DB().Exec(`INSERT INTO torrent_storage(hash,version,root,state,manifest,error) VALUES(?,?,?,?,?,?) ON CONFLICT(hash) DO UPDATE SET version=excluded.version,root=excluded.root,state=excluded.state,manifest=excluded.manifest,error=excluded.error`, m.Hash, m.Version, m.Root, m.State, m.Manifest, m.Error)
 	return err
 }
+
+// EnsureStorageMapping initializes legacy/isolated mappings without replacing a
+// reservation made by a concurrent canonical/hybrid Add or migration.
+func (r *TorrentRepo) EnsureStorageMapping(m *StorageMapping) error {
+	_, err := r.db.DB().Exec(`INSERT INTO torrent_storage(hash,version,root,state,manifest,error) VALUES(?,?,?,?,?,?) ON CONFLICT(hash) DO NOTHING`, m.Hash, m.Version, m.Root, m.State, m.Manifest, m.Error)
+	return err
+}
+
+// Alias updates may advance their own workflow, never replace another root.
+func (r *TorrentRepo) SaveStorageAlias(m *StorageMapping) error {
+	res, err := r.db.DB().Exec(`INSERT INTO torrent_storage(hash,version,root,state,manifest,error) VALUES(?,?,?,?,?,?) ON CONFLICT(hash) DO UPDATE SET version=excluded.version,state=excluded.state,manifest=excluded.manifest,error=excluded.error WHERE torrent_storage.root=excluded.root`, m.Hash, m.Version, m.Root, m.State, m.Manifest, m.Error)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n != 1 {
+		return ErrStateConflict
+	}
+	return nil
+}

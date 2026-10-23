@@ -3,6 +3,7 @@ package engine
 import (
 	"errors"
 	"fmt"
+	"github.com/anacrolix/torrent/metainfo"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -27,6 +28,10 @@ func (e *Engine) SetDownloadBlockPersistence(save func(string, string) error) {
 }
 
 func (e *Engine) diskError(hash string) error {
+	return e.diskErrorWithProbe(hash, e.diskProbe, e.minimumDiskBytes())
+}
+
+func (e *Engine) diskErrorWithProbe(hash string, probe func(string) (uint64, error), minimum uint64) error {
 	root, err := e.StorageRoot(hash)
 	if err != nil {
 		return err
@@ -45,7 +50,7 @@ func (e *Engine) diskError(hash string) error {
 	}
 	seen := make(map[string]bool)
 	for _, path := range paths {
-		if err := e.checkDiskPath(path, seen); err != nil {
+		if err := e.checkDiskPathWithProbe(path, seen, probe, minimum); err != nil {
 			return err
 		}
 	}
@@ -53,6 +58,10 @@ func (e *Engine) diskError(hash string) error {
 }
 
 func (e *Engine) checkDiskPath(path string, seen map[string]bool) error {
+	return e.checkDiskPathWithProbe(path, seen, e.diskProbe, e.minimumDiskBytes())
+}
+
+func (e *Engine) checkDiskPathWithProbe(path string, seen map[string]bool, probe func(string) (uint64, error), minimum uint64) error {
 	// A new root may not exist yet. Probe its nearest existing parent filesystem.
 	for {
 		if _, err := os.Stat(path); err == nil {
@@ -70,7 +79,6 @@ func (e *Engine) checkDiskPath(path string, seen map[string]bool) error {
 		return nil
 	}
 	seen[path] = true
-	probe := e.diskProbe
 	if probe == nil {
 		probe = GetFreeSpace
 	}
@@ -78,7 +86,7 @@ func (e *Engine) checkDiskPath(path string, seen map[string]bool) error {
 	if err != nil {
 		return fmt.Errorf("disk space unknown: %w", err)
 	}
-	if free < e.minimumDiskBytes() {
+	if free < minimum {
 		return fmt.Errorf("disk free space below configured reserve")
 	}
 	return nil
@@ -95,19 +103,21 @@ func (e *Engine) minimumDiskBytes() uint64 {
 
 // admissionMu is held; the prohibition takes effect before persistence.
 func (e *Engine) blockDownloadLocked(mt *ManagedTorrent, reason string) error {
+	if !e.currentTorrent(mt) {
+		return ErrOperationConflict
+	}
 	mt.mu.Lock()
 	changed := mt.downloadBlock != reason
+	if _, err := mt.applyStateEventLocked(stateEvent{kind: stateDiskBlocked, diskReason: reason}); err != nil {
+		mt.mu.Unlock()
+		return err
+	}
 	if changed {
 		mt.downloadBlockPersisted = false
 	}
 	persist := !mt.downloadBlockPersisted
-	mt.downloadBlock = reason
 	if mt.payloadCancel != nil {
 		mt.payloadCancel(DownloadBlockedError{reason})
-	}
-	mt.downloadAllStarted = false
-	if mt.state != models.StatePaused {
-		mt.setStateLocked(models.StateDiskFull, models.ErrorReason(reason), "payload gate closed")
 	}
 	mt.mu.Unlock()
 	mt.t.DisallowDataDownload()
@@ -172,7 +182,7 @@ func (e *Engine) admitPayloadLocked(mt *ManagedTorrent) error {
 		return e.ctx.Err()
 	}
 	mt.mu.Lock()
-	blocked, initializing, state := mt.downloadBlock, mt.initializing || mt.rechecking || mt.verificationUncertain, mt.state
+	blocked, initializing, eligible := mt.policy.disk, mt.policy.initializing || mt.policy.checking || mt.policy.uncertain, mt.policy.payloadEligible()
 	mt.mu.Unlock()
 	if blocked != "" {
 		return DownloadBlockedError{blocked}
@@ -180,25 +190,57 @@ func (e *Engine) admitPayloadLocked(mt *ManagedTorrent) error {
 	if initializing {
 		return DownloadBlockedError{"torrent initialization is not complete"}
 	}
-	if state == models.StatePaused || state == models.StateError || state == models.StateMissingFiles || state == models.StateDiskFull {
+	if !eligible {
 		return DownloadBlockedError{"torrent is not accepting payload downloads"}
 	}
-	if err := e.diskError(mt.hash); err != nil {
+	if !e.currentTorrent(mt) {
+		return ErrOperationConflict
+	}
+	if mt.preparation != nil {
+		return ErrOperationConflict
+	}
+	if !e.beginWork() {
+		return e.ctx.Err()
+	}
+	defer e.wg.Done()
+	mt.mu.Lock()
+	ticket := &payloadPreparation{epoch: mt.policyEpoch, fence: mt.runtimeFence, slot: mt.slotToken}
+	mt.mu.Unlock()
+	mt.preparation = ticket // admissionMu owns reservation pointer
+	probe, minimum := e.diskProbe, e.minimumDiskBytes()
+	var mi *metainfo.MetaInfo
+	if mt.t.Info() != nil {
+		v := mt.t.Metainfo()
+		mi = &v
+	}
+	// Reservation remains visible while global admission is released. Commands
+	// may quiesce/delete this runtime. Nothing may Allow based on this result
+	// unless the exact runtime, policy epoch, fence and reservation still match.
+	e.admissionMu.Unlock()
+	probeErr := e.diskErrorWithProbe(mt.hash, probe, minimum)
+	var metadataErr error
+	if probeErr == nil && mi != nil {
+		metadataErr = e.saveMetainfo(mt.hash, mi, true)
+	}
+	e.admissionMu.Lock()
+	mt.mu.Lock()
+	valid := mt.policyEpoch == ticket.epoch && mt.runtimeFence == ticket.fence && mt.policy.payloadEligible() && mt.slotToken == ticket.slot
+	mt.mu.Unlock()
+	valid = valid && e.currentTorrent(mt) && mt.preparation == ticket
+	if mt.preparation == ticket {
+		mt.preparation = nil
+	}
+	if !valid {
+		return ErrOperationConflict
+	}
+	if err := probeErr; err != nil {
 		if persistErr := e.blockDownloadLocked(mt, err.Error()); persistErr != nil {
 			return persistErr
 		}
 		return DownloadBlockedError{err.Error()}
 	}
-	if mt.t.Info() != nil {
-		mi := mt.t.Metainfo()
-		if err := e.saveMetainfo(mt.hash, &mi, true); err != nil {
-			mt.t.DisallowDataDownload()
-			mt.mu.Lock()
-			mt.initializing = true
-			mt.setStateLocked(models.StateError, models.ErrorReason("metadata persistence failed"), "metadata initialization failed")
-			mt.mu.Unlock()
-			return err
-		}
+	if metadataErr != nil {
+		return errors.Join(metadataErr, e.quiesceFaultLocked(mt, stateMetadataFailed))
 	}
 	if err := e.applyFilePrioritiesAndDownload(mt); err != nil {
 		return err
@@ -214,4 +256,10 @@ func (e *Engine) admitPayloadLocked(mt *ManagedTorrent) error {
 		return DownloadBlockedError{reason}
 	}
 	return nil
+}
+
+type payloadPreparation struct {
+	epoch uint64
+	fence models.RuntimeFence
+	slot  uint64
 }

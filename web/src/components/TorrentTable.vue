@@ -219,6 +219,11 @@ const confirmDelete = async () => {
               <TemporaryTorrentControl :torrent="t" />
               <div v-if="store.actionErrors[t.hash]" role="alert" class="text-xs text-red-700">{{ store.actionErrors[t.hash] }}</div>
               <div v-if="t.recheck" class="text-xs text-amber-700">Recheck: {{ t.recheck.status }} {{ t.recheck.error }}</div>
+							<div v-if="t.activity?.streaming" class="text-xs text-blue-700">Streaming</div>
+							<div v-if="t.activity?.preloads" class="text-xs text-blue-700">Preload: {{ t.activity.preloads }}</div>
+							<div v-if="t.activity?.verifying && !t.recheck" class="text-xs text-amber-700">Verifying</div>
+              <div v-if="t.control?.reconcile_pending" class="text-xs text-amber-700" :title="t.control.reconcile_reason">Saved: {{ t.control.desired_run }} · apply pending</div>
+              <div v-if="t.control?.apply_failure" class="text-xs text-red-600" :title="t.control.apply_failure.code">Apply failed · retry with Pause or Resume</div>
               <div v-if="t.selection_complete && t.state !== 'Seeding'" class="text-xs text-gray-500">Selected files complete (no background slot)</div>
               <div v-if="t.deletion_mode" class="text-xs text-orange-700">Deletion pending ({{ t.deletion_mode }}). {{ t.deletion_error }}</div>
               <div v-if="t.download_block" class="text-xs text-orange-700">Download blocked: {{ t.download_block }}. Resume manually after recovery.</div>
@@ -323,6 +328,11 @@ const confirmDelete = async () => {
           <TemporaryTorrentControl :torrent="t" />
           <div v-if="store.actionErrors[t.hash]" role="alert" class="text-xs text-red-700">{{ store.actionErrors[t.hash] }}</div>
           <div v-if="t.recheck" class="text-xs text-amber-700">Recheck: {{ t.recheck.status }} {{ t.recheck.error }}</div>
+					<div v-if="t.activity?.streaming" class="text-xs text-blue-700">Streaming</div>
+					<div v-if="t.activity?.preloads" class="text-xs text-blue-700">Preload: {{ t.activity.preloads }}</div>
+					<div v-if="t.activity?.verifying && !t.recheck" class="text-xs text-amber-700">Verifying</div>
+          <div v-if="t.control?.reconcile_pending" class="text-xs text-amber-700" :title="t.control.reconcile_reason">Saved: {{ t.control.desired_run }} · apply pending</div>
+          <div v-if="t.control?.apply_failure" class="text-xs text-red-600" :title="t.control.apply_failure.code">Apply failed · retry with Pause or Resume</div>
           <div v-if="t.selection_complete && t.state !== 'Seeding'" class="text-xs text-gray-500">Selected files complete (no background slot)</div>
           <div v-if="t.deletion_mode" class="text-xs text-orange-700">Deletion pending ({{ t.deletion_mode }}). {{ t.deletion_error }}</div>
           <div v-if="t.download_block" class="text-xs text-orange-700">Download blocked: {{ t.download_block }}. Resume manually after recovery.</div>

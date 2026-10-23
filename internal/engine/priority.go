@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"errors"
 	"fmt"
 
 	"torrent-stream-hub/internal/logging"
@@ -20,14 +21,20 @@ func mapToPiecePriority(prio models.FilePriority) torrent.PiecePriority {
 	}
 }
 
-func (e *Engine) applyFilePrioritiesAndDownload(mt *ManagedTorrent) error {
+func (e *Engine) applyFilePrioritiesAndDownload(mt *ManagedTorrent) (result error) {
 	if mt.t.Info() == nil {
 		return fmt.Errorf("metadata not ready")
 	}
 
 	mt.mu.Lock()
+	var fault *stateDecision
 	defer func() {
 		mt.mu.Unlock()
+		if fault != nil {
+			e.applyQuiesceLocked(mt, *fault, "invalid file selection")
+			result = errors.Join(result, e.persistSafetyFaultLocked(mt, stateSelectionInvalid))
+			return
+		}
 		if e.streamManager != nil {
 			_ = e.streamManager.refreshTorrentOverlayLocked(mt)
 		}
@@ -37,8 +44,11 @@ func (e *Engine) applyFilePrioritiesAndDownload(mt *ManagedTorrent) error {
 	}
 	for index := range mt.filePriorities {
 		if index < 0 || index >= len(mt.t.Files()) {
-			mt.t.DisallowDataDownload()
-			mt.setStateLocked(models.StateError, models.ErrInvalidTorrent, "persisted file index out of bounds")
+			d, err := mt.applyStateEventLocked(stateEvent{kind: stateSelectionInvalid})
+			if err != nil {
+				return err
+			}
+			fault = &d
 			return fmt.Errorf("persisted file index out of bounds")
 		}
 	}
@@ -53,7 +63,7 @@ func (e *Engine) applyFilePrioritiesAndDownload(mt *ManagedTorrent) error {
 		prio := mt.filePriorities[i]
 		// Queued torrents may serve a reader/stream overlay without turning
 		// their entire base selection into another background download.
-		if mt.state != models.StateDownloading && mt.state != models.StateSeeding || mt.downloadBlock != "" || mt.rechecking {
+		if !mt.policy.payloadEligible() || !mt.policy.slot && !mt.policy.payloadComplete {
 			f.SetPriority(torrent.PiecePriorityNone)
 			continue
 		}
@@ -86,6 +96,7 @@ func (e *Engine) SetFilePriority(hash string, fileIndex int, priority models.Fil
 		files := mt.t.Files()
 		if fileIndex >= 0 && fileIndex < len(files) {
 			mt.filePriorities[fileIndex] = priority
+			mt.policyEpoch++
 			logging.Debugf("set file priority hash=%s index=%d priority=%d", hash, fileIndex, priority)
 		} else {
 			mt.mu.Unlock()
@@ -96,6 +107,7 @@ func (e *Engine) SetFilePriority(hash string, fileIndex int, priority models.Fil
 	} else {
 		mt.mu.Lock()
 		mt.filePriorities[fileIndex] = priority
+		mt.policyEpoch++
 		mt.mu.Unlock()
 	}
 
@@ -122,6 +134,7 @@ func (e *Engine) SetTorrentFilesPriority(hash string, priority models.FilePriori
 	}
 
 	mt.mu.Lock()
+	mt.policyEpoch++
 	if mt.t.Info() != nil {
 		for i := range mt.t.Files() {
 			mt.filePriorities[i] = priority
@@ -157,6 +170,7 @@ func (e *Engine) SetFilePriorities(hash string, priorities map[int]models.FilePr
 		}
 	}
 	mt.mu.Lock()
+	mt.policyEpoch++
 	for index, priority := range priorities {
 		mt.filePriorities[index] = priority
 	}

@@ -73,7 +73,7 @@ func (e *Engine) CheckMigrationSpace(path string, bytes uint64) error {
 	if err != nil {
 		return err
 	}
-	reserve := uint64(max(e.cfg.MinFreeSpaceGB, 0)) * 1024 * 1024 * 1024
+	reserve := e.minimumDiskBytes()
 	if free < reserve || bytes > free-reserve {
 		return fmt.Errorf("insufficient free space for safe migration copy")
 	}

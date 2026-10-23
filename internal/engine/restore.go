@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 
@@ -30,30 +31,46 @@ func (e *Engine) StageExistingRestore(saved *models.Torrent) error {
 	if checking {
 		return ErrOperationConflict
 	}
-	mt.t.DisallowDataDownload()
-	mt.mu.Lock()
-	defer mt.mu.Unlock()
-	mt.initializing = true
-	if mt.payloadCancel != nil {
-		mt.payloadCancel(DownloadBlockedError{"torrent initialization is not complete"})
+	priorities, err := persistedPriorities(saved, mt.t)
+	if err != nil {
+		return err
 	}
-	mt.downloadAllStarted = false
-	priorities := make(map[int]models.FilePriority)
-	for _, f := range saved.Files {
-		if f != nil {
-			if f.Index < 0 || (f.Priority != models.PriorityNormal && f.Priority != models.PriorityHigh && f.Priority != models.PriorityNone) {
-				return fmt.Errorf("invalid persisted file priority")
-			}
-			priorities[f.Index] = f.Priority
-		}
+	mt.mu.Lock()
+	d, err := mt.applyStateEventLocked(stateEvent{kind: stateRestoreStaged})
+	if err != nil {
+		mt.mu.Unlock()
+		return err
 	}
 	mt.filePriorities = priorities
+	mt.queuePosition = saved.QueuePosition
+	mt.mu.Unlock()
+	e.applyQuiesceLocked(mt, d, "torrent initialization is not complete")
 	return nil
+}
+
+func persistedPriorities(saved *models.Torrent, t *torrent.Torrent) (map[int]models.FilePriority, error) {
+	priorities := make(map[int]models.FilePriority, len(saved.Files))
+	for _, f := range saved.Files {
+		if f == nil {
+			continue
+		}
+		if f.Index < 0 || (t.Info() != nil && f.Index >= len(t.Files())) || (f.Priority != models.PriorityNormal && f.Priority != models.PriorityHigh && f.Priority != models.PriorityNone) {
+			return nil, fmt.Errorf("invalid persisted file priority")
+		}
+		priorities[f.Index] = f.Priority
+	}
+	return priorities, nil
 }
 
 // RestoreTorrent stages persisted intent before the torrent becomes visible to
 // the scheduler. The caller must persist any application changes before FinishRestore.
 func (e *Engine) RestoreTorrent(spec *torrent.TorrentSpec, saved *models.Torrent) (*models.Torrent, error) {
+	if saved == nil || spec == nil {
+		return nil, ErrOperationConflict
+	}
+	if _, err := runtimeTransition(runtimePolicy{}, stateEvent{kind: stateRegistered, phase: saved.State, err: saved.Error, staged: true, diskReason: saved.DownloadBlock}); err != nil {
+		return nil, err
+	}
 	if !e.beginWork() {
 		return nil, context.Canceled
 	}
@@ -73,7 +90,7 @@ func (e *Engine) RestoreTorrent(spec *torrent.TorrentSpec, saved *models.Torrent
 	}
 	spec.DisallowDataDownload = true
 	spec.DisallowDataUpload = true
-	inactive := saved.State == models.StatePaused || saved.State == models.StateError || saved.State == models.StateMissingFiles
+	inactive := spec.DisableNetworking || saved.State == models.StatePaused || saved.State == models.StateError || saved.State == models.StateMissingFiles
 	if inactive {
 		spec.DisableNetworking = true
 		spec.Trackers = nil
@@ -105,31 +122,58 @@ func (e *Engine) FinishRestore(hash string, state models.TorrentState, manualRes
 		return TorrentNotFoundError{Hash: hash}
 	}
 	mt.mu.Lock()
-	checking := mt.rechecking || mt.verificationUncertain
+	event := stateEvent{kind: stateActivated, phase: state, err: mt.err, fullReconcile: true}
+	_, policyErr := runtimeTransition(mt.policy, event)
 	mt.mu.Unlock()
-	if checking {
+	if policyErr != nil {
 		e.admissionMu.Unlock()
-		return ErrOperationConflict
+		return policyErr
 	}
+	var metadata *metainfo.MetaInfo
 	if mt.t.Info() != nil {
-		mi := mt.t.Metainfo()
-		if err := e.saveMetainfo(hash, &mi, true); err != nil {
-			e.admissionMu.Unlock()
-			return fmt.Errorf("persist runtime metainfo: %w", err)
+		v := mt.t.Metainfo()
+		metadata = &v
+	}
+	needsNetworkSpec := !mt.t.NetworkingEnabled()
+	var networkSpec *torrent.TorrentSpec
+	var metadataErr error
+	if err := e.runRuntimeWorkLocked(mt, func() {
+		if metadata != nil {
+			metadataErr = e.saveMetainfo(hash, metadata, true)
 		}
+		if metadataErr == nil && needsNetworkSpec {
+			if mi, err := metainfo.LoadFromFile(filepath.Join(e.ConfigDir(), "metainfo", hash+".torrent")); err == nil {
+				networkSpec, _ = torrent.TorrentSpecFromMetaInfoErr(mi)
+			}
+		}
+	}); err != nil {
+		e.admissionMu.Unlock()
+		return err
+	}
+	if metadataErr != nil {
+		faultErr := e.quiesceFaultLocked(mt, stateMetadataFailed)
+		e.admissionMu.Unlock()
+		return errors.Join(fmt.Errorf("persist runtime metainfo: %w", metadataErr), faultErr)
 	}
 	mt.mu.Lock()
 	for index, priority := range mt.filePriorities {
 		if index < 0 || (mt.t.Info() != nil && index >= len(mt.t.Files())) || (priority != models.PriorityNormal && priority != models.PriorityHigh && priority != models.PriorityNone) {
 			mt.mu.Unlock()
+			faultErr := e.quiesceFaultLocked(mt, stateSelectionInvalid)
 			e.admissionMu.Unlock()
-			return fmt.Errorf("persisted file index out of bounds")
+			return errors.Join(fmt.Errorf("persisted file index out of bounds"), faultErr)
 		}
 	}
 	if len(manualResume) > 0 && manualResume[0] {
 		mt.mu.Unlock()
 		writeVersion := mt.t.WriteChunkErrorVersion()
-		if err := e.diskError(hash); err != nil {
+		probe, minimum := e.diskProbe, e.minimumDiskBytes()
+		var probeErr error
+		if err := e.runRuntimeWorkLocked(mt, func() { probeErr = e.diskErrorWithProbe(hash, probe, minimum) }); err != nil {
+			e.admissionMu.Unlock()
+			return err
+		}
+		if err := probeErr; err != nil {
 			persistErr := e.blockDownloadLocked(mt, err.Error())
 			e.admissionMu.Unlock()
 			if persistErr != nil {
@@ -152,41 +196,40 @@ func (e *Engine) FinishRestore(hash string, state models.TorrentState, manualRes
 			}
 		}
 		mt.mu.Lock()
-		mt.downloadBlock = ""
+		event.diskRecovered = true
+	}
+	d, err := mt.applyStateEventLocked(event)
+	if err != nil {
+		mt.mu.Unlock()
+		e.admissionMu.Unlock()
+		return err
+	}
+	if event.diskRecovered {
 		mt.downloadBlockPersisted = false
 	}
-	mt.initializing = false
-	mt.state = state
-	mt.downloadAllStarted = false
-	inactive := state == models.StatePaused || state == models.StateError || state == models.StateMissingFiles || state == models.StateDiskFull || mt.downloadBlock != ""
+	inactive := d.next.state == models.StatePaused || d.next.state == models.StateError || d.next.state == models.StateMissingFiles || d.next.state == models.StateDiskFull
+	if !inactive {
+		mt.payloadCtx, mt.payloadCancel = context.WithCancelCause(e.ctx)
+	}
+	mt.mu.Unlock()
 	if !inactive {
 		if !mt.t.NetworkingEnabled() {
-			if mi, err := metainfo.LoadFromFile(filepath.Join(e.ConfigDir(), "metainfo", hash+".torrent")); err == nil {
-				if spec, err := torrent.TorrentSpecFromMetaInfoErr(mi); err == nil {
-					e.augmentTorrentSpec(spec)
-					if err := mt.t.MergeSpec(spec); err != nil {
-						mt.mu.Unlock()
-						e.admissionMu.Unlock()
-						return err
-					}
+			if networkSpec != nil {
+				e.augmentTorrentSpec(networkSpec)
+				if err := mt.t.MergeSpec(networkSpec); err != nil {
+					_ = e.quiesceFaultLocked(mt, stateApplyFailed)
+					e.admissionMu.Unlock()
+					return err
 				}
 			}
 			mt.t.EnableNetworking()
 		}
-		mt.state = models.StateQueued
-		mt.err = models.ErrNone
-		mt.payloadCtx, mt.payloadCancel = context.WithCancelCause(e.ctx)
-	} else if mt.downloadBlock != "" && state != models.StatePaused {
-		mt.state = models.StateDiskFull
-		mt.err = models.ErrorReason(mt.downloadBlock)
 	}
-	diskBlocked := mt.downloadBlock != "" || state == models.StateDiskFull
-	mt.mu.Unlock()
 	mt.t.DisallowDataDownload()
-	if state != models.StatePaused && (!inactive || diskBlocked) && !e.cfg.BTNoUpload {
+	if d.allowUpload && !e.cfg.BTNoUpload {
 		mt.t.AllowDataUpload()
 	}
-	if state == models.StatePaused || (inactive && !diskBlocked) {
+	if d.closeUpload {
 		mt.t.DisallowDataUpload()
 	}
 	if inactive && mt.t.Info() != nil {

@@ -3,12 +3,12 @@ package engine
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 
 	"torrent-stream-hub/internal/logging"
-	"torrent-stream-hub/internal/models"
 
 	"github.com/anacrolix/torrent"
 	"github.com/anacrolix/torrent/metainfo"
@@ -35,7 +35,10 @@ func (e *Engine) saveMetainfo(hash string, mi *metainfo.MetaInfo, keepExisting b
 	}
 	path := filepath.Join(dir, strings.ToLower(strings.TrimSpace(hash))+".torrent")
 	if keepExisting {
-		if _, err := os.Stat(path); err == nil {
+		if st, err := os.Lstat(path); err == nil {
+			if !st.Mode().IsRegular() {
+				return fmt.Errorf("cached metainfo is not a regular file")
+			}
 			return nil
 		} else if !errors.Is(err, os.ErrNotExist) {
 			return err
@@ -98,28 +101,28 @@ func (e *Engine) watchMetadata(hash string, t *torrent.Torrent) {
 		mt.metadataWaitLogged = false
 		mt.mu.Unlock()
 
-		if err := e.saveMetainfo(hash, &mi, true); err != nil {
+		var persistErr error
+		if err := e.runRuntimeWorkLocked(mt, func() { persistErr = e.saveMetainfo(hash, &mi, true) }); err != nil {
+			return
+		}
+		if err := persistErr; err != nil {
 			logging.Warnf("failed to persist runtime metainfo hash=%s: %v", hash, err)
-			t.DisallowDataDownload()
-			mt.mu.Lock()
-			mt.initializing = true
-			mt.setStateLocked(models.StateError, models.ErrorReason("metadata persistence failed"), "metadata initialization failed")
-			mt.mu.Unlock()
+			_ = e.quiesceFaultLocked(mt, stateMetadataFailed)
 			return
 		}
 
 		logging.Infof("torrent metadata ready hash=%s name=%q size=%d files=%d", hash, t.Name(), info.TotalLength(), fileCount)
 
 		mt.mu.Lock()
-		state := mt.state
+		reserved := mt.policy.slot
 		downloadAllStarted := mt.downloadAllStarted
-		initializing := mt.initializing || mt.downloadBlock != ""
-		if state == models.StateDownloading && !downloadAllStarted && !initializing {
+		initializing := !mt.policy.payloadEligible()
+		if reserved && !downloadAllStarted && !initializing {
 			mt.downloadAllStarted = true
 		}
 		mt.mu.Unlock()
 
-		if state == models.StateDownloading && !downloadAllStarted && !initializing {
+		if reserved && !downloadAllStarted && !initializing {
 			_ = e.admitPayloadLocked(mt)
 			logging.Debugf("download all started after metadata hash=%s files=%d", hash, fileCount)
 		}

@@ -53,7 +53,7 @@ func TestSSELifecycleAndWriteErrors(t *testing.T) {
 	defer e.Close()
 	for _, mode := range []string{"write", "flush", "blocked", "shutdown", "unsupported"} {
 		t.Run(mode, func(t *testing.T) {
-			sw := usecase.NewSyncWorker(e, repository.NewTorrentRepo(db))
+			sw := usecase.NewSyncWorker(usecase.NewTorrentUseCase(e, repository.NewTorrentRepo(db)))
 			defer sw.Close()
 			h := NewAPIHandler(nil, sw)
 			h.sseWriteTimeout = 20 * time.Millisecond

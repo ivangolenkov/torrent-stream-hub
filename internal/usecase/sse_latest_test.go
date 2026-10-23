@@ -6,7 +6,7 @@ import (
 )
 
 func TestSSELatestSnapshotAndConcurrentClose(t *testing.T) {
-	sw := NewSyncWorker(nil, nil)
+	sw := NewSyncWorker(nil)
 	slow, fast := make(chan []byte, 1), make(chan []byte, 1)
 	sw.AddClient(slow)
 	sw.AddClient(fast)

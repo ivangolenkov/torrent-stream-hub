@@ -221,6 +221,7 @@ func (e *Engine) mapManagedTorrent(mt *ManagedTorrent) *models.Torrent {
 	e.logPeerSummaryLocked(t.InfoHash().HexString(), peerSummary, mt)
 
 	model := &models.Torrent{
+		Control:        &models.TorrentControl{RecordID: mt.runtimeFence.RecordID, RuntimeAttachment: mt.runtimeFence.Attachment, AppliedRevision: mt.appliedIntentRevision},
 		Hash:           mt.hash,
 		Name:           t.Name(),
 		Size:           size,
@@ -238,12 +239,22 @@ func (e *Engine) mapManagedTorrent(mt *ManagedTorrent) *models.Torrent {
 		SourceURI:         mt.sourceURI,
 		QueuePosition:     mt.queuePosition,
 		SelectionComplete: mt.selectionComplete,
+		Activity:          models.TorrentActivity{Verifying: mt.rechecking},
+	}
+	if mt.intentApplyFailure != nil {
+		failure := *mt.intentApplyFailure
+		model.Control.ApplyFailure = &failure
 	}
 	if mt.recheckOperation != nil {
 		operation := *mt.recheckOperation
 		model.Recheck = &operation
 	}
 	mt.mu.Unlock()
+	if e.streamManager != nil {
+		a := e.streamManager.activityForTorrent(mt)
+		a.Verifying = model.Activity.Verifying
+		model.Activity = a
+	}
 
 	if info != nil {
 		model.PieceLength = info.PieceLength

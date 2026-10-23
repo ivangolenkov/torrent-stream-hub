@@ -90,6 +90,19 @@ it('labels last-known progress in both layouts', async () => {
   }
 });
 
+it('shows streaming, preload and verification independently from Paused', async () => {
+  const { wrapper, store } = setup();
+  store.torrents = [{ ...fixture('one'), activity: { streaming: true, streams: 1, direct_readers: 1, preloads: 2, debouncing: false, verifying: true } }];
+  await nextTick();
+  for (const selector of ['tbody', '.md\\:hidden']) {
+    const text = wrapper.find(selector).text();
+    expect(text).toContain('Paused');
+    expect(text).toContain('Streaming');
+    expect(text).toContain('Preload: 2');
+    expect(text).toContain('Verifying');
+  }
+});
+
 it('shows action and recheck failures in both layouts', async () => {
   const { wrapper, store } = setup();
   store.torrents = [{ ...fixture('one'), recheck: { id: 1, status: 'failed', error: 'Read failed' } }];
@@ -98,5 +111,22 @@ it('shows action and recheck failures in both layouts', async () => {
   for (const selector of ['tbody', '.md\\:hidden']) {
     expect(wrapper.find(selector).text()).toContain('Priority commit failed');
     expect(wrapper.find(selector).text()).toContain('Recheck: failed Read failed');
+  }
+});
+
+it('keeps committed intent, failed apply and independent disk recovery distinct', async () => {
+  const { wrapper, store } = setup();
+  store.torrents = [{ ...fixture('one'), download_block: 'disk latch', control: {
+    record_id: 'record', desired_run: 'enabled', desired_revision: '9007199254740993',
+    applied_revision: '0', reconcile_pending: true, reconcile_reason: 'runtime_apply_failed', activation_blocks: [],
+    apply_failure: { record_id: 'record', revision: '9007199254740993', code: 'runtime_apply_failed', retry: 'explicit_pause_or_resume' },
+  } }];
+  await nextTick();
+  for (const selector of ['tbody', '.md\\:hidden']) {
+    const text = wrapper.find(selector).text();
+    expect(text).toContain('Saved: enabled · apply pending');
+    expect(text).toContain('Apply failed · retry with Pause or Resume');
+    expect(text).toContain('disk latch');
+    expect(text).toContain('Resume manually after recovery');
   }
 });

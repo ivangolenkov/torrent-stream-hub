@@ -10,7 +10,6 @@ import (
 	"sync"
 	"time"
 	"torrent-stream-hub/internal/logging"
-	"torrent-stream-hub/internal/models"
 
 	"github.com/anacrolix/torrent"
 )
@@ -199,12 +198,17 @@ func (sm *StreamManager) hasReaders(hash string) bool {
 }
 
 func (sm *StreamManager) CloseStreamsForTorrent(mt *ManagedTorrent) {
+	if !sm.engine.beginWork() {
+		return
+	}
+	defer sm.engine.wg.Done()
 	sm.engine.admissionMu.Lock()
-	defer sm.engine.admissionMu.Unlock()
-	sm.closeStreamsForTorrentLocked(mt)
+	handles := sm.detachStreamsForTorrentLocked(mt)
+	sm.engine.admissionMu.Unlock()
+	closeDirectHandles(handles)
 }
 
-func (sm *StreamManager) closeStreamsForTorrentLocked(mt *ManagedTorrent) {
+func (sm *StreamManager) detachStreamsForTorrentLocked(mt *ManagedTorrent) []*directStreamHandle {
 	sm.mu.Lock()
 	for key, state := range sm.states {
 		if state.Torrent == mt {
@@ -225,7 +229,10 @@ func (sm *StreamManager) closeStreamsForTorrentLocked(mt *ManagedTorrent) {
 		}
 	}
 	sm.mu.Unlock()
+	return toClose
+}
 
+func closeDirectHandles(toClose []*directStreamHandle) {
 	for _, handle := range toClose {
 		close(handle.cancelChan)
 		if handle.closer != nil {
@@ -236,7 +243,6 @@ func (sm *StreamManager) closeStreamsForTorrentLocked(mt *ManagedTorrent) {
 
 func (sm *StreamManager) CloseAllStreams() {
 	sm.engine.admissionMu.Lock()
-	defer sm.engine.admissionMu.Unlock()
 	sm.mu.Lock()
 	sm.closed = true
 	for key, state := range sm.states {
@@ -254,13 +260,8 @@ func (sm *StreamManager) CloseAllStreams() {
 		delete(sm.directStreams, id)
 	}
 	sm.mu.Unlock()
-
-	for _, handle := range toClose {
-		close(handle.cancelChan)
-		if handle.closer != nil {
-			_ = handle.closer.Close()
-		}
-	}
+	sm.engine.admissionMu.Unlock()
+	closeDirectHandles(toClose)
 }
 
 // AddStream increments the reference count for a file and applies a range-aware QoS overlay.
@@ -599,7 +600,7 @@ func (sm *StreamManager) refreshTorrentOverlayLocked(mt *ManagedTorrent) error {
 		return context.Canceled
 	}
 	mt.mu.Lock()
-	inactive := mt.initializing || mt.rechecking || mt.downloadBlock != "" || (mt.state != models.StateDownloading && mt.state != models.StateQueued && mt.state != models.StateSeeding)
+	inactive := !mt.policy.payloadEligible()
 	mt.mu.Unlock()
 	var oldRanges, newRanges []streamPieceRange
 	files := mt.t.Files()
@@ -733,11 +734,11 @@ func (sm *StreamManager) applyOverlayDiff(mt *ManagedTorrent, key FileKey, oldRa
 
 func (sm *StreamManager) restoreBasePriorities(mt *ManagedTorrent) {
 	mt.mu.Lock()
-	state := mt.state
+	inactive := !mt.policy.payloadEligible()
 	mt.mu.Unlock()
 
-	if state == models.StatePaused || state == models.StateError || state == models.StateMissingFiles || state == models.StateDiskFull {
-		logging.Debugf("torrent is in inactive state %s, restoring inactive priorities hash=%s", state, mt.t.InfoHash().HexString())
+	if inactive {
+		logging.Debugf("torrent is inactive, restoring inactive priorities hash=%s", mt.t.InfoHash().HexString())
 		for _, f := range mt.t.Files() {
 			f.SetPriority(torrent.PiecePriorityNone)
 		}

@@ -2,12 +2,22 @@ import type { Torrent, File, BTHealth } from '../types';
 
 const API_BASE = '/api/v1';
 
+export type TorrentSnapshot = Torrent[] & { snapshotVersion?: string };
+export type CommandReceipt = { commandAtNS: number; snapshotVersion?: string };
+export type CommandResult = number | CommandReceipt;
+
+async function commandReceipt(response: Response): Promise<CommandReceipt> {
+  return { commandAtNS: (await response.json()).command_at_ns || 0, snapshotVersion: response.headers.get('X-Hub-Snapshot') || undefined };
+}
+
 export const apiClient = {
-  async getTorrents(): Promise<Torrent[]> {
+  async getTorrents(): Promise<TorrentSnapshot> {
     const response = await fetch(`${API_BASE}/torrents`);
     if (!response.ok) throw new Error(await readError(response, 'Failed to fetch torrents'));
     const data = await response.json();
-    return Array.isArray(data) ? data : [];
+    if (!Array.isArray(data)) throw new Error('Invalid torrent snapshot');
+    Object.defineProperty(data, 'snapshotVersion', { value: response.headers.get('X-Hub-Snapshot') || undefined });
+    return data;
   },
 
   async addTorrent(link: string, savePath: string = '', sequential: boolean = false, poster: string = ''): Promise<void> {
@@ -32,34 +42,34 @@ export const apiClient = {
     if (!response.ok) throw new Error(await readError(response, 'Failed to upload torrent file'));
   },
 
-  async action(hash: string, action: 'pause' | 'resume' | 'delete' | 'recheck' | 'hard_refresh' | 'make_permanent', deleteFiles: boolean = false): Promise<number> {
+  async action(hash: string, action: 'pause' | 'resume' | 'delete' | 'recheck' | 'hard_refresh' | 'make_permanent', deleteFiles: boolean = false): Promise<CommandResult> {
     const response = await fetch(`${API_BASE}/torrent/${hash}/action`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ action, delete_files: deleteFiles })
     });
     if (!response.ok) throw new Error(await readError(response, `Failed to perform action: ${action}`));
-    return (await response.json()).command_at_ns || 0;
+    return commandReceipt(response);
   },
 
-  async setTorrentPriority(hash: string, priority: number): Promise<number> {
+  async setTorrentPriority(hash: string, priority: number): Promise<CommandResult> {
     const response = await fetch(`${API_BASE}/torrent/${hash}/priority`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ priority })
     });
     if (!response.ok) throw new Error(await readError(response, 'Failed to set torrent priority'));
-    return (await response.json()).command_at_ns || 0;
+    return commandReceipt(response);
   },
 
-  async setFilePriority(hash: string, index: number, priority: number): Promise<number> {
+  async setFilePriority(hash: string, index: number, priority: number): Promise<CommandResult> {
     const response = await fetch(`${API_BASE}/torrent/${hash}/file/${index}/priority`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ priority })
     });
     if (!response.ok) throw new Error(await readError(response, 'Failed to set file priority'));
-    return (await response.json()).command_at_ns || 0;
+    return commandReceipt(response);
   },
 
   async getFiles(hash: string): Promise<File[]> {
@@ -118,13 +128,16 @@ function normalizeTorrentLink(link: string) {
   return trimmed;
 }
 
-export function setupSSE(onUpdate: (torrents: Torrent[]) => void) {
+export function setupSSE(onUpdate: (torrents: Torrent[], version?: string) => void) {
   const eventSource = new EventSource(`${API_BASE}/events`);
+  let stopped = false;
   
   eventSource.onmessage = (event) => {
+    if (stopped) return;
     try {
       const torrents = JSON.parse(event.data);
-      onUpdate(torrents);
+      if (!Array.isArray(torrents)) throw new Error('Invalid SSE torrent snapshot');
+      onUpdate(torrents, event.lastEventId || undefined);
     } catch (e) {
       console.error('SSE JSON parse error', e);
     }
@@ -134,5 +147,5 @@ export function setupSSE(onUpdate: (torrents: Torrent[]) => void) {
     console.error('SSE Connection error', error);
   };
 
-  return () => eventSource.close();
+  return () => { stopped = true; eventSource.close(); };
 }

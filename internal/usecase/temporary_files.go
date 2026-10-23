@@ -119,7 +119,7 @@ func (uc *TorrentUseCase) deleteTemporaryLocked(hash string) error {
 	return uc.deletePayloadLocked(t)
 }
 
-// Caller holds Lifecycle. Both manual deletion and FIFO use this workflow.
+// Caller owns record/root handles. Manual deletion and FIFO share this workflow.
 func (uc *TorrentUseCase) deletePayloadLocked(t *models.Torrent) (retErr error) {
 	defer func() {
 		if retErr != nil {
@@ -160,6 +160,9 @@ func (uc *TorrentUseCase) deletePayloadLocked(t *models.Torrent) (retErr error) 
 		if err := uc.repo.BeginCleanup(hash, paths); err != nil {
 			return err
 		}
+		if uc.beforeDetach != nil {
+			uc.beforeDetach(hash)
+		}
 		if err := uc.engine.Delete(hash); err != nil {
 			return err
 		}
@@ -182,6 +185,9 @@ func (uc *TorrentUseCase) deletePayloadLocked(t *models.Torrent) (retErr error) 
 		}
 	} else {
 		// Idempotently stop any remaining runtime before retrying the manifest.
+		if uc.beforeDetach != nil {
+			uc.beforeDetach(hash)
+		}
 		if err := uc.engine.Delete(hash); err != nil {
 			return err
 		}
@@ -312,7 +318,7 @@ func validateCleanupPath(root *os.Root, path string) error {
 }
 
 // openPayloadLocked is also used on every ZIP entry open after preflight. The
-// lease protects against deletion; Lifecycle serializes ownership checks with add.
+// lease protects against deletion; command handles serialize ownership checks with Add.
 func (uc *TorrentUseCase) openPayloadLocked(hash string, index int, path string, size int64) (*os.File, error) {
 	if err := uc.checkStorageAvailable(hash); err != nil {
 		return nil, err

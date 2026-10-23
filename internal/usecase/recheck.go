@@ -1,15 +1,19 @@
 package usecase
 
 import (
+	"context"
 	"errors"
 
 	"torrent-stream-hub/internal/engine"
 	"torrent-stream-hub/internal/models"
 )
 
-func (uc *TorrentUseCase) Recheck(hash string) (*models.RecheckOperation, error) {
-	uc.repo.Lifecycle.Lock()
-	defer uc.repo.Lifecycle.Unlock()
+func (uc *TorrentUseCase) Recheck(hash string, contexts ...context.Context) (*models.RecheckOperation, error) {
+	release, err := uc.lockRecord(hash, contexts...)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	saved, err := uc.repo.GetTorrent(hash)
 	if err != nil {
 		return nil, err
@@ -20,7 +24,7 @@ func (uc *TorrentUseCase) Recheck(hash string) (*models.RecheckOperation, error)
 	if err := uc.priorityAvailable(hash); err != nil {
 		return nil, err
 	}
-	if uc.transfers[hash] > 0 {
+	if uc.transferCount(hash) > 0 {
 		return nil, ErrStorageConflict
 	}
 	if uc.engine.GetRawTorrent(hash) == nil {
@@ -30,6 +34,13 @@ func (uc *TorrentUseCase) Recheck(hash string) (*models.RecheckOperation, error)
 		if err := uc.restoreInactiveLocked(saved); err != nil {
 			return nil, err
 		}
+	}
+	i, err := uc.currentIntent(hash)
+	if err != nil {
+		return nil, err
+	}
+	if err := bindVerificationRuntime(uc.engine, uc.repo, i.Version); err != nil {
+		return nil, commandStateError(err)
 	}
 	op, err := uc.engine.StartRecheck(hash)
 	if errors.Is(err, engine.ErrTorrentNotFound) {

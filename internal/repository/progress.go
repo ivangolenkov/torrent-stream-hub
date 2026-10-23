@@ -1,10 +1,13 @@
 package repository
 
-import "torrent-stream-hub/internal/models"
+import (
+	"database/sql"
+	"torrent-stream-hub/internal/models"
+)
 
 // A database observation is always last-known/legacy, never proof of current
 // bytes. Readiness must be established by the engine's storage verification.
-func (r *TorrentRepo) loadProgressObservations(torrents map[string]*models.Torrent) error {
+func (r *TorrentRepo) loadProgressObservations(tx *sql.Tx, torrents map[string]*models.Torrent) error {
 	if len(torrents) == 0 {
 		return nil
 	}
@@ -16,7 +19,7 @@ func (r *TorrentRepo) loadProgressObservations(torrents map[string]*models.Torre
 			args = append(args, hash)
 		}
 	}
-	rows, err := r.db.DB().Query(query, args...)
+	rows, err := tx.Query(query, args...)
 	if err != nil {
 		return err
 	}

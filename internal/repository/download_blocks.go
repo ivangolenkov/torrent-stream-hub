@@ -1,6 +1,9 @@
 package repository
 
-import "torrent-stream-hub/internal/models"
+import (
+	"database/sql"
+	"torrent-stream-hub/internal/models"
+)
 
 func (r *TorrentRepo) SaveDownloadBlock(hash, reason string) error {
 	if reason == "" {
@@ -17,11 +20,11 @@ func (r *TorrentRepo) DownloadBlock(hash string) (string, error) {
 	return reason, err
 }
 
-func (r *TorrentRepo) loadDownloadBlocks(torrents map[string]*models.Torrent) error {
+func (r *TorrentRepo) loadDownloadBlocks(tx *sql.Tx, torrents map[string]*models.Torrent) error {
 	if len(torrents) == 0 {
 		return nil
 	}
-	rows, err := r.db.DB().Query(`SELECT hash,reason FROM torrent_download_blocks`)
+	rows, err := tx.Query(`SELECT hash,reason FROM torrent_download_blocks`)
 	if err != nil {
 		return err
 	}

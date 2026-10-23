@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 	"torrent-stream-hub/internal/engine"
 	"torrent-stream-hub/internal/logging"
@@ -43,13 +44,23 @@ func (e TorrentNotFoundError) Is(target error) bool {
 type TorrentUseCase struct {
 	engine               *engine.Engine
 	repo                 *repository.TorrentRepo
+	coordinator          *applicationCoordinator
+	policyMu             sync.Mutex // policy/lease data only, never SQLite/engine/I/O
+	storageInitMu        sync.Mutex // DB-only initialization, never waits for command keys
+	cleanupMu            sync.Mutex // cleanup uses TryLock; commands never wait for a cleanup pass
 	maxTemporary         int
 	transfers            map[string]int
 	protectedUntil       map[string]time.Time
+	transferRecords      map[string]string
 	storageWorkerStarted bool
 	// Optional rooted filesystem operation for deterministic failure injection.
-	payloadRemove func(*os.Root, string) error
+	payloadRemove  func(*os.Root, string) error
+	beforeDetach   func(string)
+	inactiveVerify func(context.Context, string) error
+	migrationCopy  func(context.Context, *os.Root, *migrationEntry) error
 }
+
+func (uc *TorrentUseCase) NextSnapshotVersion() string { return uc.engine.NextSnapshotVersion() }
 
 type StreamOptions = engine.StreamOptions
 
@@ -77,6 +88,13 @@ func (f DownloadedDiskFile) Open() (*os.File, error) {
 
 func NewTorrentUseCase(e *engine.Engine, r *repository.TorrentRepo) *TorrentUseCase {
 	e.SetDownloadBlockPersistence(r.SaveDownloadBlock)
+	e.SetSafetyPersistence(r.PutRuntimeSafetyBlock)
+	e.SetVerificationPersistence(func(f models.RuntimeFence, uncertain bool, reason string) error {
+		if uncertain {
+			return r.PutActivationBlock(f, models.BlockVerification, reason)
+		}
+		return r.ClearActivationBlock(f, models.BlockVerification)
+	})
 	e.SetStorageRootResolver(func(hash string) (string, error) {
 		m, err := r.StorageMapping(hash)
 		if err != nil {
@@ -87,13 +105,17 @@ func NewTorrentUseCase(e *engine.Engine, r *repository.TorrentRepo) *TorrentUseC
 		}
 		return m.Root, nil
 	}, r.ClaimStorageAlias)
-	return &TorrentUseCase{
-		engine:         e,
-		repo:           r,
-		maxTemporary:   3,
-		transfers:      make(map[string]int),
-		protectedUntil: make(map[string]time.Time),
+	uc := &TorrentUseCase{
+		engine:          e,
+		repo:            r,
+		maxTemporary:    3,
+		transfers:       make(map[string]int),
+		protectedUntil:  make(map[string]time.Time),
+		transferRecords: make(map[string]string),
+		coordinator:     newApplicationCoordinator(e.Context()),
 	}
+	e.StartTask(func(ctx context.Context) { <-ctx.Done(); _ = uc.coordinator.close(context.Background()) })
+	return uc
 }
 
 func (uc *TorrentUseCase) AddMagnet(magnet string) (*models.Torrent, error) {
@@ -105,17 +127,32 @@ func (uc *TorrentUseCase) AddMagnetWithMetadata(magnet string, metadata TorrentM
 }
 
 func (uc *TorrentUseCase) AddMagnetWithPolicy(magnet string, metadata TorrentMetadata, temporary bool) (*models.Torrent, error) {
-	uc.repo.Lifecycle.Lock()
-	defer uc.repo.Lifecycle.Unlock()
 	logging.Infof("usecase add magnet %s", logging.SafeMagnetSummary(magnet))
 	parsed, err := torrent.TorrentSpecFromMagnetUri(magnet)
 	if err != nil {
 		return nil, err
 	}
+	release, err := uc.lockSpec(parsed)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	if err := uc.checkSpecAddAllowed(parsed); err != nil {
 		return nil, err
 	}
-	t, err := uc.engine.AddMagnet(magnet)
+	// Mapping/alias reservation is now durable and insert-only. Reacquire the
+	// complete resolved root-key set before engine/intent effects: asynchronous
+	// metadata may have introduced an alias while the initial keys were resolved.
+	release()
+	release, err = uc.lockSpec(parsed)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	if err := uc.checkSpecAddAllowed(parsed); err != nil {
+		return nil, err
+	}
+	t, err := uc.engine.AddStagedMagnet(magnet)
 	if err != nil {
 		logging.Warnf("usecase add magnet failed %s: %v", logging.SafeMagnetSummary(magnet), err)
 		return nil, err
@@ -129,8 +166,6 @@ func (uc *TorrentUseCase) AddTorrentFile(r io.Reader) (*models.Torrent, error) {
 }
 
 func (uc *TorrentUseCase) AddTorrentFileWithPolicy(r io.Reader, metadata TorrentMetadata, temporary bool) (*models.Torrent, error) {
-	uc.repo.Lifecycle.Lock()
-	defer uc.repo.Lifecycle.Unlock()
 	logging.Infof("usecase add .torrent file")
 	mi, err := metainfo.Load(r)
 	if err != nil {
@@ -140,14 +175,31 @@ func (uc *TorrentUseCase) AddTorrentFileWithPolicy(r io.Reader, metadata Torrent
 	if err != nil {
 		return nil, err
 	}
-	if err := uc.checkSpecAddAllowed(spec); err != nil {
-		return nil, err
-	}
 	var encoded bytes.Buffer
 	if err := mi.Write(&encoded); err != nil {
 		return nil, err
 	}
-	t, err := uc.engine.AddTorrentFile(&encoded)
+	// Input belongs to the caller and may block indefinitely. No canonical
+	// identity/namespace has been reserved yet; validate duplicates/workflows only
+	// after parsing, under coordination, before touching the engine.
+	release, err := uc.lockSpec(spec)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	if err := uc.checkSpecAddAllowed(spec); err != nil {
+		return nil, err
+	}
+	release()
+	release, err = uc.lockSpec(spec)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	if err := uc.checkSpecAddAllowed(spec); err != nil {
+		return nil, err
+	}
+	t, err := uc.engine.AddStagedTorrentFile(&encoded)
 	if err != nil {
 		logging.Warnf("usecase add .torrent file failed: %v", err)
 		return nil, err
@@ -156,7 +208,7 @@ func (uc *TorrentUseCase) AddTorrentFileWithPolicy(r io.Reader, metadata Torrent
 	return uc.finishAddLocked(t, metadata, temporary)
 }
 
-// Caller holds Lifecycle; reject re-add before engine mutation/admission.
+// Caller owns hash/root keys; reject re-add before engine mutation/admission.
 func (uc *TorrentUseCase) checkSpecAddAllowed(spec *torrent.TorrentSpec) error {
 	if err := uc.initializeStorageLocked(); err != nil {
 		return err
@@ -215,40 +267,9 @@ func (uc *TorrentUseCase) checkAddAllowed(hash string) error {
 
 func (uc *TorrentUseCase) GetAllTorrents() ([]*models.Torrent, error) {
 	started := time.Now().UnixNano()
-	dbTorrents, err := uc.repo.GetAllTorrents()
+	merged, err := uc.readAllConsistently()
 	if err != nil {
 		return nil, err
-	}
-
-	engineTorrents := uc.engine.GetAllTorrents()
-	if len(engineTorrents) == 0 {
-		for _, t := range dbTorrents {
-			t.SnapshotAt = started
-		}
-		return dbTorrents, nil
-	}
-
-	engineByHash := make(map[string]*models.Torrent, len(engineTorrents))
-	for _, t := range engineTorrents {
-		engineByHash[t.Hash] = t
-	}
-
-	merged := make([]*models.Torrent, 0, len(dbTorrents)+len(engineTorrents))
-	seen := make(map[string]bool, len(dbTorrents)+len(engineTorrents))
-	for _, dbT := range dbTorrents {
-		if engineT, ok := engineByHash[dbT.Hash]; ok {
-			mergePersistedMetadata(engineT, dbT)
-			merged = append(merged, engineT)
-		} else {
-			merged = append(merged, dbT)
-		}
-		seen[dbT.Hash] = true
-	}
-
-	for _, engineT := range engineTorrents {
-		if !seen[engineT.Hash] {
-			merged = append(merged, engineT)
-		}
 	}
 
 	for _, t := range merged {
@@ -263,20 +284,38 @@ func (uc *TorrentUseCase) BTHealth() *models.BTHealth {
 
 func (uc *TorrentUseCase) GetTorrent(hash string) (*models.Torrent, error) {
 	started := time.Now().UnixNano()
-	dbT, err := uc.repo.GetTorrent(hash)
+	readDB := func() ([]*models.Torrent, error) {
+		v, err := uc.repo.GetTorrent(hash)
+		if err != nil {
+			return nil, err
+		}
+		if v == nil {
+			return []*models.Torrent{}, nil
+		}
+		return []*models.Torrent{v}, nil
+	}
+	readRuntime := func() []*models.Torrent {
+		v := uc.engine.GetTorrent(hash)
+		if v == nil {
+			return nil
+		}
+		return []*models.Torrent{v}
+	}
+	items, err := readConsistentTorrents(readDB, readRuntime, func() func() bool {
+		stamp := uc.engine.CaptureReadStamp(hash)
+		return func() bool { return uc.engine.ValidateReadStamp(stamp) }
+	})
 	if err != nil {
 		return nil, err
 	}
-	engineT := uc.engine.GetTorrent(hash)
-	if engineT == nil {
-		if dbT != nil {
-			dbT.SnapshotAt = started
-		}
-		return dbT, nil
+	var t *models.Torrent
+	if len(items) > 0 {
+		t = items[0]
 	}
-	mergePersistedMetadata(engineT, dbT)
-	engineT.SnapshotAt = started
-	return engineT, nil
+	if t != nil {
+		t.SnapshotAt = started
+	}
+	return t, nil
 }
 
 // GetTorrentPieces returns a string representing the status of all pieces in a torrent.
@@ -322,8 +361,11 @@ func (uc *TorrentUseCase) GetTorrentPieces(hash string) (string, error) {
 }
 
 func (uc *TorrentUseCase) UpdateMetadata(hash string, metadata TorrentMetadata) (*models.Torrent, error) {
-	uc.repo.Lifecycle.Lock()
-	defer uc.repo.Lifecycle.Unlock()
+	release, err := uc.lockRecord(hash)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	t, err := uc.repo.GetTorrent(hash)
 	if err != nil {
 		return nil, err
@@ -331,16 +373,27 @@ func (uc *TorrentUseCase) UpdateMetadata(hash string, metadata TorrentMetadata) 
 	if t == nil {
 		return nil, TorrentNotFoundError{Hash: hash}
 	}
-	applyMetadata(t, metadata)
-	if err := uc.repo.SaveTorrent(t); err != nil {
+	i, err := uc.currentIntent(hash)
+	if err != nil {
 		return nil, err
+	}
+	expected := uc.engine.GetRawTorrent(hash)
+	v, err := uc.repo.UpdateUserMetadata(i.Version, models.UserMetadata{Title: metadata.Title, Data: metadata.Data, Poster: metadata.Poster, Category: metadata.Category})
+	if err != nil {
+		return nil, err
+	}
+	if err := bindIncrementalRuntime(uc.engine, uc.repo, v); err != nil {
+		return nil, uc.failedIntentApply(expected, v, "runtime_bind_failed", err)
 	}
 	return uc.GetTorrent(hash)
 }
 
-func (uc *TorrentUseCase) Pause(hash string) error {
-	uc.repo.Lifecycle.Lock()
-	defer uc.repo.Lifecycle.Unlock()
+func (uc *TorrentUseCase) Pause(hash string, contexts ...context.Context) error {
+	release, err := uc.lockRecord(hash, contexts...)
+	if err != nil {
+		return err
+	}
+	defer release()
 	logging.Infof("usecase pause hash=%s", hash)
 	t, err := uc.repo.GetTorrent(hash)
 	if err != nil {
@@ -352,24 +405,38 @@ func (uc *TorrentUseCase) Pause(hash string) error {
 		return TorrentNotFoundError{Hash: hash}
 	}
 
+	i, err := uc.currentIntent(hash)
+	if err != nil {
+		return err
+	}
+	expected := uc.engine.GetRawTorrent(hash)
 	if err := uc.engine.Pause(hash); err != nil && !errors.Is(err, engine.ErrTorrentNotFound) {
 		logging.Warnf("engine pause failed hash=%s: %v", hash, err)
-		return err
+		return uc.failedIntentApply(expected, i.Version, "runtime_stage_failed", err)
 	} else if err != nil {
 		logging.Debugf("pause applied to DB-only torrent hash=%s", hash)
 	}
 
-	t.State = models.StatePaused
-	if err := uc.repo.SaveTorrent(t); err != nil {
+	v, err := uc.repo.CommitRunIntent(i.Version, models.RunPaused)
+	if err != nil {
 		logging.Warnf("failed to persist paused state hash=%s: %v", hash, err)
-		return err
+		return uc.failedIntentApply(expected, i.Version, "intent_commit_failed", err)
+	}
+	if err := uc.engine.ReconcilePausedIntent(t); err != nil && !errors.Is(err, engine.ErrTorrentNotFound) {
+		return uc.failedIntentApply(expected, v, "runtime_apply_failed", err)
+	}
+	if err := bindAppliedRuntime(uc.engine, uc.repo, v); err != nil {
+		return uc.failedIntentApply(expected, v, "runtime_bind_failed", err)
 	}
 	return nil
 }
 
-func (uc *TorrentUseCase) Resume(hash string) error {
-	uc.repo.Lifecycle.Lock()
-	defer uc.repo.Lifecycle.Unlock()
+func (uc *TorrentUseCase) Resume(hash string, contexts ...context.Context) error {
+	release, err := uc.lockRecord(hash, contexts...)
+	if err != nil {
+		return err
+	}
+	defer release()
 	logging.Infof("usecase resume hash=%s", hash)
 	t, err := uc.repo.GetTorrent(hash)
 	if err != nil {
@@ -388,11 +455,25 @@ func (uc *TorrentUseCase) Resume(hash string) error {
 	} else if pending {
 		return ErrStorageConflict
 	}
+	i, err := uc.currentIntent(hash)
+	if err != nil {
+		return err
+	}
+	blocks, err := uc.repo.ActivationBlocks(i.Version)
+	if err != nil {
+		return err
+	}
+	for _, block := range blocks {
+		if !block.Kind.ResumeRetryable() {
+			return ErrStorageConflict
+		}
+	}
 
+	expected := uc.engine.GetRawTorrent(hash)
 	if err := uc.engine.StageExistingRestore(t); err != nil {
 		if !errors.Is(err, engine.ErrTorrentNotFound) {
 			logging.Warnf("engine resume failed hash=%s: %v", hash, err)
-			return err
+			return uc.failedIntentApply(expected, i.Version, "runtime_stage_failed", err)
 		}
 		logging.Infof("resume restoring DB-only torrent hash=%s source_present=%t", hash, t.SourceURI != "")
 		restored, err := uc.restoreTorrentToEngine(t)
@@ -403,24 +484,30 @@ func (uc *TorrentUseCase) Resume(hash string) error {
 		if t.SourceURI == "" {
 			t.SourceURI = restored.SourceURI
 		}
+		expected = uc.engine.GetRawTorrent(hash)
 	}
 
-	t.State = models.StateQueued
-	t.Error = models.ErrNone
-	if err := uc.repo.SaveTorrent(t); err != nil {
+	v, err := uc.repo.CommitResumeRetry(i.Version)
+	if err != nil {
 		_ = uc.engine.Pause(hash)
 		logging.Warnf("failed to persist resumed state hash=%s: %v", hash, err)
-		return err
+		return uc.failedIntentApply(expected, i.Version, "intent_commit_failed", err)
 	}
 	if err := uc.engine.FinishRestore(hash, models.StateQueued, true); err != nil {
-		return err
+		return uc.failedIntentApply(expected, v, "runtime_apply_failed", err)
+	}
+	if err := bindAppliedRuntime(uc.engine, uc.repo, v); err != nil {
+		return uc.failedIntentApply(expected, v, "runtime_bind_failed", err)
 	}
 	return nil
 }
 
-func (uc *TorrentUseCase) SetFilePriority(hash string, fileIndex int, priority models.FilePriority) error {
-	uc.repo.Lifecycle.Lock()
-	defer uc.repo.Lifecycle.Unlock()
+func (uc *TorrentUseCase) SetFilePriority(hash string, fileIndex int, priority models.FilePriority, contexts ...context.Context) error {
+	release, err := uc.lockRecord(hash, contexts...)
+	if err != nil {
+		return err
+	}
+	defer release()
 	logging.Infof("usecase set file priority hash=%s index=%d priority=%d", hash, fileIndex, priority)
 
 	if fileIndex < 0 || (priority != models.PriorityNormal && priority != models.PriorityHigh && priority != models.PriorityNone) {
@@ -449,22 +536,29 @@ func (uc *TorrentUseCase) SetFilePriority(hash string, fileIndex int, priority m
 		}
 		return ErrFileNotFound
 	}
+	expected := uc.engine.GetRawTorrent(hash)
 	// User intent is committed before changing the runtime. Statistics saves never
 	// overwrite it, even if metadata is still pending.
 	if err := uc.repo.UpdateFilePriority(hash, fileIndex, priority); err != nil {
 		logging.Warnf("failed to persist file priority hash=%s index=%d: %v", hash, fileIndex, err)
 		return err
 	}
+	v := nextSavedVersion(saved)
 	if err := uc.engine.SetFilePriority(hash, fileIndex, priority); err != nil && !errors.Is(err, engine.ErrTorrentNotFound) {
-		return err
+		return uc.failedIntentApply(expected, v, "runtime_apply_failed", err)
 	}
-
+	if err := bindIncrementalRuntime(uc.engine, uc.repo, v); err != nil {
+		return uc.failedIntentApply(expected, v, "runtime_bind_failed", err)
+	}
 	return nil
 }
 
-func (uc *TorrentUseCase) SetTorrentFilesPriority(hash string, priority models.FilePriority) error {
-	uc.repo.Lifecycle.Lock()
-	defer uc.repo.Lifecycle.Unlock()
+func (uc *TorrentUseCase) SetTorrentFilesPriority(hash string, priority models.FilePriority, contexts ...context.Context) error {
+	release, err := uc.lockRecord(hash, contexts...)
+	if err != nil {
+		return err
+	}
+	defer release()
 	logging.Infof("usecase set torrent files priority hash=%s priority=%d", hash, priority)
 
 	if priority != models.PriorityNormal && priority != models.PriorityHigh && priority != models.PriorityNone {
@@ -483,6 +577,7 @@ func (uc *TorrentUseCase) SetTorrentFilesPriority(hash string, priority models.F
 	if len(saved.Files) == 0 {
 		return ErrMetadataPending
 	}
+	expected := uc.engine.GetRawTorrent(hash)
 	if err := uc.repo.UpdateTorrentFilesPriority(hash, priority); err != nil {
 		logging.Warnf("failed to persist torrent files priority hash=%s: %v", hash, err)
 		return err
@@ -494,10 +589,13 @@ func (uc *TorrentUseCase) SetTorrentFilesPriority(hash string, priority models.F
 		}
 		priorities[file.Index] = priority
 	}
+	v := nextSavedVersion(saved)
 	if err := uc.engine.SetFilePriorities(hash, priorities); err != nil && !errors.Is(err, engine.ErrTorrentNotFound) {
-		return err
+		return uc.failedIntentApply(expected, v, "runtime_apply_failed", err)
 	}
-
+	if err := bindIncrementalRuntime(uc.engine, uc.repo, v); err != nil {
+		return uc.failedIntentApply(expected, v, "runtime_bind_failed", err)
+	}
 	return nil
 }
 
@@ -513,9 +611,12 @@ func (uc *TorrentUseCase) priorityAvailable(hash string) error {
 	return nil
 }
 
-func (uc *TorrentUseCase) Delete(hash string, deleteFiles bool) (retErr error) {
-	uc.repo.Lifecycle.Lock()
-	defer uc.repo.Lifecycle.Unlock()
+func (uc *TorrentUseCase) Delete(hash string, deleteFiles bool, contexts ...context.Context) (retErr error) {
+	release, err := uc.lockRecord(hash, contexts...)
+	if err != nil {
+		return err
+	}
+	defer release()
 	logging.Infof("usecase delete hash=%s delete_files=%t", hash, deleteFiles)
 	t, err := uc.repo.GetTorrent(hash)
 	if err != nil {
@@ -540,7 +641,7 @@ func (uc *TorrentUseCase) Delete(hash string, deleteFiles bool) (retErr error) {
 	}
 	if m, err := uc.repo.StorageMapping(hash); err != nil {
 		return err
-	} else if m != nil && m.State == "moving" {
+	} else if m != nil && (m.State == "moving" || m.Manifest != "") {
 		return ErrStorageConflict
 	}
 	if deleteFiles {
@@ -548,6 +649,9 @@ func (uc *TorrentUseCase) Delete(hash string, deleteFiles bool) (retErr error) {
 	}
 	if err := uc.repo.BeginForget(hash); err != nil {
 		return err
+	}
+	if uc.beforeDetach != nil {
+		uc.beforeDetach(hash)
 	}
 	if err := uc.engine.Delete(hash); err != nil {
 		return err
@@ -567,8 +671,6 @@ func validateRelativeDownloadPath(relPath string) error {
 }
 
 func (uc *TorrentUseCase) RestoreTorrents() error {
-	uc.repo.Lifecycle.Lock()
-	defer uc.repo.Lifecycle.Unlock()
 	if err := uc.initializeStorageLocked(); err != nil {
 		return err
 	}
@@ -587,42 +689,35 @@ func (uc *TorrentUseCase) RestoreTorrents() error {
 		return torrents[i].Hash < torrents[j].Hash
 	})
 	for _, t := range torrents {
+		release, err := uc.lockRecord(t.Hash)
+		if err != nil {
+			return err
+		}
+		current, err := uc.repo.GetTorrent(t.Hash)
+		if err != nil {
+			release()
+			return err
+		}
+		if current == nil {
+			release()
+			continue
+		}
+		t = current
 		if err := uc.checkStorageAvailable(t.Hash); err != nil {
+			release()
 			continue
 		}
 		if _, pending, err := uc.repo.CleanupPaths(t.Hash); err != nil {
+			release()
 			return err
 		} else if pending {
+			release()
 			continue
 		}
-		switch t.State {
-		case models.StatePaused, models.StateError, models.StateMissingFiles:
-			if err := uc.restoreMappedTorrentLocked(t); err != nil {
-				if !errors.Is(err, ErrMetadataPending) {
-					restoreErr = errors.Join(restoreErr, err)
-				}
-			}
-			continue
-		}
-
-		logging.Infof("restoring torrent hash=%s state=%s source_present=%t", t.Hash, t.State, t.SourceURI != "")
-		restored, err := uc.restoreTorrentToEngine(t)
-		if err == nil {
-			mergePersistedMetadata(restored, t)
-			if err := uc.repo.SaveTorrent(t); err != nil {
-				logging.Warnf("failed to save restored torrent hash=%s: %v", t.Hash, err)
-				restoreErr = errors.Join(restoreErr, fmt.Errorf("save restored torrent %s: %w", t.Hash, err))
-				continue
-			}
-			if err := uc.engine.FinishRestore(t.Hash, t.State); err != nil {
-				restoreErr = errors.Join(restoreErr, err)
-			}
-			continue
-		}
-		if err != nil {
-			logging.Warnf("failed to restore torrent hash=%s: %v", t.Hash, err)
+		if err := uc.restoreMappedTorrentLocked(t); err != nil && !errors.Is(err, ErrMetadataPending) {
 			restoreErr = errors.Join(restoreErr, fmt.Errorf("restore torrent %s: %w", t.Hash, err))
 		}
+		release()
 	}
 
 	return restoreErr
@@ -714,9 +809,12 @@ func (uc *TorrentUseCase) GetTorrentFile(hash string, index int) (*torrent.File,
 }
 
 func (uc *TorrentUseCase) OpenStreamSource(ctx context.Context, hash string, index int, isHEAD bool) (*engine.StreamSource, error) {
-	uc.repo.Lifecycle.Lock()
-	err := uc.prepareReadLocked(ctx, hash, index)
-	uc.repo.Lifecycle.Unlock()
+	release, err := uc.lockRecords(ctx, hash)
+	if err != nil {
+		return nil, err
+	}
+	err = uc.prepareReadLocked(ctx, hash, index)
+	release()
 	if err != nil {
 		return nil, err
 	}
@@ -744,8 +842,11 @@ func (uc *TorrentUseCase) CheckFileDirectReady(hash string, index int) (bool, in
 }
 
 func (uc *TorrentUseCase) GetDownloadedFile(hash string, index int) (*models.Torrent, DownloadedDiskFile, error) {
-	uc.repo.Lifecycle.Lock()
-	defer uc.repo.Lifecycle.Unlock()
+	release, err := uc.lockRecord(hash)
+	if err != nil {
+		return nil, DownloadedDiskFile{}, err
+	}
+	defer release()
 	t, err := uc.GetTorrent(hash)
 	if err != nil {
 		return nil, DownloadedDiskFile{}, err
@@ -772,8 +873,11 @@ func (uc *TorrentUseCase) GetDownloadedFile(hash string, index int) (*models.Tor
 }
 
 func (uc *TorrentUseCase) GetDownloadedTorrentFiles(hash string) (*models.Torrent, []DownloadedDiskFile, error) {
-	uc.repo.Lifecycle.Lock()
-	defer uc.repo.Lifecycle.Unlock()
+	release, err := uc.lockRecord(hash)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer release()
 	t, err := uc.GetTorrent(hash)
 	if err != nil {
 		return nil, nil, err
@@ -853,8 +957,11 @@ func (uc *TorrentUseCase) resolveDownloadedFile(t *models.Torrent, file *models.
 	}
 	hash, size := t.Hash, file.Size
 	return DownloadedDiskFile{Index: file.Index, Path: file.Path, Size: size, open: func() (*os.File, error) {
-		uc.repo.Lifecycle.Lock()
-		defer uc.repo.Lifecycle.Unlock()
+		release, err := uc.lockRecord(hash)
+		if err != nil {
+			return nil, err
+		}
+		defer release()
 		return uc.openPayloadLocked(hash, file.Index, path, size)
 	}}, nil
 }
@@ -887,10 +994,10 @@ func mergePersistedMetadata(runtime, persisted *models.Torrent) {
 		runtime.State = models.StatePaused
 	}
 	runtime.StorageState, runtime.StorageError = persisted.StorageState, persisted.StorageError
-	runtime.Title = firstNonEmpty(runtime.Title, persisted.Title)
-	runtime.Data = firstNonEmpty(runtime.Data, persisted.Data)
-	runtime.Poster = firstNonEmpty(runtime.Poster, persisted.Poster)
-	runtime.Category = firstNonEmpty(runtime.Category, persisted.Category)
+	runtime.Title = persisted.Title
+	runtime.Data = persisted.Data
+	runtime.Poster = persisted.Poster
+	runtime.Category = persisted.Category
 	runtime.SourceURI = firstNonEmpty(runtime.SourceURI, persisted.SourceURI)
 	runtime.LegacyDownloaded = persisted.LegacyDownloaded
 	if !runtime.MetadataKnown {
@@ -907,15 +1014,16 @@ func mergePersistedMetadata(runtime, persisted *models.Torrent) {
 			}
 		}
 	} else {
-		legacy := make(map[int]int64, len(persisted.Files))
+		legacy := make(map[int]*models.File, len(persisted.Files))
 		for _, file := range persisted.Files {
 			if file != nil {
-				legacy[file.Index] = file.LegacyDownloaded
+				legacy[file.Index] = file
 			}
 		}
 		for _, file := range runtime.Files {
-			if file != nil {
-				file.LegacyDownloaded = legacy[file.Index]
+			if file != nil && legacy[file.Index] != nil {
+				file.LegacyDownloaded = legacy[file.Index].LegacyDownloaded
+				file.Priority = legacy[file.Index].Priority
 			}
 		}
 	}

@@ -35,7 +35,7 @@ func run() (runErr error) {
 	if err := cfg.ValidateLogging(); err != nil {
 		return err
 	}
-	files, err := logging.NewFiles(logging.FileOptions{Dir: cfg.LogDir, RetentionDays: cfg.LogRetentionDays})
+	files, err := logging.NewAsyncFiles(logging.FileOptions{Dir: cfg.LogDir, RetentionDays: cfg.LogRetentionDays, MaxFileBytes: cfg.LogMaxFileBytes, MaxTotalBytes: cfg.LogMaxTotalBytes})
 	if err != nil {
 		return err
 	}
@@ -75,7 +75,7 @@ func run() (runErr error) {
 		logging.Warnf("failed to restore persisted torrents: %v", err)
 	}
 	uc.CleanupTemporary("startup")
-	syncWorker := usecase.NewSyncWorker(eng, repo)
+	syncWorker := usecase.NewSyncWorker(uc)
 	syncWorker.Refresh()
 	workerCtx, stopWorker := context.WithCancel(context.Background())
 	workerDone := make(chan struct{})

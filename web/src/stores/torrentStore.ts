@@ -1,6 +1,8 @@
 import { defineStore } from 'pinia';
 import { ref } from 'vue';
 import { apiClient, setupSSE } from '../api/client';
+import type { CommandResult } from '../api/client';
+import { SnapshotOrder } from './snapshotOrder';
 import type { Torrent, File } from '../types';
 
 export const useTorrentStore = defineStore('torrents', () => {
@@ -18,13 +20,46 @@ export const useTorrentStore = defineStore('torrents', () => {
   const commandBarriers = new Map<string, number>();
   // Protect a confirmed pin from an older SSE event already in flight.
   const confirmedPermanent = new Set<string>();
+  const snapshotOrder = new SnapshotOrder();
+  const recordID = (hash: string) => torrents.value.find(t => t.hash === hash)?.control?.record_id;
+  const sameRecord = (hash: string, issuedID?: string) => !issuedID || issuedID === recordID(hash);
+  const clearEpochCaches = () => {
+    confirmedPriorities.clear(); confirmedPermanent.clear(); commandBarriers.clear();
+    files.value = {}; pieces.value = {}; pinErrors.value = {}; actionErrors.value = {};
+  };
+  const receipt = (result: CommandResult, issuedEpoch?: string) => {
+    const version = typeof result === 'number' ? undefined : result.snapshotVersion;
+    const oldEpoch = snapshotOrder.epoch;
+    if (!snapshotOrder.acceptReceipt(version, issuedEpoch)) return undefined;
+    if (oldEpoch && snapshotOrder.epoch !== oldEpoch) clearEpochCaches();
+    dataVersion++;
+    return typeof result === 'number' ? result : result.commandAtNS;
+  };
 
-  const applyTorrents = (data: Torrent[]) => {
+  const applyTorrents = (data: Torrent[], version?: string, fromREST = false) => {
+    const order = snapshotOrder.acceptSnapshot(version, fromREST);
+    if (order === 'refresh') { void loadTorrents(); return; }
+    if (order === 'stale') return;
+    if (order === 'changed') clearEpochCaches();
     dataVersion++;
     data = data.flatMap(t => {
       const barrier = commandBarriers.get(t.hash) || 0;
       const previous = torrents.value.find(old => old.hash === t.hash);
-      if (t.snapshot_at_ns && t.snapshot_at_ns < barrier) return previous ? [previous] : [];
+      if (!version && t.snapshot_at_ns && t.snapshot_at_ns < barrier) return previous ? [previous] : [];
+      if (previous?.control && t.control) {
+        if (previous.control.record_id === t.control.record_id) {
+          // Revisions are decimal strings, not lossy JS numbers. Only compare
+          // within one record identity; re-add starts an unrelated revision.
+          const old = previous.control.desired_revision;
+          const next = t.control.desired_revision;
+          if (next.length < old.length || (next.length === old.length && next < old)) return [previous];
+        } else {
+          confirmedPriorities.delete(t.hash);
+          confirmedPermanent.delete(t.hash);
+          delete files.value[t.hash];
+          delete pieces.value[t.hash];
+        }
+      }
       const priorities = confirmedPriorities.get(t.hash);
       if (priorities && t.files && [...priorities].every(([index, priority]) => t.files?.some(f => f.index === index && f.priority === priority))) confirmedPriorities.delete(t.hash);
       return [{ ...t, files: t.files?.map(f => priorities?.has(f.index) ? { ...f, priority: priorities.get(f.index)! } : f) }];
@@ -54,8 +89,11 @@ export const useTorrentStore = defineStore('torrents', () => {
     if (pinning.value[hash]) return;
     pinning.value[hash] = true;
     delete pinErrors.value[hash];
+    const issuedEpoch = snapshotOrder.epoch;
+    const issuedID = recordID(hash);
     try {
-      await apiClient.action(hash, 'make_permanent');
+      const result = await apiClient.action(hash, 'make_permanent');
+      if (!sameRecord(hash, issuedID) || receipt(result, issuedEpoch) === undefined) { await loadTorrents(); return; }
       confirmedPermanent.add(hash);
       const torrent = torrents.value.find(t => t.hash === hash);
       if (torrent) torrent.is_temporary = false;
@@ -70,8 +108,8 @@ export const useTorrentStore = defineStore('torrents', () => {
 
   const initSSE = () => {
     if (sseCleanup) return;
-    sseCleanup = setupSSE((newData) => {
-      applyTorrents(newData || []);
+    sseCleanup = setupSSE((newData, version) => {
+      applyTorrents(newData || [], version);
     });
   };
 
@@ -87,7 +125,7 @@ export const useTorrentStore = defineStore('torrents', () => {
     const version = dataVersion;
     try {
       const data = await apiClient.getTorrents();
-      if (request === listRequest && version === dataVersion) applyTorrents(data);
+      if (request === listRequest && version === dataVersion) applyTorrents(data, data.snapshotVersion, true);
     } catch (e) {
       console.error(e);
     }
@@ -132,12 +170,18 @@ export const useTorrentStore = defineStore('torrents', () => {
   };
 
   const performAction = async (hash: string, action: 'pause' | 'resume' | 'delete' | 'recheck', deleteFiles = false) => runCommand(hash, async () => {
-    const barrier = await apiClient.action(hash, action, deleteFiles);
+    const issuedEpoch = snapshotOrder.epoch;
+    const issuedID = recordID(hash);
+    const result = await apiClient.action(hash, action, deleteFiles);
+    if (!sameRecord(hash, issuedID)) { await loadTorrents(); return; }
+    const barrier = receipt(result, issuedEpoch);
+    if (barrier === undefined) { await loadTorrents(); return; }
     if (barrier) commandBarriers.set(hash, barrier);
     if (action === 'delete' && selectedHash.value === hash) {
       closeInspector();
     }
     if (action === 'delete') {
+      torrents.value = torrents.value.filter(t => t.hash !== hash);
       confirmedPermanent.delete(hash);
       delete files.value[hash];
     }
@@ -145,7 +189,12 @@ export const useTorrentStore = defineStore('torrents', () => {
   });
 
   const setTorrentPriority = async (hash: string, priority: number) => runCommand(hash, async () => {
-    const barrier = await apiClient.setTorrentPriority(hash, priority);
+    const issuedEpoch = snapshotOrder.epoch;
+    const issuedID = recordID(hash);
+    const result = await apiClient.setTorrentPriority(hash, priority);
+    if (!sameRecord(hash, issuedID)) { await loadTorrents(); return; }
+    const barrier = receipt(result, issuedEpoch);
+    if (barrier === undefined) { await loadTorrents(); return; }
     if (barrier) commandBarriers.set(hash, barrier);
     const current = torrents.value.find(t => t.hash === hash)?.files || files.value[hash] || [];
     confirmedPriorities.set(hash, new Map(current.map(f => [f.index, priority])));
@@ -154,7 +203,12 @@ export const useTorrentStore = defineStore('torrents', () => {
   });
 
   const setFilePriority = async (hash: string, index: number, priority: number) => runCommand(hash, async () => {
-    const barrier = await apiClient.setFilePriority(hash, index, priority);
+    const issuedEpoch = snapshotOrder.epoch;
+    const issuedID = recordID(hash);
+    const result = await apiClient.setFilePriority(hash, index, priority);
+    if (!sameRecord(hash, issuedID)) { await loadTorrents(); return; }
+    const barrier = receipt(result, issuedEpoch);
+    if (barrier === undefined) { await loadTorrents(); return; }
     if (barrier) commandBarriers.set(hash, barrier);
     const priorities = confirmedPriorities.get(hash) || new Map<number, number>();
     priorities.set(index, priority);

@@ -93,3 +93,16 @@ func LogsHandler(reader logging.LogReader) http.HandlerFunc {
 		}
 	}
 }
+
+// Stats must not open the log store or wait for its filesystem/sink mutex.
+func LogsStatusHandler(reader logging.LogReader) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
+		stats, ok := reader.(interface{ Stats() logging.AsyncStats })
+		if !ok {
+			response.Error(w, http.StatusServiceUnavailable, "log delivery statistics unavailable")
+			return
+		}
+		response.JSON(w, http.StatusOK, stats.Stats())
+	}
+}

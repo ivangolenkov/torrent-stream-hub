@@ -228,7 +228,7 @@ func (e *Engine) refreshPeerDiscovery(mt *ManagedTorrent, reason string, downloa
 		return
 	}
 	mt.mu.Lock()
-	inactive := mt.initializing || mt.rechecking || mt.state == models.StatePaused || mt.state == models.StateError || mt.state == models.StateMissingFiles
+	inactive := !mt.policy.uploadEligible()
 	mt.mu.Unlock()
 	if inactive {
 		return

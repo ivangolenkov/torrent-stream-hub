@@ -26,6 +26,8 @@ type Config struct {
 	LogLevel                           string
 	LogDir                             string
 	LogRetentionDays                   int
+	LogMaxFileBytes                    int64
+	LogMaxTotalBytes                   int64
 	logConfigError                     error
 	BTSeed                             bool
 	BTSeedConfigured                   bool
@@ -88,12 +90,15 @@ func Load() *Config {
 	cfg := &Config{}
 	var logRetention string
 	var maxTemporary string
+	var logMaxFile, logMaxTotal string
 
 	flag.StringVar(&cfg.Port, "port", getEnv("HUB_PORT", "8080"), "Server port")
 	flag.IntVar(&cfg.TorrentPort, "torrent-port", getEnvAsInt("HUB_TORRENT_PORT", 50007), "BitTorrent protocol port")
 	flag.StringVar(&cfg.DownloadDir, "download-dir", getEnv("HUB_DOWNLOAD_DIR", "/downloads"), "Directory to save downloaded files")
 	flag.StringVar(&cfg.DBPath, "db-path", getEnv("HUB_DB_PATH", "/config/hub.db"), "Path to SQLite database file")
 	flag.StringVar(&cfg.LogDir, "log-dir", getEnv("HUB_LOG_DIR", ""), "Log directory (default: logs beside database)")
+	flag.StringVar(&logMaxFile, "log-max-file-bytes", getEnv("HUB_LOG_MAX_FILE_BYTES", "16777216"), "Maximum bytes per log segment")
+	flag.StringVar(&logMaxTotal, "log-max-total-bytes", getEnv("HUB_LOG_MAX_TOTAL_BYTES", "134217728"), "Maximum managed log bytes")
 	flag.StringVar(&logRetention, "log-retention-days", getEnv("HUB_LOG_RETENTION_DAYS", "3"), "Previous calendar days of logs to retain (0 = today only)")
 	flag.StringVar(&maxTemporary, "max-temporary-torrents", getEnv("HUB_MAX_TEMPORARY_TORRENTS", "3"), "Maximum temporary torrents (positive integer)")
 	flag.IntVar(&cfg.MaxActiveStreams, "max-streams", getEnvAsInt("HUB_MAX_ACTIVE_STREAMS", 4), "Maximum number of active streams")
@@ -156,6 +161,12 @@ func Load() *Config {
 	cfg.MaxTemporaryTorrents, cfg.temporaryConfigError = strconv.Atoi(maxTemporary)
 	var retentionErr error
 	cfg.LogRetentionDays, retentionErr = strconv.Atoi(logRetention)
+	var fileErr, totalErr error
+	cfg.LogMaxFileBytes, fileErr = strconv.ParseInt(logMaxFile, 10, 64)
+	cfg.LogMaxTotalBytes, totalErr = strconv.ParseInt(logMaxTotal, 10, 64)
+	if fileErr != nil || totalErr != nil || cfg.LogMaxFileBytes < 65536 || cfg.LogMaxTotalBytes < cfg.LogMaxFileBytes {
+		cfg.logConfigError = fmt.Errorf("invalid log byte limits: file must be >= 65536 and total >= file")
+	}
 	if retentionErr != nil {
 		cfg.logConfigError = fmt.Errorf("log retention days must be an integer between 0 and 36500")
 	}
@@ -163,7 +174,7 @@ func Load() *Config {
 	cfg.BTSwarmWatchdogConfigured = true
 	cfg.BTSwarmHardRefreshConfigured = true
 	cfg.BTClientRecycleConfigured = true
-	cfg.LogLevel = getEnv("HUB_LOG_LEVEL", "debug")
+	cfg.LogLevel = getEnv("HUB_LOG_LEVEL", "info")
 	ApplyDefaults(cfg)
 
 	return cfg
@@ -172,6 +183,12 @@ func Load() *Config {
 func ApplyDefaults(cfg *Config) {
 	if cfg == nil {
 		return
+	}
+	if cfg.LogMaxFileBytes == 0 {
+		cfg.LogMaxFileBytes = 16 << 20
+	}
+	if cfg.LogMaxTotalBytes == 0 {
+		cfg.LogMaxTotalBytes = 128 << 20
 	}
 	// Zero disables the emulated cache window; negative inputs normalize to it.
 	if cfg.StreamCacheSize < 0 {
@@ -300,6 +317,9 @@ func (cfg *Config) ValidateLogging() error {
 	}
 	if cfg.LogRetentionDays < 0 || cfg.LogRetentionDays > 36500 {
 		return fmt.Errorf("log retention days must be between 0 and 36500")
+	}
+	if cfg.LogMaxFileBytes < 65536 || cfg.LogMaxTotalBytes < cfg.LogMaxFileBytes {
+		return fmt.Errorf("invalid log byte limits: file must be >= 65536 and total >= file")
 	}
 	return nil
 }

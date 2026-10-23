@@ -363,6 +363,10 @@ func TestMetadataPersistenceFailureLeavesDownloadDisabled(t *testing.T) {
 		t.Fatal(err)
 	}
 	raw := e.GetRawTorrent(hash)
+	fence := models.RuntimeFence{IntentVersion: models.IntentVersion{Hash: hash, RecordID: "metadata-fault-record", Revision: 1}, Attachment: "metadata-fault-runtime"}
+	if err := e.BindRuntime(raw, fence); err != nil {
+		t.Fatal(err)
+	}
 	if err := raw.SetInfoBytes(mi.InfoBytes); err != nil {
 		t.Fatal(err)
 	}
@@ -378,6 +382,9 @@ func TestMetadataPersistenceFailureLeavesDownloadDisabled(t *testing.T) {
 	}
 	if raw.DataDownloadAllowed() {
 		t.Fatal("metadata persistence failure admitted data")
+	}
+	if model := e.GetTorrent(hash); model.Error != models.ErrMetadataPersistence || model.Control.AppliedRevision != 0 || raw.Files()[0].Priority() != torrent.PiecePriorityNone {
+		t.Fatal("metadata fault retained acknowledgment/base requests", model)
 	}
 	if err := e.FinishRestore(hash, models.StateQueued, true); err == nil {
 		t.Fatal("Resume ignored metadata persistence failure")

@@ -33,7 +33,7 @@ func NewRouterWithLogs(uc *usecase.TorrentUseCase, sw *usecase.SyncWorker, logs 
 		AllowedOrigins:   []string{"*"},
 		AllowedMethods:   []string{"GET", "HEAD", "POST", "PUT", "DELETE", "OPTIONS"},
 		AllowedHeaders:   []string{"*"},
-		ExposedHeaders:   []string{"Accept-Ranges", "Content-Disposition", "Content-Length", "Content-Range", "Content-Type"},
+		ExposedHeaders:   []string{"Accept-Ranges", "Content-Disposition", "Content-Length", "Content-Range", "Content-Type", "X-Hub-Snapshot"},
 		AllowCredentials: false,
 		MaxAge:           300,
 	}))
@@ -53,6 +53,7 @@ func NewRouterWithLogs(uc *usecase.TorrentUseCase, sw *usecase.SyncWorker, logs 
 	apiHandler := api.NewAPIHandler(uc, sw)
 	r.Route("/api/v1", func(r chi.Router) {
 		r.Get("/logs", api.LogsHandler(logs))
+		r.Get("/logs/status", api.LogsStatusHandler(logs))
 		apiHandler.RegisterRoutes(r)
 	})
 

@@ -20,6 +20,8 @@ services:
       HUB_DB_PATH: /config/hub.db
       HUB_LOG_DIR: /config/logs
       HUB_LOG_RETENTION_DAYS: "3"
+      HUB_LOG_MAX_FILE_BYTES: "16777216"
+      HUB_LOG_MAX_TOTAL_BYTES: "134217728"
       HUB_MAX_ACTIVE_STREAMS: "4"
       HUB_MAX_ACTIVE_DOWNLOADS: "5"
       HUB_MAX_TEMPORARY_TORRENTS: "3"

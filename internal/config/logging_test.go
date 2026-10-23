@@ -23,6 +23,33 @@ func TestLoggingDefaultsAndCLIPrecedence(t *testing.T) {
 	if cfg.LogDir != filepath.Join("custom", "logs") || cfg.LogRetentionDays != 3 {
 		t.Fatalf("%s %d", cfg.LogDir, cfg.LogRetentionDays)
 	}
+	if cfg.LogMaxFileBytes != 16<<20 || cfg.LogMaxTotalBytes != 128<<20 {
+		t.Fatal("unexpected log byte defaults")
+	}
+}
+
+func TestLoggingByteLimitValidation(t *testing.T) {
+	for _, raw := range []string{"0", "-1", "text", "9223372036854775808", "1024"} {
+		t.Run(raw, func(t *testing.T) {
+			t.Setenv("HUB_LOG_MAX_FILE_BYTES", raw)
+			if cfg := loadLoggingConfig(t); cfg.ValidateLogging() == nil {
+				t.Fatal("invalid byte limit accepted")
+			}
+		})
+	}
+	t.Run("cli overrides invalid env", func(t *testing.T) {
+		t.Setenv("HUB_LOG_MAX_FILE_BYTES", "bad")
+		cfg := loadLoggingConfig(t, "--log-max-file-bytes", "65536", "--log-max-total-bytes", "131072")
+		if cfg.ValidateLogging() != nil || cfg.LogMaxFileBytes != 65536 || cfg.LogMaxTotalBytes != 131072 {
+			t.Fatal(cfg.ValidateLogging())
+		}
+	})
+	t.Run("total below file", func(t *testing.T) {
+		cfg := loadLoggingConfig(t, "--log-max-file-bytes", "131072", "--log-max-total-bytes", "65536")
+		if cfg.ValidateLogging() == nil {
+			t.Fatal("invalid total accepted")
+		}
+	})
 }
 
 func TestLoggingEnvironmentAndZeroRetention(t *testing.T) {

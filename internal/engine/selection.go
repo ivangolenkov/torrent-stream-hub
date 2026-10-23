@@ -20,6 +20,9 @@ func (e *Engine) SetQueuePosition(hash string, position int64) {
 
 // admissionMu serializes selection completion with priority commands and slots.
 func (e *Engine) reconcileSelectionLocked(mt *ManagedTorrent) {
+	if !e.currentTorrent(mt) {
+		return
+	}
 	info := mt.t.Info()
 	if info == nil {
 		return
@@ -38,24 +41,22 @@ func (e *Engine) reconcileSelectionLocked(mt *ManagedTorrent) {
 			selectionComplete = selectionComplete && complete
 		}
 	}
-	mt.selectionComplete = selectionComplete
-	eligible := mt.state == models.StateDownloading || mt.state == models.StateQueued || mt.state == models.StateSeeding
-	changed := false
-	if eligible && mt.downloadBlock == "" {
-		if allComplete {
-			mt.setStateLocked(models.StateSeeding, models.ErrNone, "verified payload complete")
-		} else if selectionComplete || mt.state == models.StateSeeding {
-			changed = mt.state != models.StateQueued
-			mt.setStateLocked(models.StateQueued, models.ErrNone, "selection complete or payload invalidated")
-			mt.downloadAllStarted = false
-		}
-	}
+	d, err := mt.applyStateEventLocked(stateEvent{kind: stateSelectionObserved, metadataKnown: true, selectedComplete: selectionComplete, payloadComplete: allComplete})
 	mt.mu.Unlock()
-	if changed {
+	if err != nil {
+		return
+	}
+	e.applyBackgroundReleaseLocked(mt, d)
+}
+
+// Does not close independent stream admission or restore all base priorities.
+// admissionMu covers the state decision and these library/overlay effects.
+func (e *Engine) applyBackgroundReleaseLocked(mt *ManagedTorrent, d stateDecision) {
+	if d.clearBasePriorities {
 		for _, file := range mt.t.Files() {
 			file.SetPriority(torrent.PiecePriorityNone)
 		}
-		if e.streamManager.ActiveStreamsForTorrent(mt.hash) == 0 {
+		if d.closeBackgroundPayload && e.streamManager.ActiveStreamsForTorrent(mt.hash) == 0 {
 			mt.t.DisallowDataDownload()
 		}
 		_ = e.streamManager.refreshTorrentOverlayLocked(mt)

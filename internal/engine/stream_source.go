@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 
 	"torrent-stream-hub/internal/logging"
+	"torrent-stream-hub/internal/models"
 
 	"torrent-stream-hub/internal/payload"
 )
@@ -169,8 +170,12 @@ func (e *Engine) OpenStreamSource(ctx context.Context, hash string, index int, i
 	}
 	mt.mu.Lock()
 	checking := mt.rechecking || mt.initializing || mt.verificationUncertain
+	missing := mt.safetyBlocks[models.BlockMissingFiles] != ""
 	mt.mu.Unlock()
 	if checking {
+		if missing {
+			return nil, fs.ErrNotExist
+		}
 		return nil, ErrOperationConflict
 	}
 	if mt.t.Info() == nil {
@@ -182,7 +187,13 @@ func (e *Engine) OpenStreamSource(ctx context.Context, hash string, index int, i
 		return nil, fmt.Errorf("file index out of bounds: %d", index)
 	}
 	file := files[index]
+	expected := mt.rememberExpectedPayload(index, file.ReadyForDirectRead())
 	mt.t.RefreshStorageCompletion()
+	if expected && !file.ReadyForDirectRead() {
+		if err := e.detectMissingExpectedPayload(mt, file); err != nil {
+			return nil, err
+		}
+	}
 	displayName := file.DisplayPath()
 	fileLength := file.Length()
 
@@ -266,6 +277,11 @@ func (e *Engine) OpenStreamSource(ctx context.Context, hash string, index int, i
 	// 4. Safe open within download directory
 	root, err := os.OpenRoot(downloadDir)
 	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			if faultErr := e.detectMissingExpectedPayload(mt, file); faultErr != nil {
+				return nil, faultErr
+			}
+		}
 		logging.Warnf("stream open root failed path=%s: %v", downloadDir, err)
 		return makeTorrentFallback(FallbackReasonOpenFailed)
 	}
@@ -282,6 +298,9 @@ func (e *Engine) OpenStreamSource(ctx context.Context, hash string, index int, i
 			return makeTorrentFallback(FallbackReasonNotRegularFile)
 		}
 		if errors.Is(err, fs.ErrNotExist) {
+			if faultErr := e.detectMissingExpectedPayload(mt, file); faultErr != nil {
+				return nil, faultErr
+			}
 			return makeTorrentFallback(FallbackReasonFinalFileNotFound)
 		}
 		logging.Warnf("stream direct file open failed rel_path=%s: %v", relPath, err)
@@ -390,11 +409,20 @@ func (e *Engine) CheckFileDirectReady(hash string, index int) (bool, int64, erro
 
 	mt.mu.Lock()
 	checking := mt.rechecking || mt.initializing || mt.verificationUncertain
+	missing := mt.safetyBlocks[models.BlockMissingFiles] != ""
 	mt.mu.Unlock()
 	if checking {
+		if missing {
+			return false, fileLength, fs.ErrNotExist
+		}
 		return false, fileLength, nil
 	}
 	if !file.ReadyForDirectRead() {
+		if mt.rememberExpectedPayload(index, false) {
+			if err := e.detectMissingExpectedPayload(mt, file); err != nil {
+				return false, fileLength, err
+			}
+		}
 		return false, fileLength, nil
 	}
 
@@ -426,6 +454,11 @@ func (e *Engine) CheckFileDirectReady(hash string, index int) (bool, int64, erro
 
 	f, err := payload.Open(root, relPath)
 	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			if faultErr := e.detectMissingExpectedPayload(mt, file); faultErr != nil {
+				return false, fileLength, faultErr
+			}
+		}
 		return false, fileLength, nil
 	}
 	defer f.Close()
@@ -438,5 +471,6 @@ func (e *Engine) CheckFileDirectReady(hash string, index int) (bool, int64, erro
 		return false, fileLength, nil
 	}
 
+	mt.rememberExpectedPayload(index, true)
 	return true, fileLength, nil
 }

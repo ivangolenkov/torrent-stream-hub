@@ -16,6 +16,8 @@ type fileReader interface {
 	io.ReadCloser
 }
 
+// A backend that retains per-torrent resources also implements io.Closer.
+// fileTorrentImpl closes it when the torrent is closed.
 type fileIo interface {
 	openForSharedRead(name string) (sharedFileIf, error)
 	openForRead(name string) (fileReader, error)

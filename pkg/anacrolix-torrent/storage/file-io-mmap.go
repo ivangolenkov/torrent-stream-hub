@@ -44,14 +44,35 @@ func init() {
 
 type mmapFileIo struct {
 	mu sync.RWMutex
-	// We could automatically expire fileMmaps by using weak.Pointers? Currently the store never
-	// relinquishes its extra ref so we never clean up anyway.
-	paths map[string]*fileMmap
+	// Each cached mapping owns one reference until eviction or Close. Open handles
+	// own separate references and can finish safely after the cache is closed.
+	paths    map[string]*fileMmap
+	closed   bool
+	closeErr error
+}
+
+func (me *mmapFileIo) Close() error {
+	me.mu.Lock()
+	defer me.mu.Unlock()
+	if me.closed {
+		return me.closeErr
+	}
+	me.closed = true
+	for name, mapping := range me.paths {
+		// Release only the cache reference. Forcing close would block on a live
+		// handle's lifetime RLock; its last Close will unmap and close the file.
+		me.closeErr = errors.Join(me.closeErr, mapping.dec())
+		delete(me.paths, name)
+	}
+	return me.closeErr
 }
 
 func (me *mmapFileIo) rename(from, to string) (err error) {
 	me.mu.Lock()
 	defer me.mu.Unlock()
+	if me.closed {
+		return os.ErrClosed
+	}
 	me.close(from)
 	me.close(to)
 	return os.Rename(from, to)
@@ -73,6 +94,9 @@ func (me *mmapFileIo) flush(name string, offset, nbytes int64) error {
 	// we've opened them, then if the mmap doesn't exist yet then there's nothing to flush.
 	me.mu.RLock()
 	defer me.mu.RUnlock()
+	if me.closed {
+		return os.ErrClosed
+	}
 	v, ok := me.paths[name]
 	if !ok {
 		return nil
@@ -108,8 +132,8 @@ func (me *fileMmap) close() (err error) {
 	// file storage implementation (like with NewReader, which don't provide for it).
 	me.mu.Lock()
 	defer me.mu.Unlock()
-	// There's no double-close protection here. Not sure if that's an issue. Probably not since we
-	// don't evict the store's reference anywhere for now.
+	// Called either by the last reference or by rename while its cache reference
+	// is still held. Neither path can close the same mapping twice.
 	return errors.Join(me.m.Unmap(), me.f.Close())
 }
 
@@ -134,6 +158,9 @@ func (me *mmapFileIo) openForRead(name string) (_ fileReader, err error) {
 func (me *mmapFileIo) openReadOnly(name string) (_ *mmapSharedFileHandle, err error) {
 	me.mu.Lock()
 	defer me.mu.Unlock()
+	if me.closed {
+		return nil, os.ErrClosed
+	}
 	v, ok := me.paths[name]
 	if ok {
 		return newMmapFile(v), nil
@@ -155,6 +182,9 @@ func (me *mmapFileIo) openReadOnly(name string) (_ *mmapSharedFileHandle, err er
 func (me *mmapFileIo) openForWrite(name string, size int64) (_ fileWriter, err error) {
 	me.mu.Lock()
 	defer me.mu.Unlock()
+	if me.closed {
+		return nil, os.ErrClosed
+	}
 	v, ok := me.paths[name]
 	if ok {
 		if int64(len(v.m)) == size && v.writable {
@@ -227,6 +257,7 @@ func (me *mmapFileIo) addNewMmap(name string, mm mmap.MMap, writable bool, f *os
 }
 
 var _ fileIo = (*mmapFileIo)(nil)
+var _ io.Closer = (*mmapFileIo)(nil)
 
 type mmapSharedFileHandle struct {
 	f     *fileMmap

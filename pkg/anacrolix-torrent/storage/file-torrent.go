@@ -21,6 +21,7 @@ type fileTorrentImpl struct {
 	// after Torrent.Drop; it must not rename payload after application cleanup.
 	lifecycle         sync.RWMutex
 	closed            bool
+	closeErr          error
 	freshMu           sync.Mutex
 	fresh             map[int][]os.FileInfo
 	hashSnapshot      map[int][]os.FileInfo
@@ -333,8 +334,16 @@ func (fts *fileTorrentImpl) acceptFileWrite(index int, before, after os.FileInfo
 func (fs *fileTorrentImpl) Close() error {
 	fs.lifecycle.Lock()
 	defer fs.lifecycle.Unlock()
+	if fs.closed {
+		return fs.closeErr
+	}
 	fs.closed = true
-	return nil
+	// Per-torrent backends may retain handles after an individual read/write.
+	// RootFS remains owned by fileClientImpl, not by a torrent's I/O adapter.
+	if closer, ok := fs.io.(io.Closer); ok {
+		fs.closeErr = closer.Close()
+	}
+	return fs.closeErr
 }
 
 func (fs *fileTorrentImpl) beginOperation() bool {

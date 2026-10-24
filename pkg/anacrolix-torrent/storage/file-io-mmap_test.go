@@ -2,6 +2,7 @@ package storage
 
 import (
 	"bytes"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
@@ -30,6 +31,9 @@ func TestFileIoImplementationsSeekDataDetection(t *testing.T) {
 		t.Run(impl.name, func(t *testing.T) {
 			// Create temporary directory and file
 			tempDir := t.TempDir()
+			if closer, ok := impl.fileIo.(io.Closer); ok {
+				t.Cleanup(func() { qt.Check(t, qt.IsNil(closer.Close())) })
+			}
 			t.Logf("tempDir: %s", tempDir)
 			testFile := filepath.Join(tempDir, "test.dat")
 
@@ -41,6 +45,8 @@ func TestFileIoImplementationsSeekDataDetection(t *testing.T) {
 			// Open for write and write a byte without flushing
 			writer, err := impl.fileIo.openForWrite(testFile, fileSize)
 			qt.Assert(t, qt.IsNil(err))
+			// Also release the handle if an assertion fails before the explicit Close.
+			t.Cleanup(func() { _ = writer.Close() })
 
 			_, err = writer.WriteAt(testData, writeOffset)
 			qt.Assert(t, qt.IsNil(err))

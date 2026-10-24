@@ -1,6 +1,30 @@
 # Фаза 40 — Отчёт об имплементации
 
-Статус: **реализация и локальная приёмка завершены 24 октября 2026 года**. Нативные Linux/Windows CI runners подготовлены, но в этой сессии не запускались. Основание: [план фазы 40](../phase40-review-fixes-and-architecture-hardening.md). Фаза 41 не начата.
+Статус: **реализация завершена; исправление обнаруженного Windows CI сбоя локально проверено 24 октября 2026 года**. Пользователь сообщил о падении `Native storage (windows-latest)`; повторный нативный прогон после исправления ещё не подтверждён. Основание: [план фазы 40](../phase40-review-fixes-and-architecture-hardening.md). Фаза 41 не начата.
+
+## Исправление Windows CI — закрытие mmap storage
+
+Пользователь предоставил сбой очистки `TempDir` в `TestFileIoImplementationsSeekDataDetection/mmap` и `TestShortFile`: Windows не мог удалить открытые файлы. Кэш `mmapFileIo` удерживал собственную ссылку на mapping после закрытия отдельных reader/writer, а `fileTorrentImpl.Close()` не освобождал ресурсы backend. В `TestShortFile` дополнительно отсутствовал вызов `TorrentImpl.Close()`. На macOS успешное удаление открытого файла скрывало утечку.
+
+- В `storage/file-io-mmap.go` добавлен идемпотентный `Close`: освобождаются ссылки кэша, отклоняются новые операции. Открытые handles завершают работу со своими ссылками; последний handle выполняет unmap и закрывает файловый дескриптор. Закрытие кэша не ждёт удерживаемый reader lock и не инвалидирует активный mapping.
+- В `storage/file-torrent.go` закрытие торрента освобождает backend, реализующий `io.Closer`, и сохраняет результат для повторного `Close`. Контракт описан в `storage/file-io.go`. Общий `RootFS` по-прежнему принадлежит клиенту.
+- В двух упавших тестах исправлен порядок освобождения ресурсов до удаления временного каталога. В `storage/file-io-mmap-close_test.go` добавлены регрессии для read-only/writable кэша, активных handles и закрытия через `TorrentImpl`. Проверяются фактически закрытый дескриптор, освобождённый mapping, удаление файла и запрет операций после закрытия.
+- Workflow и набор Windows-тестов сохранены. Все пути выше находятся в `pkg/anacrolix-torrent/`.
+
+Проверки после исправления на macOS:
+
+| Директория | Команда | Результат |
+| --- | --- | --- |
+| `pkg/anacrolix-torrent` | `go test -race -count=3 ./storage -run 'TestFileIoImplementationsSeekDataDetection\|TestShortFile\|TestMmapFileIoClose\|TestFileTorrentClose\|TestFileCloseWaits'` | Три прогона выбранных регрессий прошли. |
+| `pkg/anacrolix-torrent` | `go test -race -count=1 . ./storage` | Полные suites ядра форка и storage прошли. |
+| Корень | `go test -count=1 ./...` | Полный набор тестов приложения прошёл. |
+| `pkg/anacrolix-torrent` | `go vet . ./storage` | Успешно. |
+| `pkg/anacrolix-torrent` | `GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go test -c -o /tmp/tsh-storage-windows.test.exe ./storage` | Тестовый бинарник собран; это не выполнение тестов на Windows. |
+
+- [x] Устранена утечка кэша; локальные регрессии, fork race, root tests, vet и Windows cross-compile прошли.
+- [ ] Подтвердить успешный повторный `Native storage (windows-latest)` после включения исправления в CI.
+
+Исправление относится к storage/lifecycle и платформенной приёмке фазы 40; расширения scope или переноса задач не потребовалось. Frontend не изменялся; его результаты ниже относятся к предыдущей полной локальной приёмке.
 
 ## Блок 1 — Исходное состояние
 
@@ -130,7 +154,7 @@
 
 ## Статус DoD
 
-Чек-лист соответствует исходному плану. Отметки относятся к реализованным контрактам и локальным проверкам; они не означают, что удалённые Windows/Linux runners уже выполнились, или что проведён аппаратный power-cut test.
+Чек-лист соответствует исходному плану. Отметки относятся к реализованным контрактам и локальным проверкам; они не подтверждают успешное выполнение удалённых Windows/Linux runners или аппаратный power-cut test. Известный сбой Windows CI, его исправление и оставшаяся платформенная проверка описаны в начале отчёта.
 
 - [x] F40-01: валидные v2 multi-file и hybrid каталоги принимаются, offsets/размеры корректны после Add и restore.
 - [x] F40-02: публикация `.part` восстанавливается после промежуточного сбоя без потери данных и ослабления ownership/no-replace.

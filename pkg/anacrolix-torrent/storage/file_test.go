@@ -17,7 +17,7 @@ import (
 func TestShortFile(t *testing.T) {
 	td := t.TempDir()
 	s := NewFile(td)
-	defer s.Close()
+	defer func() { qt.Check(t, qt.IsNil(s.Close())) }()
 	info := &metainfo.Info{
 		Name:        "a",
 		Length:      2,
@@ -26,6 +26,7 @@ func TestShortFile(t *testing.T) {
 	}
 	ts, err := s.OpenTorrent(context.Background(), info, metainfo.Hash{})
 	qt.Assert(t, qt.IsNil(err))
+	defer func() { qt.Check(t, qt.IsNil(ts.Close())) }()
 	f, err := os.Create(filepath.Join(td, "a"))
 	qt.Assert(t, qt.IsNil(err))
 	err = f.Truncate(1)

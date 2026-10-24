@@ -22,7 +22,7 @@ func TestDownloadSafetyAndHEAD(t *testing.T) {
 		status int
 	}{
 		{"valid", 200}, {"missing", 404}, {"symlink", 409}, {"directory", 409},
-		{"size", 409}, {"part", 409}, {"unknown-layout", 409},
+		{"size", 409}, {"part", 200}, {"unknown-layout", 409},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			uc, repo, dir, cleanup := setupAPITestUseCase(t)
@@ -67,6 +67,7 @@ func TestDownloadSafetyAndHEAD(t *testing.T) {
 					t.Fatal(err)
 				}
 			case "part":
+				// A sibling is not a completion marker in plain-name mode.
 				if err := os.WriteFile(full+".part", nil, 0600); err != nil {
 					t.Fatal(err)
 				}

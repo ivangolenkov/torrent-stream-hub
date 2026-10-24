@@ -1,6 +1,7 @@
 package usecase
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -234,7 +235,43 @@ func (uc *TorrentUseCase) deletePayloadLocked(t *models.Torrent) (retErr error) 
 }
 
 func (uc *TorrentUseCase) validateOwnership(root *os.Root, hash string, owned []string, all []*models.Torrent) error {
+	return uc.validateOwnershipContext(uc.engine.Context(), root, hash, owned, all)
+}
+
+// Cache only within one ownership check. Large catalogs share ancestors and
+// compare the same files many times; none of these observations authorize a
+// later open, which still goes through payload's rooted validation.
+func cachedStorageStat(stat func(string) (os.FileInfo, error)) func(string) (os.FileInfo, error) {
+	type result struct {
+		info os.FileInfo
+		err  error
+	}
+	cache := make(map[string]result)
+	return func(path string) (os.FileInfo, error) {
+		if r, ok := cache[path]; ok {
+			return r.info, r.err
+		}
+		info, err := stat(path)
+		cache[path] = result{info, err}
+		return info, err
+	}
+}
+
+func (uc *TorrentUseCase) validateOwnershipContext(ctx context.Context, root *os.Root, hash string, owned []string, all []*models.Torrent) error {
+	stat := cachedStorageStat(root.Stat)
+	protectedStat := cachedStorageStat(os.Stat)
+	var protectedPaths []string
+	for _, protected := range uc.engine.CleanupProtectedPaths() {
+		reserved, err := filepath.Abs(protected)
+		if err != nil {
+			return err
+		}
+		protectedPaths = append(protectedPaths, reserved)
+	}
 	for _, path := range owned {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if err := validateRelativeDownloadPath(path); err != nil {
 			return fmt.Errorf("%w: invalid manifest", ErrStorageConflict)
 		}
@@ -242,19 +279,15 @@ func (uc *TorrentUseCase) validateOwnership(root *os.Root, hash string, owned []
 		if err != nil {
 			return err
 		}
-		for _, protected := range uc.engine.CleanupProtectedPaths() {
-			reserved, err := filepath.Abs(protected)
-			if err != nil {
-				return err
-			}
+		for _, reserved := range protectedPaths {
 			if pathsOverlap(absolute, reserved) {
 				return fmt.Errorf("%w: torrent path overlaps application storage", ErrStorageConflict)
 			}
 			// SameFile also detects case/unicode aliases on macOS/Windows,
 			// including a payload nested in an aliased application directory.
-			if reservedInfo, err := os.Stat(reserved); err == nil {
+			if reservedInfo, err := protectedStat(reserved); err == nil {
 				for part := path; part != "."; part = filepath.Dir(part) {
-					if info, err := root.Stat(part); err == nil && os.SameFile(info, reservedInfo) {
+					if info, err := stat(part); err == nil && os.SameFile(info, reservedInfo) {
 						return fmt.Errorf("%w: torrent path aliases application storage", ErrStorageConflict)
 					}
 				}
@@ -275,10 +308,13 @@ func (uc *TorrentUseCase) validateOwnership(root *os.Root, hash string, owned []
 		for _, p := range others {
 			for _, q := range []string{p, p + ".part"} {
 				for _, own := range owned {
+					if err := ctx.Err(); err != nil {
+						return err
+					}
 					if pathsOverlap(own, q) {
 						return fmt.Errorf("%w: shared storage path with torrent %s", ErrStorageConflict, other.Hash)
 					}
-					alias, err := storagePathsAlias(root, own, q)
+					alias, err := storagePathsAlias(stat, own, q)
 					if err != nil {
 						return err
 					}
@@ -292,15 +328,15 @@ func (uc *TorrentUseCase) validateOwnership(root *os.Root, hash string, owned []
 	return nil
 }
 
-func storagePathsAlias(root *os.Root, a, b string) (bool, error) {
-	left, err := root.Stat(a)
+func storagePathsAlias(stat func(string) (os.FileInfo, error), a, b string) (bool, error) {
+	left, err := stat(a)
 	if errors.Is(err, os.ErrNotExist) {
 		return false, nil
 	}
 	if err != nil {
 		return false, err
 	}
-	right, err := root.Stat(b)
+	right, err := stat(b)
 	if errors.Is(err, os.ErrNotExist) {
 		return false, nil
 	}
@@ -346,12 +382,6 @@ func (uc *TorrentUseCase) openPayloadLocked(hash string, index int, path string,
 	defer root.Close()
 	if err := uc.validateOwnership(root, hash, []string{path, path + ".part"}, all); err != nil {
 		return nil, err
-	}
-	if _, err := root.Lstat(path + ".part"); !errors.Is(err, os.ErrNotExist) {
-		if err != nil {
-			return nil, err
-		}
-		return nil, ErrDownloadNotReady
 	}
 	if err := payload.Validate(root, path); err != nil {
 		return nil, fmt.Errorf("%w: invalid payload", ErrStorageConflict)

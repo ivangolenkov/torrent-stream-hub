@@ -927,12 +927,6 @@ func (uc *TorrentUseCase) resolveDownloadedFile(ctx context.Context, t *models.T
 		return DownloadedDiskFile{}, err
 	}
 	_, statErr := root.Lstat(path)
-	if errors.Is(statErr, os.ErrNotExist) {
-		if _, partErr := root.Lstat(path + ".part"); partErr == nil {
-			root.Close()
-			return DownloadedDiskFile{}, ErrDownloadNotReady
-		}
-	}
 	root.Close()
 	if errors.Is(statErr, os.ErrNotExist) {
 		return DownloadedDiskFile{}, os.ErrNotExist

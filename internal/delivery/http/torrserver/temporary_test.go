@@ -124,10 +124,14 @@ func TestTemporaryHTTPTransfersBlockCleanup(t *testing.T) {
 				time.Sleep(time.Millisecond)
 			}
 			if mode == "reader-stream" {
-				// A lingering .part forces the torrent-reader fallback, even though
-				// the verified pieces can already satisfy the read.
-				if err := os.WriteFile(path+".part", data, 0600); err != nil {
+				// Extra trailing data prevents a direct whole-file response, while
+				// verified torrent pieces can still satisfy the bounded reader.
+				if err := os.WriteFile(path, append(append([]byte(nil), data...), 0), 0600); err != nil {
 					t.Fatal(err)
+				}
+				verifyHTTPFixture(t, h.uc, old.Hash)
+				if ready, _, err := h.uc.CheckFileDirectReady(old.Hash, 0); err != nil || ready {
+					t.Fatal("reader fixture allowed direct whole-file access", ready, err)
 				}
 			}
 			router := chi.NewRouter()

@@ -16,6 +16,7 @@ import (
 	"torrent-stream-hub/internal/config"
 	"torrent-stream-hub/internal/logging"
 
+	g "github.com/anacrolix/generics"
 	"github.com/anacrolix/torrent"
 	"github.com/anacrolix/torrent/metainfo"
 	"github.com/anacrolix/torrent/storage"
@@ -31,6 +32,7 @@ func (e *Engine) newTorrentClient() (*torrent.Client, storage.ClientImplCloser, 
 	}
 	torrentStorage := storage.NewFileOpts(storage.NewFileClientOpts{
 		ClientBaseDir: e.cfg.DownloadDir, RootFS: root, VerifyOnOpen: true, PieceCompletion: pieceCompletion, IOContext: e.ctx,
+		UsePartFiles: g.Some(false), ImportPartFiles: true,
 		TorrentRootResolver: func(base string, _ *metainfo.Info, hash metainfo.Hash) (string, error) {
 			rel, err := e.StorageRoot(hash.HexString())
 			if err != nil {

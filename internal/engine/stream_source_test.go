@@ -232,7 +232,7 @@ func TestStreamSource_DiskSuccess(t *testing.T) {
 	}
 }
 
-func TestStreamSource_PartFileExistsBlocksDisk(t *testing.T) {
+func TestStreamSource_VerifiedPlainNameIgnoresUnrelatedPartFile(t *testing.T) {
 	pieceLen := int64(1024)
 	data := make([]byte, 2048)
 	files := []metainfo.FileInfo{
@@ -251,7 +251,7 @@ func TestStreamSource_PartFileExistsBlocksDisk(t *testing.T) {
 
 	verifyEngineTorrentPieces(t, e, tor.Hash, 0, 2)
 
-	// Add .part file
+	// A sibling added after open is not the runtime's payload in plain-name mode.
 	if err := os.WriteFile(targetFile+".part", []byte("partial"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -263,11 +263,8 @@ func TestStreamSource_PartFileExistsBlocksDisk(t *testing.T) {
 	}
 	defer source.Close()
 
-	if source.Type != StreamSourceTorrent {
-		t.Fatalf("expected StreamSourceTorrent, got %s", source.Type)
-	}
-	if source.FallbackReason != FallbackReasonNotReady {
-		t.Fatalf("expected revoked verified readiness, got %s", source.FallbackReason)
+	if source.Type != StreamSourceDisk {
+		t.Fatalf("expected verified disk data, got %s (%s)", source.Type, source.FallbackReason)
 	}
 }
 

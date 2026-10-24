@@ -34,8 +34,17 @@ var _ interface {
 func (me *filePieceImpl) Flush() (err error) {
 	for fileIndex, extent := range me.fileExtents() {
 		file := me.t.file(fileIndex)
+		file.mu.RLock()
 		name := me.t.pathForWrite(&file)
 		err1 := me.t.io.flush(name, extent.Start, extent.Length)
+		// Reopened/migrated data may already use its final name. Persisting a
+		// fresh completion hint must flush that file, just as reads fall back to
+		// it. Only absence permits fallback; actual flush failures remain errors.
+		if me.partFiles() && errors.Is(err1, fs.ErrNotExist) {
+			name = file.safeOsPath
+			err1 = me.t.io.flush(name, extent.Start, extent.Length)
+		}
+		file.mu.RUnlock()
 		if err1 != nil {
 			err = errors.Join(err, fmt.Errorf("flushing %q:%v+%v: %w", name, extent.Start, extent.Length, err1))
 			return
@@ -328,8 +337,8 @@ func (me *filePieceImpl) promotePartFile(f file) (err error) {
 		return nil
 	}
 	// Flush file on completion, even if we don't promote it.
-	err = me.t.io.flush(f.partFilePath(), 0, f.length())
-	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+	err = me.t.io.flush(me.t.pathForWrite(&f), 0, f.length())
+	if err != nil && (!me.partFiles() || !errors.Is(err, fs.ErrNotExist)) {
 		return err
 	}
 	// An already published file has no .part name; never hide an actual flush

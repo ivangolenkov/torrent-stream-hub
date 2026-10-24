@@ -115,7 +115,9 @@ initialization or use it to clear the durable verification key.
 Physical missing-payload detection uses only read checks plus previously observed
 current-open verification. That expectation survives asynchronous storage readiness
 invalidation, is bounded by the file catalog, and resets on explicit repair. Lstat
-does not follow a final symlink and an existing `.part` file is not absence. No
+does not follow a final symlink. Runtime storage uses metadata names; legacy
+`.part` import finishes before attachment, and a later `.part` neighbor cannot
+mask disappearance of the expected metadata path. No
 periodic scan is added. Both directions close before safety persistence; persistence
 failure remains an error, not a claim that the block survived a crash.
 

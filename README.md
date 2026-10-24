@@ -22,6 +22,17 @@ v1/v2 aliases share one stable identity and directory. Do not move payload
 directories or edit mappings while the service is running. Keep the database,
 metainfo and other service files outside the payload namespace.
 
+Payload files use their original names and extensions from the first downloaded
+byte (for example, `movie.mkv`); the application no longer appends `.part` or
+renames files when completion changes. A normal filename does not imply a complete
+file: streaming/download readiness still requires current-open piece verification.
+Existing legacy `.part` files are imported under their metadata names before the
+runtime opens storage, using an atomic no-replace rename without copying the data.
+Incomplete bytes are retained for resume. If both names exist, opening that
+torrent fails with a conflict and preserves both files; it never guesses which
+copy to overwrite. Interrupted imports resume on the next open. A filename that
+actually ends in `.part` in the torrent metadata is kept as-is.
+
 Before upgrading an installation using the old shared layout:
 
 1. Stop the service cleanly. Back up the **entire download and config directories**,
@@ -37,11 +48,20 @@ Before upgrading an installation using the old shared layout:
    verification does not turn them into trusted data. Migration does not change
    temporary/permanent policy, FIFO position or saved file priorities.
 4. Monitor `storage_state` / `storage_error` in the torrent list/API and the logs.
+   `legacy` means queued for migration; `moving` covers copying and offline
+   verification. Logs identify `preflight`, `copy`, `verification`, and `cleanup`
+   stages, with file counts during copy/cleanup. The worker processes torrents
+   sequentially, so a large catalog can delay later entries, especially on HDDs.
+   Saved run intent and legacy progress remain pending until migration and
+   runtime verification finish; they do not imply that metainfo was lost.
    `legacy`, `moving` and `blocked` entries cannot write or stream. Deletion is
    refused while a migration journal is pending or ownership cannot be proven.
    Unaffected ready entries remain usable.
    Interrupted migrations retain their journal and retry automatically (including
    after restart); do not delete journal-owned copies or temporary files manually.
+   Fingerprints are committed in batches of up to 64 files before those copies
+   are published. Existing journals remain compatible; after interruption,
+   published targets are revalidated even if their progress flags were not saved.
 
 Shared legacy paths, an occupied target, missing original metainfo, symlinks,
 hardlinks or ambiguous aliases cause a conservative block rather than choosing
@@ -232,7 +252,8 @@ Verification never removes those keys. Schema migration 0010 preserves the exist
 0009 keys, including databases created during phase 39 development.
 
 `missing_files` is raised on read-time confirmation that a previously verified
-current-open payload disappeared (both final and `.part` names absent). Ordinary
+current-open payload disappeared from its metadata path. A leftover `.part`
+neighbor does not replace that path after import. Ordinary
 incomplete files, metadata pending and hash mismatch do not prove disappearance.
 No background filesystem scan is added. Explicit Resume authorizes repair, not
 readiness. Failed SQLite persistence returns an error and keeps live gates closed;
@@ -323,7 +344,7 @@ replace verification after reopen. The cache retains 4096 entries, up to 1024 qu
 writes and one detached batch of at most 1024. Overload drops hints, counted in
 `piece_completion_dropped`; persistence errors appear in engine diagnostics.
 
-Completed `.part` files are flushed and published with one native atomic
+Legacy `.part` import flushes the old file and uses one native atomic
 **no-replace** rename within the same directory: Linux `renameat2`, macOS
 `renameatx_np`, Windows handle-relative rename. Filesystems must implement that
 primitive; unsupported filesystems fail the operation without falling back to
@@ -336,7 +357,7 @@ Both are preserved and rejected as ambiguous hardlinks. Stop the service, back u
 both names and metadata, and establish ownership of **all** links before manually
 removing a redundant name or restoring a consistent backup. The service cannot
 prove ownership of an arbitrary old hardlink and never automatically unlinks it.
-Restart and verify the payload after recovery. No new publication creates that
+Restart and verify the payload after recovery. No new import creates that
 intermediate state. Downgrade still requires restoring the entire offline backup.
 
 ## HTTP Resource Limits And Remote Metainfo

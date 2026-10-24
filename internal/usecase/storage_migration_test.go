@@ -160,6 +160,79 @@ func TestStorageMigrationLegacyVersionsAndPriorities(t *testing.T) {
 	}
 }
 
+func TestRestoreImportsExistingIsolatedPart(t *testing.T) {
+	for _, mode := range []string{"complete", "partial", "conflict"} {
+		t.Run(mode, func(t *testing.T) {
+			uc, repo, cleanup := setupTorrentUseCase(t)
+			defer cleanup()
+			data := []byte("downloaded content")
+			mi := migrationMetainfo(t, "movie.mkv", data, false, "v1")
+			tor, source := legacyMigrationFixture(t, uc, mi, data, true)
+			root := payload.Root(tor.Hash)
+			final := filepath.Join(uc.engine.DownloadDir(), root, "movie.mkv")
+			if err := os.MkdirAll(filepath.Dir(final), 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Rename(source, final+".part"); err != nil {
+				t.Fatal(err)
+			}
+			if mode == "partial" {
+				if err := os.Truncate(final+".part", 4); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if mode == "conflict" {
+				if err := os.WriteFile(final, []byte("preserve"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := repo.SaveStorageMapping(&repository.StorageMapping{Hash: tor.Hash, Version: payload.LayoutVersion, Root: root, State: "ready"}); err != nil {
+				t.Fatal(err)
+			}
+			restored, err := uc.restorePersistedTorrent(context.Background(), tor.Hash)
+			if mode == "conflict" {
+				if err == nil || restored || uc.engine.GetTorrent(tor.Hash) != nil {
+					t.Fatal("conflicting files admitted", restored, err)
+				}
+				if got, err := os.ReadFile(final); err != nil || string(got) != "preserve" {
+					t.Fatal("existing target changed", err)
+				}
+				if got, err := os.ReadFile(final + ".part"); err != nil || !bytes.Equal(got, data) {
+					t.Fatal("partial source changed", err)
+				}
+				return
+			}
+			if err != nil || !restored {
+				t.Fatal("restore failed", restored, err)
+			}
+			if _, err := os.Stat(final + ".part"); !errors.Is(err, os.ErrNotExist) {
+				t.Fatal("runtime retained old suffix", err)
+			}
+			want := data
+			if mode == "partial" {
+				want = data[:4]
+				if ready, _, err := uc.CheckFileDirectReady(tor.Hash, 0); err != nil || ready {
+					t.Fatal("partial data marked ready", ready, err)
+				}
+			} else {
+				waitMigrationReady(t, uc, tor.Hash)
+				_, file, err := uc.GetDownloadedFile(tor.Hash, 0)
+				if err != nil {
+					t.Fatal(err)
+				}
+				f, err := file.Open()
+				if err != nil {
+					t.Fatal(err)
+				}
+				f.Close()
+			}
+			if got, err := os.ReadFile(final); err != nil || !bytes.Equal(got, want) {
+				t.Fatal("import changed downloaded bytes", err)
+			}
+		})
+	}
+}
+
 func TestStorageMigrationBlocksSharedAndOccupiedPaths(t *testing.T) {
 	for _, mode := range []string{"shared", "occupied", "symlink", "hardlink", "no-metainfo", "partial", "bad-content", "canceled"} {
 		t.Run(mode, func(t *testing.T) {

@@ -36,6 +36,10 @@ type NewFileClientOpts struct {
 	// startup, and keep the rest in memory.
 	PieceCompletion PieceCompletion
 	UsePartFiles    g.Option[bool]
+	// ImportPartFiles moves legacy .part files to their metadata names before
+	// opening storage. Requires RootFS, VerifyOnOpen and UsePartFiles=false.
+	// Existing targets are never overwritten; conflicting names fail the open.
+	ImportPartFiles bool
 	Logger          *slog.Logger
 	// RootFS contains all actual I/O. ClientBaseDir must name this same root.
 	// Ownership transfers to the client and Close releases it.
@@ -89,6 +93,9 @@ func (fs *fileClientImpl) OpenTorrent(
 	info *metainfo.Info,
 	infoHash metainfo.Hash,
 ) (_ TorrentImpl, err error) {
+	if fs.opts.ImportPartFiles && (fs.opts.RootFS == nil || !fs.opts.VerifyOnOpen || fs.opts.partFiles()) {
+		return TorrentImpl{}, fmt.Errorf("importing part files requires rooted verified storage without part files")
+	}
 	dir := fs.opts.TorrentDirMaker(fs.opts.ClientBaseDir, info, infoHash)
 	if fs.opts.TorrentRootResolver != nil {
 		dir, err = fs.opts.TorrentRootResolver(fs.opts.ClientBaseDir, info, infoHash)
@@ -113,7 +120,10 @@ func (fs *fileClientImpl) OpenTorrent(
 		files[i].safeOsPath = filePath
 		files[i].index = i
 		if fs.opts.RootFS != nil {
-			normalized = append(normalized, strings.ToLower(norm.NFC.String(filePath)), strings.ToLower(norm.NFC.String(filePath+".part")))
+			normalized = append(normalized, strings.ToLower(norm.NFC.String(filePath)))
+			if fs.opts.partFiles() {
+				normalized = append(normalized, strings.ToLower(norm.NFC.String(filePath+".part")))
+			}
 		}
 	}
 	if fs.opts.RootFS != nil {
@@ -133,6 +143,11 @@ func (fs *fileClientImpl) OpenTorrent(
 					break
 				}
 			}
+		}
+	}
+	if fs.opts.ImportPartFiles {
+		if err := fs.importPartFiles(ctx, files); err != nil {
+			return TorrentImpl{}, err
 		}
 	}
 	for i := range metainfoFileInfos {

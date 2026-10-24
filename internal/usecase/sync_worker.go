@@ -159,6 +159,11 @@ func (sw *SyncWorker) captureSnapshotContext(ctx context.Context) ([]*models.Tor
 		stamp := sw.engine.CaptureReadStamp("")
 		return func() bool { return sw.engine.ValidateReadStamp(stamp) }
 	})
+	// SQLite can report SQLITE_INTERRUPT when cancellation races a query. Keep
+	// the context contract independent of that driver's error representation.
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
 	if err != nil {
 		return nil, err
 	}

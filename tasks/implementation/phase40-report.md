@@ -2,6 +2,61 @@
 
 Статус: **реализация и локальные исправления выполнены; приёмка CI не завершена**. Последний разобранный запуск `40137410282` остановился на Linux `race-root`; исправления теста readiness и ошибок, воспроизведённых в Linux, описаны ниже. Предыдущие Windows-исправления также требуют подтверждённой CI-приёмки. Основание: [план фазы 40](../phase40-review-fixes-and-architecture-hardening.md). Фаза 41 не начата.
 
+## Хранение без `.part` — запрос пользователя от 25 октября 2026
+
+По прямому запросу пользователя production runtime переведён на `UsePartFiles=false`. Это согласованное изменение прежнего поведения: файлы с первого записанного байта используют имена/расширения из metainfo; завершение загрузки и ошибки verification больше не переименовывают payload. Схема SQLite и версия isolated layout не меняются. Предыдущие исправления migration/Flush сохранены.
+
+Сделано:
+
+- `internal/engine/client_config.go`: режим без суффикса с `ImportPartFiles=true`. В форке `storage/file-import-part.go` импорт старых sidecars выполняется перед открытием storage и созданием пустых metadata-файлов. Сначала проверяются все кандидаты; затем каждый source сбрасывается и переименовывается существующим rooted atomic no-replace механизмом. Ошибка/отмена допускает повторный запуск; источник или целевое имя сохраняет те же данные. Существующие final+part не объединяются и не перезаписываются, открытие возвращает диагностируемый конфликт. Symlink/hardlink не принимаются. Настоящие metadata-имена и каталоги, оканчивающиеся на `.part`, не считаются sidecars.
+- `storage/file-client.go`, `file-piece.go`: при отключённом режиме `.part` не резервируется как системное расширение; completion flush использует фактическое имя файла. Обычное имя, прежние completion hints и факт импорта не дают готовности без current-open verification. Offline-проход старой legacy migration продолжает читать оба старых имени без изменения journal-owned paths; импорт в обычные имена происходит после cleanup, при runtime attachment.
+- `stream_source.go`, `missing_payload.go`, usecase download paths: readiness, direct streaming, File/ZIP download и MissingFiles ориентируются на metadata path и проверку данных. Соседний `.part`, появившийся после attachment, не является completion marker и не маскирует исчезновение настоящего payload. Проверки rooted open, ownership, размера и актуальной verification остаются.
+- README и `internal/engine/TRANSITIONS.md` отражают новое поведение. Delete сохраняет совместимость с уборкой старых sidecars по известным metadata paths.
+
+Дополнительные ошибки, обнаруженные проверками:
+
+- В `captureSnapshotContext` отмена SQLite-запроса иногда возвращала `SQLITE_INTERRUPT` вместо `context.Canceled`. Контекст теперь проверяется после чтения; существующая cancellation-регрессия сохранена.
+- Изолированный HTTP-тест воспроизвёл panic в `checkPendingPiecesMatchesRequestOrder` при recheck: `DisallowDataDownload` менял глобальный gate, оставляя прежний pending bitmap. В `torrent.go` запрет обновляет приоритеты, а пакетное обновление сначала согласует оба индекса для всего диапазона и только потом вызывает callbacks. Новый тест на исходном коде через Go overlay воспроизводит `disabled torrent retained 4 pending pieces`; после исправления HTTP-сценарий прошёл. Проверка инварианта не отключалась.
+
+Проверки DoD этого изменения:
+
+- [x] Запись до завершения, complete/incomplete transitions и повторное открытие не создают дополнительный суффикс; проверка данных обязательна.
+- [x] Старый isolated `.part` восстанавливается для complete и partial данных; partial-байты сохраняются для докачки, final+part конфликт сохраняет оба содержимых.
+- [x] Импорт после частичного переименования повторяем; preflight-конфликт оставляет все имена неизменными; unsafe links/cancellation отвергаются. Сравнение inode в тесте использует File.Stat перед rename, учитывая ленивый os.Stat на Windows.
+- [x] HTTP GET/HEAD, ZIP и защита active transfers адаптированы к обычным именам. Torrent-reader fixture использует проверенные фрагменты файла с лишним хвостом, а не старый маркер `.part`; fallback проверяется отдельно.
+- [x] Финальный `make check` прошёл: root/fork tests и race, vet, backend/frontend build, 28 Vitest (`/tmp/tsh-plain-names-check.log`). Windows/amd64 storage tests скомпилированы (`/tmp/tsh-storage-windows.test.exe`); cross-build не заменяет native execution.
+- [x] Linux/arm64 Docker (Go 1.25.8, GOMAXPROCS=2): полный root `go test -race -count=1 -timeout=180s ./...` и полный fork storage suite с race прошли (`plain-names-root.log`, `plain-names-storage.log` в `/tmp/tsh-ci-40085220944-linux/`).
+- [ ] Native Windows CI и установка новой версии на пользовательский Docker-инстанс — не выполнены.
+
+Фаза 41 не начата. Изменения находятся в рабочем дереве; удалённый контейнер не обновлялся, операции с пользовательскими данными не выполнялись.
+
+## Legacy migration на HDD и повторная проверка готовых файлов — 25 октября 2026
+
+Read-only диагностика пользовательского Docker-инстанса показала шесть legacy-записей. Первый торрент содержал 3964 файла (1.21 GB): его mapping был `moving`, остальные — `legacy`, runtime отсутствовали, UI показывал `apply pending` / `metadata pending` и исторические 100%. По логам последнего запуска между началом restore и HTTP listen прошло 43m52s. В дальнейшем первый и второй торренты подключились к движку: полного deadlock не было. Установленная версия не определена; порядок запуска и старые строки логов не содержат последних startup-исправлений. Профиль дискового I/O и время отдельных этапов на пользовательском HDD не измерены.
+
+Во время диагностики появились реальные ошибки `flushing ... .part: no such file or directory`, затем `storage rename target exists` и `storage changed during verification`. Также в логах присутствовали пользовательские API-команды удаления; состояния после них нельзя приписывать только migration. Агент выполнял только GET-запросы, без изменения данных, перезапуска или обновления контейнера.
+
+Изменения:
+
+- `internal/usecase/temporary_files.go`: результаты `Stat` кешируются только в рамках одной проверки ownership, включая отсутствующие пути и общие родительские каталоги. Следующая проверка заново видит файловую систему; rooted validation при фактическом открытии сохранена. Preflight проверяет cancellation.
+- `internal/usecase/storage_migration.go`: проверка конфликтов временных имён больше не делает полный попарный обход каталога. Журнал сохраняется пакетами до 64 файлов: SHA-256 и ownership фиксируются **до** публикации копий, затем фиксируются результаты пакета. Для 3964 существующих файлов это до 124 batch updates вместо 7928 per-file updates, не считая общих переходов состояния. Это уменьшение числа записей, не измеренное ускорение HDD.
+- Формат существующего журнала сохранён. Restart повторно проверяет целевые файлы независимо от `Copied`; fsync, no-replace, лимит свободного места, offline verification и cleanup после mapping commit сохранены. Логи показывают preflight/copy/verification/cleanup, hash, количество файлов и длительность; во время copy/cleanup счётчики публикуются между файлами при достижении 30 секунд, а не отдельным heartbeat внутри блокирующего syscall.
+- `pkg/anacrolix-torrent/storage/file-piece.go`: `Flush` при отсутствующем `.part` сбрасывает существующий файл с окончательным именем под файловой блокировкой. Другие ошибки flush не скрываются. Ранее production SQLite completion требовал flush `.part` даже после успешного хеширования готового файла; тесты с memory completion пропускали этот путь. Это могло отвергать корректные данные и приводить к повторной загрузке. Уже существующая неоднозначная пара final/part автоматически не удаляется и не объединяется.
+- `web/src/progress.ts`, `TorrentTable.vue`: desktop/mobile объясняют очередь и выполнение migration; `apply pending` связывается с ожиданием storage, `metadata pending` не выводится до разрешения storage. Исторический прогресс по-прежнему помечен как непроверенный. README описывает этапы и совместимость журнала.
+
+Регрессии и проверка:
+
+- [x] Перенос 130 файлов с прерыванием после публикации 65-го, загрузкой durable journal и повторным запуском; изменённая копия отвергается, исходники сохранены, после восстановления весь перенос и cleanup завершаются. SQL trigger ограничивает число реальных journal updates.
+- [x] Ошибка commit fingerprints не разрешает публикацию копии; ownership journal и source остаются.
+- [x] Новая alias-связь после предыдущей проверки обнаруживается; cancellation и memoization отсутствующих путей проверены.
+- [x] Exact/prefix/ancestor конфликты временных имён сохранены. Benchmark на 4000 путях: ~1.69 ms/op, ~668 KB/op на локальном M3 Max; это CPU benchmark, не замер NAS/HDD.
+- [x] `TestVerifiedPersistentCompletionFlushesExistingFile/data` до исправления воспроизвёл тот же `.part: no such file or directory`, после исправления прошёл. Отдельно проверены `.part` и отказ flush без выдачи completion.
+- [x] Интеграция migration → runtime verification с настоящим SQLite completion прошла; лишний `.part` не создаётся.
+- [x] Финальный `make check` после исправления Flush прошёл: root/fork tests и race, vet, backend/frontend build, 28 Vitest (`/tmp/tsh-migration-final-check.log`). Linux/arm64 Docker: миграционные usecase-тесты и полный storage suite с race detector прошли (`migration-usecase.log`, `migration-storage.log` в `/tmp/tsh-ci-40085220944-linux/`). Результаты последующего перехода без `.part` приведены в начале отчёта.
+- [ ] Исправления установлены и проверены на пользовательском HDD; успешный удалённый CI подтверждён.
+
+Работа остаётся follow-up фазы 40; DoD удалённой приёмки открыт, фаза 41 не начата. Изменение схемы БД или ручной сброс сохранённых данных не требуются.
+
 ## Linux race-root — запуск 40137410282
 
 [Job 121001767404](https://github.com/ivangolenkov/torrent-stream-hub/actions/runs/40137410282/job/121001767404), commit `4649c3334708a8f608f17f144b13d9b024e8601a`. Публичная страница подтверждает падение `Run make check`, exit 2. Полный лог требует входа, а GitHub API вернул rate limit. Пользователь предоставил фрагменты: ошибку `TestProcessShutdownWithOpenSSEAndBodyWait` (`add: 503 ... restoring persisted torrents`) и отдельный `FAIL torrent-stream-hub/internal/engine` в `race-root`. Имя упавшего engine-теста в предоставленных фрагментах отсутствует; точное совпадение с локальными engine-сбоями не утверждается.

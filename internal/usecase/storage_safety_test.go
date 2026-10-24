@@ -367,6 +367,18 @@ func TestDownloadRevalidatesOnEveryOpen(t *testing.T) {
 				}
 			}
 			in, err := file.Open()
+			if mutation == "part" {
+				// Plain-name storage ignores an unrelated sibling added after
+				// open; current-file verification still controls readiness.
+				if err != nil {
+					t.Fatal("verified metadata file blocked by sibling", err)
+				}
+				in.Close()
+				if _, _, err := uc.GetDownloadedTorrentFiles(tor.Hash); err != nil {
+					t.Fatal("verified ZIP payload blocked by sibling", err)
+				}
+				return
+			}
 			if err == nil {
 				in.Close()
 				t.Fatal("unsafe payload reopened after preflight")

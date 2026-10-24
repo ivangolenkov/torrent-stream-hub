@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -152,7 +153,7 @@ func (uc *TorrentUseCase) runStorageMigrations(ctx context.Context) {
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 	for {
-		all, err := uc.repo.GetAllTorrents()
+		all, err := uc.repo.GetAllTorrentsContext(ctx)
 		if err == nil {
 			for _, t := range all {
 				if ctx.Err() != nil {
@@ -204,6 +205,8 @@ func (uc *TorrentUseCase) migrateStorage(ctx context.Context, t *models.Torrent)
 		release()
 		return nil
 	}
+	started := time.Now()
+	logging.Infof("storage migration starting hash=%s state=%s", t.Hash, m.State)
 	root, err := os.OpenRoot(uc.engine.DownloadDir())
 	if err != nil {
 		release()
@@ -222,10 +225,15 @@ func (uc *TorrentUseCase) migrateStorage(ctx context.Context, t *models.Torrent)
 			err = fmt.Errorf("original metainfo required for legacy migration")
 		}
 		if err == nil {
-			err = uc.preflightMigration(root, t, paths, journal.Root, &journal)
+			logging.Infof("storage migration hash=%s stage=preflight files=%d", t.Hash, len(paths))
+			err = uc.preflightMigration(ctx, root, t, paths, journal.Root, &journal)
 		}
 	}
 	if err != nil {
+		if ctx.Err() != nil {
+			release()
+			return ctx.Err()
+		}
 		m.State = "blocked"
 		m.Error = "Legacy storage conflict; restore metainfo or resolve ownership before retry"
 		_ = uc.repo.SaveStorageMapping(m)
@@ -262,41 +270,10 @@ func (uc *TorrentUseCase) migrateStorage(ctx context.Context, t *models.Torrent)
 		}
 	}()
 	if m.State != "ready" {
-		for i := range journal.Entries {
-			entry := &journal.Entries[i]
-			if err := ctx.Err(); err != nil {
-				return err
-			}
-			if entry.Digest == "" {
-				digest, size, err := digestPayload(ctx, root, entry.Source)
-				if err != nil {
-					return err
-				}
-				entry.Digest, entry.Size = digest, size
-				if err := saveMigrationJournal(uc.repo, m, &journal); err != nil {
-					return err
-				}
-			}
-			if err := root.MkdirAll(filepath.Dir(entry.Target), 0700); err != nil {
-				return err
-			}
-			if _, err := root.Lstat(entry.Target); errors.Is(err, os.ErrNotExist) {
-				if err := uc.engine.CheckMigrationSpace(filepath.Join(uc.engine.DownloadDir(), filepath.Dir(entry.Target)), uint64(entry.Size)); err != nil {
-					return err
-				}
-			}
-			copyEntry := uc.migrationCopy
-			if copyEntry == nil {
-				copyEntry = copyMigrationEntry
-			}
-			if err := copyEntry(ctx, root, entry); err != nil {
-				return err
-			}
-			entry.Copied = true
-			if err := saveMigrationJournal(uc.repo, m, &journal); err != nil {
-				return err
-			}
+		if err := uc.copyMigrationEntries(ctx, root, m, &journal); err != nil {
+			return err
 		}
+		logging.Infof("storage migration hash=%s stage=verification files=%d duration=%s", t.Hash, len(journal.Entries), time.Since(started))
 		mi, err := metainfo.LoadFromFile(filepath.Join(uc.engine.ConfigDir(), "metainfo", strings.ToLower(t.Hash)+".torrent"))
 		if err != nil {
 			return err
@@ -319,7 +296,9 @@ func (uc *TorrentUseCase) migrateStorage(ctx context.Context, t *models.Torrent)
 		}
 	}
 	// Commit precedes source cleanup. The journal remains until cleanup succeeds.
-	for _, entry := range journal.Entries {
+	logging.Infof("storage migration hash=%s stage=cleanup files=%d duration=%s", t.Hash, len(journal.Entries), time.Since(started))
+	lastProgress := time.Now()
+	for index, entry := range journal.Entries {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -341,6 +320,10 @@ func (uc *TorrentUseCase) migrateStorage(ctx context.Context, t *models.Torrent)
 		}
 		if err := root.Remove(entry.Source); err != nil {
 			return err
+		}
+		if time.Since(lastProgress) >= 30*time.Second {
+			logging.Infof("storage migration hash=%s stage=cleanup files=%d/%d", t.Hash, index+1, len(journal.Entries))
+			lastProgress = time.Now()
 		}
 	}
 	release, err = uc.lockRecords(ctx, t.Hash)
@@ -373,7 +356,75 @@ func (uc *TorrentUseCase) migrateStorage(ctx context.Context, t *models.Torrent)
 	if err != nil || current == nil {
 		return err
 	}
-	return uc.restoreMappedTorrentLocked(current)
+	err = uc.restoreMappedTorrentLocked(current)
+	if err == nil {
+		logging.Infof("storage migration finished hash=%s files=%d duration=%s", t.Hash, len(journal.Entries), time.Since(started))
+	}
+	return err
+}
+
+const migrationJournalBatchSize = 64
+
+func (uc *TorrentUseCase) copyMigrationEntries(ctx context.Context, root *os.Root, m *repository.StorageMapping, journal *migrationJournal) error {
+	logging.Infof("storage migration hash=%s stage=copy files=%d", m.Hash, len(journal.Entries))
+	lastProgress := time.Now()
+	for start := 0; start < len(journal.Entries); start += migrationJournalBatchSize {
+		end := min(start+migrationJournalBatchSize, len(journal.Entries))
+		batch := journal.Entries[start:end]
+		// Persist fingerprints BEFORE publishing any files in this batch. A crash
+		// can lose Copied flags, but never ownership or the expected digest of a
+		// published target. Restart always revalidates it, even if Copied is true.
+		changed := false
+		for i := range batch {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			entry := &batch[i]
+			if entry.Digest == "" {
+				digest, size, err := digestPayload(ctx, root, entry.Source)
+				if err != nil {
+					return err
+				}
+				entry.Digest, entry.Size = digest, size
+				changed = true
+			}
+		}
+		if changed {
+			if err := saveMigrationJournal(uc.repo, m, journal); err != nil {
+				return err
+			}
+		}
+		for i := range batch {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			entry := &batch[i]
+			if err := root.MkdirAll(filepath.Dir(entry.Target), 0700); err != nil {
+				return err
+			}
+			if _, err := root.Lstat(entry.Target); errors.Is(err, os.ErrNotExist) {
+				if err := uc.engine.CheckMigrationSpace(filepath.Join(uc.engine.DownloadDir(), filepath.Dir(entry.Target)), uint64(entry.Size)); err != nil {
+					return err
+				}
+			}
+			copyEntry := uc.migrationCopy
+			if copyEntry == nil {
+				copyEntry = copyMigrationEntry
+			}
+			if err := copyEntry(ctx, root, entry); err != nil {
+				return err
+			}
+			entry.Copied = true
+			if time.Since(lastProgress) >= 30*time.Second || start+i+1 == len(journal.Entries) {
+				logging.Infof("storage migration hash=%s stage=copy files=%d/%d", m.Hash, start+i+1, len(journal.Entries))
+				lastProgress = time.Now()
+			}
+		}
+		if err := saveMigrationJournal(uc.repo, m, journal); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (uc *TorrentUseCase) restoreMappedTorrentLocked(t *models.Torrent) error {
@@ -453,11 +504,11 @@ func (uc *TorrentUseCase) registerStorageAliases(m *repository.StorageMapping, m
 	return nil
 }
 
-func (uc *TorrentUseCase) preflightMigration(root *os.Root, t *models.Torrent, paths []string, targetRoot string, journal *migrationJournal) error {
+func (uc *TorrentUseCase) preflightMigration(ctx context.Context, root *os.Root, t *models.Torrent, paths []string, targetRoot string, journal *migrationJournal) error {
 	if _, err := root.Lstat(targetRoot); !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("isolated target occupied")
 	}
-	all, err := uc.repo.GetAllTorrents()
+	all, err := uc.repo.GetAllTorrentsContext(ctx)
 	if err != nil {
 		return err
 	}
@@ -465,10 +516,13 @@ func (uc *TorrentUseCase) preflightMigration(root *os.Root, t *models.Torrent, p
 	for _, p := range paths {
 		owned = append(owned, p, p+".part")
 	}
-	if err := uc.validateOwnership(root, t.Hash, append(append([]string{}, owned...), targetRoot), all); err != nil {
+	if err := uc.validateOwnershipContext(ctx, root, t.Hash, append(append([]string{}, owned...), targetRoot), all); err != nil {
 		return err
 	}
 	for _, name := range owned {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if err := payload.Validate(root, name); err != nil {
 			return err
 		}
@@ -482,12 +536,35 @@ func (uc *TorrentUseCase) preflightMigration(root *os.Root, t *models.Torrent, p
 		}
 		journal.Entries = append(journal.Entries, migrationEntry{Source: name, Target: filepath.Join(targetRoot, name)})
 	}
-	// Temporary copy names cannot collide with another metadata file.
-	for i, a := range journal.Entries {
-		for k, b := range journal.Entries {
-			if i != k && pathsOverlap(a.Target+".tsh-migrate", b.Target) {
+	return validateMigrationTemporaryPaths(ctx, journal.Entries)
+}
+
+func validateMigrationTemporaryPaths(ctx context.Context, entries []migrationEntry) error {
+	// Index ancestors as well as exact targets, so prefix conflicts need no
+	// quadratic scan of the catalog (file, file.tsh-migrate/child).
+	targets := make(map[string]bool, len(entries))
+	for _, e := range entries {
+		targets[filepath.Clean(e.Target)] = true
+	}
+	sorted := make([]string, 0, len(targets))
+	for target := range targets {
+		sorted = append(sorted, target)
+	}
+	sort.Strings(sorted)
+	for _, e := range entries {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		temp := filepath.Clean(e.Target + ".tsh-migrate")
+		for parent := temp; parent != "."; parent = filepath.Dir(parent) {
+			if targets[parent] {
 				return fmt.Errorf("migration temporary path conflict")
 			}
+		}
+		prefix := temp + string(os.PathSeparator)
+		index := sort.SearchStrings(sorted, prefix)
+		if index < len(sorted) && strings.HasPrefix(sorted[index], prefix) {
+			return fmt.Errorf("migration temporary path conflict")
 		}
 	}
 	return nil

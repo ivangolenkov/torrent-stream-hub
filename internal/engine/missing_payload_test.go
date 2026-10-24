@@ -3,6 +3,7 @@ package engine
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -28,7 +29,7 @@ func TestMissingPayloadDoesNotClassifyOrdinaryIncompleteFiles(t *testing.T) {
 	}
 }
 
-func TestMissingPayloadDoesNotClassifyHashMismatchOrPartFile(t *testing.T) {
+func TestMissingPayloadUsesMetadataName(t *testing.T) {
 	for _, mutation := range []string{"hash-mismatch", "part-file"} {
 		t.Run(mutation, func(t *testing.T) {
 			e, tor := setupCompletedLifecycleTorrent(t)
@@ -51,7 +52,20 @@ func TestMissingPayloadDoesNotClassifyHashMismatchOrPartFile(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			if ready, _, err := e.CheckFileDirectReady(tor.Hash, 0); err != nil || ready {
+			ready, _, err := e.CheckFileDirectReady(tor.Hash, 0)
+			if mutation == "part-file" {
+				e.mu.RLock()
+				mt := e.managedTorrents[tor.Hash]
+				e.mu.RUnlock()
+				mt.mu.Lock()
+				_, blocked := mt.safetyBlocks[models.BlockMissingFiles]
+				mt.mu.Unlock()
+				if ready || !errors.Is(err, os.ErrNotExist) || !blocked {
+					t.Fatal("renamed expected file was not detected as missing", ready, err)
+				}
+				return
+			}
+			if err != nil || ready {
 				t.Fatal("mutation remained directly ready", ready, err)
 			}
 			e.mu.RLock()

@@ -16,6 +16,8 @@ import (
 
 // VerifyStorage performs an offline hash pass. Invalid/missing pieces remain
 // incomplete, not trusted; neither payload download nor discovery is enabled.
+// This read-only migration pass understands the old .part layout without
+// renaming journal-owned copies. The runtime imports these names after cleanup.
 func VerifyStorage(ctx context.Context, dir, hash string, mi *metainfo.MetaInfo) error {
 	root, err := os.OpenRoot(dir)
 	if err != nil {

@@ -287,11 +287,6 @@ func (e *Engine) OpenStreamSource(ctx context.Context, hash string, index int, i
 	}
 	defer root.Close()
 
-	// Check if .part file still exists
-	if _, err := root.Stat(relPath + ".part"); err == nil {
-		return makeTorrentFallback(FallbackReasonPartFileExists)
-	}
-
 	f, err := payload.Open(root, relPath)
 	if err != nil {
 		if errors.Is(err, payload.ErrNotRegular) {
@@ -447,10 +442,6 @@ func (e *Engine) CheckFileDirectReady(hash string, index int) (bool, int64, erro
 		return false, fileLength, nil
 	}
 	defer root.Close()
-
-	if _, err := root.Stat(relPath + ".part"); err == nil {
-		return false, fileLength, nil
-	}
 
 	f, err := payload.Open(root, relPath)
 	if err != nil {

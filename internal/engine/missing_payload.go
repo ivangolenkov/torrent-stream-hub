@@ -42,10 +42,7 @@ func (e *Engine) detectMissingExpectedPayload(mt *ManagedTorrent, file *torrent.
 			return
 		}
 		defer root.Close()
-		if _, err = root.Lstat(rel); !errors.Is(err, fs.ErrNotExist) {
-			return
-		}
-		_, err = root.Lstat(rel + ".part")
+		_, err = root.Lstat(rel)
 		missing = errors.Is(err, fs.ErrNotExist)
 	}); err != nil {
 		return err

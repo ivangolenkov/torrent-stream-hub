@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { progressLabel } from '../progress';
+import { progressLabel, storageLabel, storagePending } from '../progress';
 import { computed, ref, onMounted, onUnmounted, nextTick, watch } from 'vue';
 import { useTorrentStore } from '../stores/torrentStore';
 import { PlayIcon, PauseIcon, TrashIcon, EllipsisVerticalIcon, FolderOpenIcon, PlusIcon } from '@heroicons/vue/24/solid';
@@ -222,12 +222,12 @@ const confirmDelete = async () => {
 							<div v-if="t.activity?.streaming" class="text-xs text-blue-700">Streaming</div>
 							<div v-if="t.activity?.preloads" class="text-xs text-blue-700">Preload: {{ t.activity.preloads }}</div>
 							<div v-if="t.activity?.verifying && !t.recheck" class="text-xs text-amber-700">Verifying</div>
-              <div v-if="t.control?.reconcile_pending" class="text-xs text-amber-700" :title="t.control.reconcile_reason">Saved: {{ t.control.desired_run }} · apply pending</div>
+              <div v-if="t.control?.reconcile_pending" class="text-xs text-amber-700" :title="t.control.reconcile_reason">Saved: {{ t.control.desired_run }} · {{ storagePending(t) ? 'waiting for storage migration' : 'apply pending' }}</div>
               <div v-if="t.control?.apply_failure" class="text-xs text-red-600" :title="t.control.apply_failure.code">Apply failed · retry with Pause or Resume</div>
               <div v-if="t.selection_complete && t.state !== 'Seeding'" class="text-xs text-gray-500">Selected files complete (no background slot)</div>
               <div v-if="t.deletion_mode" class="text-xs text-orange-700">Deletion pending ({{ t.deletion_mode }}). {{ t.deletion_error }}</div>
               <div v-if="t.download_block" class="text-xs text-orange-700">Download blocked: {{ t.download_block }}. Resume manually after recovery.</div>
-              <div v-if="t.storage_state && t.storage_state !== 'ready'" class="text-xs text-amber-700">Storage: {{ t.storage_state }}. {{ t.storage_error }}</div>
+              <div v-if="storageLabel(t)" class="text-xs text-amber-700">{{ storageLabel(t) }}. {{ t.storage_error }}</div>
             </td>
             <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
               {{ formatSize(t.size) }}
@@ -265,7 +265,7 @@ const confirmDelete = async () => {
               <div class="text-xs text-gray-500">
                 seeds {{ getPeerSummary(t).seeds }}
               </div>
-              <div v-if="!getPeerSummary(t).metadata_ready" class="text-xs text-amber-600">
+              <div v-if="!getPeerSummary(t).metadata_ready && !storagePending(t)" class="text-xs text-amber-600">
                 metadata pending
               </div>
             </td>
@@ -331,12 +331,12 @@ const confirmDelete = async () => {
 					<div v-if="t.activity?.streaming" class="text-xs text-blue-700">Streaming</div>
 					<div v-if="t.activity?.preloads" class="text-xs text-blue-700">Preload: {{ t.activity.preloads }}</div>
 					<div v-if="t.activity?.verifying && !t.recheck" class="text-xs text-amber-700">Verifying</div>
-          <div v-if="t.control?.reconcile_pending" class="text-xs text-amber-700" :title="t.control.reconcile_reason">Saved: {{ t.control.desired_run }} · apply pending</div>
+          <div v-if="t.control?.reconcile_pending" class="text-xs text-amber-700" :title="t.control.reconcile_reason">Saved: {{ t.control.desired_run }} · {{ storagePending(t) ? 'waiting for storage migration' : 'apply pending' }}</div>
           <div v-if="t.control?.apply_failure" class="text-xs text-red-600" :title="t.control.apply_failure.code">Apply failed · retry with Pause or Resume</div>
           <div v-if="t.selection_complete && t.state !== 'Seeding'" class="text-xs text-gray-500">Selected files complete (no background slot)</div>
           <div v-if="t.deletion_mode" class="text-xs text-orange-700">Deletion pending ({{ t.deletion_mode }}). {{ t.deletion_error }}</div>
           <div v-if="t.download_block" class="text-xs text-orange-700">Download blocked: {{ t.download_block }}. Resume manually after recovery.</div>
-          <div v-if="t.storage_state && t.storage_state !== 'ready'" class="text-xs text-amber-700">Storage: {{ t.storage_state }}. {{ t.storage_error }}</div>
+          <div v-if="storageLabel(t)" class="text-xs text-amber-700">{{ storageLabel(t) }}. {{ t.storage_error }}</div>
           <div class="flex items-center gap-2 mb-2 text-xs">
             <span :class="['px-2 py-0.5 inline-flex leading-4 font-semibold rounded border', getStateColor(t.state)]">
               {{ t.state }}

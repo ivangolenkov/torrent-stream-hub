@@ -1681,8 +1681,22 @@ func (t *Torrent) updateAllPiecePriorities(reason updateRequestReason) {
 // updatePiecePriority, but across all pieces.
 func (t *Torrent) updatePiecePriorities(begin, end pieceIndex, reason updateRequestReason) {
 	t.logger.Slogger().Debug("updating piece priorities", "begin", begin, "end", end)
+	// A global gate or file priority has already changed for the entire range.
+	// Reconcile both indexes before any callback inspects the remaining pieces.
+	disabled := t.disableTriggers
+	t.disableTriggers = true
+	var updated []pieceIndex
 	for i := begin; i < end; i++ {
-		t.updatePiecePriority(i, reason)
+		if t.updatePiecePriorityNoRequests(i) {
+			updated = append(updated, i)
+		}
+	}
+	t.disableTriggers = disabled
+	if !disabled {
+		for _, i := range updated {
+			t.onPiecePendingTriggers(i)
+			t.updatePeerRequestsForPiece(i, reason)
+		}
 	}
 	t.logPieceRequestOrder()
 }
@@ -3180,7 +3194,9 @@ func (t *Torrent) DisallowDataDownload() {
 }
 
 func (t *Torrent) disallowDataDownloadLocked() {
-	t.dataDownloadDisallowed.Set()
+	if t.dataDownloadDisallowed.Set() {
+		t.updateAllPiecePriorities("data download disallowed")
+	}
 	t.iterPeers(func(p *Peer) {
 		// Could check if peer request state is empty/not interested?
 		p.onNeedUpdateRequests("disallow data download")

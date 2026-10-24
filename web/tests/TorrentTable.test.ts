@@ -90,6 +90,32 @@ it('labels last-known progress in both layouts', async () => {
   }
 });
 
+it('explains migration waits without presenting them as missing peer metadata', async () => {
+  const { wrapper, store } = setup();
+  const torrent = {
+    ...fixture('one'), storage_state: 'legacy', progress_source: 'legacy',
+    peer_summary: { connected: 0, known: 0, seeds: 0, metadata_ready: false },
+    control: { desired_run: 'enabled', reconcile_pending: true },
+  } as Torrent;
+  store.torrents = [torrent];
+  await nextTick();
+  for (const selector of ['tbody', '.md\\:hidden']) {
+    const text = wrapper.find(selector).text();
+    expect(text).toContain('Storage migration queued');
+    expect(text).toContain('waiting for storage migration');
+    expect(text).toContain('verification required');
+    expect(text).not.toContain('metadata pending');
+  }
+  store.torrents = [{ ...torrent, storage_state: 'moving' }];
+  await nextTick();
+  expect(wrapper.text()).toContain('copying and verifying files');
+  store.torrents = [{ ...torrent, storage_state: 'ready' }];
+  await nextTick();
+  expect(wrapper.text()).toContain('metadata pending');
+  expect(wrapper.text()).toContain('apply pending');
+  expect(wrapper.text()).not.toContain('waiting for storage migration');
+});
+
 it('shows streaming, preload and verification independently from Paused', async () => {
   const { wrapper, store } = setup();
   store.torrents = [{ ...fixture('one'), activity: { streaming: true, streams: 1, direct_readers: 1, preloads: 2, debouncing: false, verifying: true } }];

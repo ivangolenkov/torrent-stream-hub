@@ -2,7 +2,7 @@
 
 ## Статус и зависимости
 
-- Статус: **реализация завершена; исправление обнаруженного Windows CI сбоя локально проверено 24 октября 2026 года**. Устранена утечка mmap storage, вызвавшая ошибки удаления файлов в `Native storage (windows-latest)`; успешный повторный нативный прогон после исправления ещё не подтверждён. Результаты и ограничения: `tasks/implementation/phase40-report.md`.
+- Статус: **реализация и локальные исправления выполнены; приёмка CI не завершена**. В запуске `40085220944` упали Windows storage и Linux checks. Windows helper исправлен локально; точная причина Linux exit 2 требует лога `make check`. Предупреждения Node.js runtime учтены в workflows. Результаты и ограничения: `tasks/implementation/phase40-report.md`.
 - Основание: полное ревью проекта от **23 октября 2026 года** — 15 дефектов и восемь архитектурных замечаний. Содержание находок и сценарии приёмки закреплены ниже; для выполнения фазы не требуется история чата или временные тесты из `/tmp`.
 - Предусловие: завершённая [фаза 39](phase39-logging-state-and-lifecycle-architecture.md) и её [итоговый отчёт](implementation/phase39-report.md). Перед реализацией проверить актуальное состояние репозитория и повторить baseline.
 - Это одна фаза с последовательными внутренними блоками и общим DoD. Следующий блок начинается после проверки затронутых инвариантов предыдущего; зелёный отдельный блок не закрывает фазу.
@@ -279,7 +279,7 @@ Go regression tests используют barriers/channels и controlled clocks 
 - [x] A40-06: production completion использует SQLite, Bolt не открывается; migration/reopen/failure и bounded cache lifecycle проверены.
 - [x] A40-07: task queues/workers/retained bytes имеют численные budgets и overload policy, обязательные safety effects не теряются.
 - [x] A40-08: Makefile/PR/release checks охватывают оба Go-модуля, frontend и заявленные platform storage suites; выполненное отделено от неподтверждённого.
-- [x] Полные root tests/race, обязательные fork suites/race, vet, backend build, Vitest и frontend build проходят; regression гарантий фаз 34–39 отсутствует.
+- [ ] Полные root tests/race, обязательные fork suites/race, vet, backend build, Vitest и frontend build проходят; regression гарантий фаз 34–39 отсутствует.
 - [x] Upgrade/restart/rollback ограничения, API/config/ownership/lifecycle документация актуальны; `tasks/implementation/phase40-report.md` содержит каждый F40/A40 и общий DoD.
 
 Перенос обязательного пункта за пределы фазы является изменением плана и должен быть явно согласован и отражён в отчёте. Непроверенная гарантия не отмечается выполненной из-за отсутствия ошибки в штатных тестах.

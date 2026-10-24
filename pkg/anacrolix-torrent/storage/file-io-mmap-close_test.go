@@ -18,8 +18,12 @@ import (
 // so successful TempDir cleanup alone would not catch the Windows regression.
 func checkMmapReleased(t *testing.T, mapping *fileMmap) {
 	t.Helper()
-	_, err := mapping.f.Stat()
-	qt.Check(t, qt.IsTrue(errors.Is(err, os.ErrClosed)))
+	// On Windows Stat returns a native handle error instead of os.ErrClosed.
+	// A nonempty ReadAt checks the file's closed state on all supported platforms.
+	var buf [1]byte
+	n, err := mapping.f.ReadAt(buf[:], 0)
+	qt.Check(t, qt.Equals(n, 0))
+	qt.Check(t, qt.ErrorIs(err, os.ErrClosed))
 	qt.Check(t, qt.IsNil(mapping.m))
 }
 

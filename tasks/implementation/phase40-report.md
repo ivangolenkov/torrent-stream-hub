@@ -1,6 +1,6 @@
 # Фаза 40 — Отчёт об имплементации
 
-Статус: **реализация завершена; исправление обнаруженного Windows CI сбоя локально проверено 24 октября 2026 года**. Пользователь сообщил о падении `Native storage (windows-latest)`; повторный нативный прогон после исправления ещё не подтверждён. Основание: [план фазы 40](../phase40-review-fixes-and-architecture-hardening.md). Фаза 41 не начата.
+Статус: **реализация и локальные исправления выполнены; приёмка CI не завершена**. В запуске `40085220944` упали Windows storage и Linux checks. Ошибка Windows-проверки исправлена локально; точная причина Linux-сбоя требует лога упавшего шага. Основание: [план фазы 40](../phase40-review-fixes-and-architecture-hardening.md). Фаза 41 не начата.
 
 ## Исправление Windows CI — закрытие mmap storage
 
@@ -25,6 +25,39 @@
 - [ ] Подтвердить успешный повторный `Native storage (windows-latest)` после включения исправления в CI.
 
 Исправление относится к storage/lifecycle и платформенной приёмке фазы 40; расширения scope или переноса задач не потребовалось. Frontend не изменялся; его результаты ниже относятся к предыдущей полной локальной приёмке.
+
+### Повторный Windows CI — проверка закрытого дескриптора
+
+В следующем предоставленном логе упали три новые регрессии только на ожидании `os.ErrClosed` после `mapping.f.Stat()` в `checkMmapReleased`. Ошибок удаления файлов и освобождения mapping в этом логе нет. Ошибка была в добавленной проверке: в исходниках используемого Go 1.25.8 Windows-реализация `File.Stat` вызывает `statHandle` напрямую и возвращает системную ошибку без преобразования в `os.ErrClosed`.
+
+- В `pkg/anacrolix-torrent/storage/file-io-mmap-close_test.go` проверка заменена чтением одного байта через underlying `os.File.ReadAt`. Этот путь проверяет закрытое состояние в `internal/poll` и преобразует `ErrFileClosing` в `os.ErrClosed`; проверены локальные исходники Go для Windows. Непустой буфер обязателен, чтобы чтение действительно проверяло состояние файла.
+- Проверяются ноль прочитанных байт и `qt.ErrorIs(err, os.ErrClosed)`, поэтому при сбое выводится сама ошибка. Проверки освобождения mapping и удаления файла сохранены; production-код и workflow не изменены.
+- После этой правки на macOS прошли fork `go test -race -count=1 ./storage`, `go vet . ./storage`, root `go test -count=1 ./...` и Windows cross-compile тестового бинарника той же командой, что в таблице выше.
+- [x] Устранено платформенное предположение теста; локальные проверки прошли.
+- [ ] Получить успешный нативный Windows CI с исправленной проверкой. Cross-compile его не заменяет.
+
+Изменение остаётся в рамках платформенной приёмки фазы 40; отклонений от плана нет.
+
+## Разбор Release #11 — запуск 40085220944
+
+Источник: [GitHub Actions run](https://github.com/ivangolenkov/torrent-stream-hub/actions/runs/40085220944), tag `v0.1.10`, commit `d5d09e60d0d0f8d74cbe2bdafa0fdeeefa2a33b0`, 24 октября 2026 года. Прочитана публичная HTML-сводка со всеми annotations: **2 errors, 3 warnings, 2 notices**. Полные логи требуют авторизации; анонимный API вернул rate limit, GitHub HTTPS credential helper не предоставил сохранённых credentials. Разбор недоступных строк лога не объявляется выполненным.
+
+| Сигнал | Подтверждённое состояние и действие |
+| --- | --- |
+| Windows storage, exit 1 | Три упавших теста из предоставленного пользователем лога сводятся к непереносимой проверке `Stat` в одном helper. Локальная замена на `ReadAt` описана выше и отсутствует в коммите запуска `d5d09e6`. |
+| Linux checks, exit 2 | Ошибка шага `make check`, [job 120846661390](https://github.com/ivangolenkov/torrent-stream-hub/actions/runs/40085220944/job/120846661390#step:6:1908). Это итоговый код `make`; конкретный тест, сборка или target по публичной сводке не определяются. Полный текст шага запрошен у пользователя. |
+| Три предупреждения Node.js 20 | `checkout@v4`, `setup-go@v5`, `setup-node@v4` запускаются GitHub через принудительную замену runtime на Node.js 24. В обоих workflows обновлены соответствующие ссылки на `checkout@v5`, `setup-go@v6`, `setup-node@v6`. |
+| Уведомление Ubuntu | GitHub сообщает о миграции `ubuntu-latest` на Ubuntu 26. Связь уведомления с падением тестов не доказана. |
+| Уведомление macOS | Ограниченная доступность arm64 runners и возможные очереди; это не сообщение об ошибке приложения. |
+| Пропущенные release jobs | Binaries, Docker и публикация релиза зависят от checks; их пропуск после падения checks ожидаем. Это не отдельные подтверждённые ошибки сборки/публикации. |
+
+Node.js 24 подтверждён в официальных `action.yml`: [checkout v5](https://github.com/actions/checkout/blob/v5/action.yml), [setup-go v6](https://github.com/actions/setup-go/blob/v6/action.yml), [setup-node v6](https://github.com/actions/setup-node/blob/v6/action.yml). Версия Node.js для сборки frontend остаётся 22.15.0; версия Go — 1.25.8. YAML обоих workflows успешно разобран через Ruby YAML; успешное выполнение обновлённых actions на GitHub ещё не подтверждено.
+
+Для дополнительной диагностики использован локальный Linux/arm64 контейнер с Go 1.25.8; исходники подключены только для чтения. При `CGO_ENABLED=0` прошли root `go test -count=1 ./...` и fork `go test -count=1 . ./storage`. Затем при `CGO_ENABLED=1` с C-компилятором, установленным в одноразовом контейнере, прошли root `go test -race -count=1 ./...` и fork `go test -race -count=1 . ./storage`. Логи race-прогонов: `/tmp/tsh-ci-40085220944-linux/{root-race,fork-race}.log`. Это Alpine/Linux arm64, а не полный Ubuntu GitHub job; результаты не устанавливают причину сбоя конкретного CI run. Frontend, vet/build и GitHub Actions runtime в этом Linux-контейнере не запускались.
+
+- [x] Все публичные annotations разобраны; известный Windows helper исправлен, предупреждения runtime учтены в workflows.
+- [ ] Получить полный Linux `make check` log и установить исходную причину exit 2.
+- [ ] Подтвердить успешные Windows/Linux CI jobs с исправлениями; общая CI-приёмка остаётся открытой.
 
 ## Блок 1 — Исходное состояние
 
@@ -178,7 +211,7 @@
 - [x] A40-06: production completion использует SQLite, Bolt не открывается; migration/reopen/failure и bounded cache lifecycle проверены.
 - [x] A40-07: task queues/workers/retained bytes имеют численные budgets и overload policy, обязательные safety effects не теряются.
 - [x] A40-08: Makefile/PR/release checks охватывают оба Go-модуля, frontend и заявленные platform storage suites; выполненное отделено от неподтверждённого.
-- [x] Полные root tests/race, обязательные fork suites/race, vet, backend build, Vitest и frontend build проходят; regression гарантий фаз 34–39 отсутствует.
+- [ ] Полные root tests/race, обязательные fork suites/race, vet, backend build, Vitest и frontend build проходят; regression гарантий фаз 34–39 отсутствует. Локальные результаты приложены; ошибки Windows/Linux CI требуют успешной повторной приёмки.
 - [x] Upgrade/restart/rollback ограничения, API/config/ownership/lifecycle документация актуальны; `tasks/implementation/phase40-report.md` содержит каждый F40/A40 и общий DoD.
 
 

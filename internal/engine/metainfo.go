@@ -16,13 +16,12 @@ import (
 )
 
 func (e *Engine) newPieceCompletion() (storage.PieceCompletion, string, bool, string) {
-	pc, err := storage.NewBoltPieceCompletion(e.cfg.DownloadDir)
-	if err == nil {
-		return pc, "bolt", true, ""
+	if e.pieceCompletion != nil {
+		return e.pieceCompletion, "sqlite", true, ""
 	}
-	msg := sanitizeDiagnosticError(err)
-	logging.Warnf("persistent piece completion unavailable backend=bolt dir=%s: %s", e.cfg.DownloadDir, msg)
-	return storage.NewMapPieceCompletion(), "memory", false, msg
+	// Standalone engine consumers/tests may omit persistence. Never silently
+	// open another database or trust an old cache as verified data.
+	return storage.NewMapPieceCompletion(), "memory", false, ""
 }
 
 func (e *Engine) saveMetainfo(hash string, mi *metainfo.MetaInfo, keepExisting bool) error {
@@ -66,8 +65,8 @@ func (e *Engine) saveMetainfo(hash string, mi *metainfo.MetaInfo, keepExisting b
 	return os.Rename(tmp, path)
 }
 
-func (e *Engine) watchMetadata(hash string, t *torrent.Torrent) {
-	e.RunStorageTask(func(ctx context.Context) {
+func (e *Engine) watchMetadata(hash string, t *torrent.Torrent) bool {
+	return e.startTaskClass("metadata", 256, func(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
@@ -92,6 +91,16 @@ func (e *Engine) watchMetadata(hash string, t *torrent.Torrent) {
 			return
 		}
 
+		// Before metadata only explicitly supplied trackers are used. Extra public
+		// retrackers are added only after this policy is known.
+		if t.PublicDiscoveryAllowed() {
+			current := t.Metainfo()
+			spec := torrent.TorrentSpecFromMetaInfo(&current)
+			if err := e.runRuntimeWorkLocked(mt, func() { e.augmentTorrentSpec(spec) }); err != nil {
+				return
+			}
+			t.AddTrackers(spec.Trackers)
+		}
 		fileCount := len(t.Files())
 		mi := t.Metainfo()
 

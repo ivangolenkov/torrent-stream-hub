@@ -68,7 +68,7 @@ func (e *Engine) startRecheckLocked(mt *ManagedTorrent) (*models.RecheckOperatio
 	if verify == nil {
 		verify = func(ctx context.Context, t *torrent.Torrent) error { return t.VerifyDataContext(ctx) }
 	}
-	if !e.StartTask(func(context.Context) {
+	if !e.startTaskClass("verification", 2, func(context.Context) {
 		mt.mu.Lock()
 		if mt.verificationAttempt != attempt || mt.ctx.Err() != nil {
 			mt.mu.Unlock()
@@ -81,8 +81,8 @@ func (e *Engine) startRecheckLocked(mt *ManagedTorrent) (*models.RecheckOperatio
 		err := verify(mt.ctx, mt.t)
 		e.finishVerification(mt, attempt, err)
 	}) {
-		e.completeVerificationLocked(mt, attempt, context.Canceled)
-		return nil, context.Canceled
+		e.completeVerificationLocked(mt, attempt, ErrTaskLimit)
+		return nil, ErrTaskLimit
 	}
 	return &models.RecheckOperation{ID: operation.ID, Status: "pending"}, nil
 }

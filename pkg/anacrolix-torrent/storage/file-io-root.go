@@ -17,6 +17,41 @@ type rootFileIo struct {
 	ctx  context.Context
 }
 
+var ErrUnsafeFile = errors.New("unsafe storage file")
+
+// OpenRootFile is the shared payload read/write boundary. Names are root-relative,
+// symlinks and hardlinks are rejected, and existing file identity is revalidated
+// after the rooted open. Callers own the returned descriptor, never the root.
+func OpenRootFile(root *os.Root, name string, flags int) (*os.File, error) {
+	if !filepath.IsLocal(name) || filepath.Clean(name) == "." {
+		return nil, ErrUnsafeFile
+	}
+	r := rootFileIo{root: root}
+	rel, err := r.relative(filepath.Join(root.Name(), name))
+	if err != nil {
+		return nil, err
+	}
+	expected, err := root.Lstat(rel)
+	if err != nil && !(flags&os.O_CREATE != 0 && errors.Is(err, os.ErrNotExist)) {
+		return nil, err
+	}
+	if flags&os.O_CREATE != 0 {
+		if err := root.MkdirAll(filepath.Dir(rel), dirPerm); err != nil {
+			return nil, err
+		}
+	}
+	f, err := root.OpenFile(rel, flags, filePerm)
+	if err != nil {
+		return nil, err
+	}
+	st, err := f.Stat()
+	if err != nil || !st.Mode().IsRegular() || FileHasMultipleLinks(f, st) || expected != nil && !os.SameFile(expected, st) {
+		f.Close()
+		return nil, ErrUnsafeFile
+	}
+	return f, nil
+}
+
 func (r rootFileIo) relative(name string) (string, error) {
 	base, err := filepath.Abs(r.root.Name())
 	if err != nil {
@@ -57,21 +92,7 @@ func (r rootFileIo) open(name string, flags int) (*os.File, error) {
 	if err != nil {
 		return nil, err
 	}
-	if flags&os.O_CREATE != 0 {
-		if err := r.root.MkdirAll(filepath.Dir(rel), dirPerm); err != nil {
-			return nil, err
-		}
-	}
-	f, err := r.root.OpenFile(rel, flags, filePerm)
-	if err != nil {
-		return nil, err
-	}
-	st, err := f.Stat()
-	if err != nil || !st.Mode().IsRegular() || FileHasMultipleLinks(f, st) {
-		f.Close()
-		return nil, fmt.Errorf("unsafe storage file")
-	}
-	return f, nil
+	return OpenRootFile(r.root, rel, flags)
 }
 
 type rootSharedReader struct {
@@ -115,7 +136,11 @@ func (r rootFileIo) openForWrite(name string, _ int64) (fileWriter, error) {
 	return r.open(name, os.O_WRONLY|os.O_CREATE)
 }
 func (r rootFileIo) flush(name string, _, _ int64) error {
-	f, err := r.open(name, os.O_RDONLY)
+	flags := os.O_RDONLY
+	if runtime.GOOS == "windows" {
+		flags = os.O_RDWR
+	} // FlushFileBuffers requires write access.
+	f, err := r.open(name, flags)
 	if err != nil {
 		return err
 	}
@@ -131,7 +156,11 @@ func (r rootFileIo) rename(from, to string) error {
 	if err != nil {
 		return err
 	}
-	if _, err := r.root.Lstat(a); err != nil {
+	source, err := r.open(from, os.O_RDONLY)
+	if err != nil {
+		return err
+	}
+	if err := source.Close(); err != nil {
 		return err
 	}
 	if _, err := r.root.Lstat(b); err == nil {
@@ -139,12 +168,20 @@ func (r rootFileIo) rename(from, to string) error {
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	// Link is atomic no-replace, unlike Rename on Unix. Both names are in the
-	// same directory/filesystem; never overwrite a concurrently created target.
-	if err := r.root.Link(a, b); err != nil {
+	if filepath.Dir(a) != filepath.Dir(b) {
+		return fmt.Errorf("storage publication must stay in one directory")
+	}
+	dir, err := r.root.Open(filepath.Dir(a))
+	if err != nil {
 		return err
 	}
-	return r.root.Remove(a)
+	defer dir.Close()
+	// One native operation publishes the file. Never emulate no-replace by
+	// Link+Remove: interruption leaves hardlinks rejected by the read boundary.
+	if err := renameNoReplace(dir, filepath.Base(a), filepath.Base(b)); err != nil {
+		return &os.LinkError{Op: "publish", Old: a, New: b, Err: err}
+	}
+	return syncPublicationDirectory(dir)
 }
 func (r rootFileIo) stat(name string) (os.FileInfo, error) {
 	if runtime.GOOS != "windows" {

@@ -46,6 +46,7 @@ type FileCatalog struct {
 }
 
 type TorrentCatalog struct {
+	Format      string // "", v1, v2 or hybrid; empty is an unknown legacy layout.
 	Name        string
 	Size        int64
 	PieceLength int64

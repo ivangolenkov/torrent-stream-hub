@@ -37,6 +37,7 @@ func TestSyncUsesObservationWriterNotUniversalSnapshotSave(t *testing.T) {
 	}
 	sw := NewSyncWorker(uc)
 	defer sw.Close()
+	persistForTest(t, uc, tor.Hash)
 	sw.Refresh()
 	saved, err := repo.GetTorrent(tor.Hash)
 	if err != nil {
@@ -106,6 +107,7 @@ func TestSyncDoesNotPromoteUnappliedCommittedRevision(t *testing.T) {
 	tor, _ := completedSafetyFile(t, uc, "unapplied", false)
 	sw := NewSyncWorker(uc)
 	defer sw.Close()
+	persistForTest(t, uc, tor.Hash)
 	sw.Refresh()
 	i, err := repo.GetIntent(tor.Hash)
 	if err != nil {

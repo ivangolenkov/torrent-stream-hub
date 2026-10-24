@@ -12,6 +12,7 @@ func TestProgressSyncCannotRestoreReplacedPayloadBytes(t *testing.T) {
 	tor, path := completedSafetyFile(t, uc, "sync-replaced", true)
 	sw := NewSyncWorker(uc)
 	defer sw.Close()
+	persistForTest(t, uc, tor.Hash)
 	sw.Refresh()
 	stale, err := uc.GetTorrent(tor.Hash)
 	if err != nil {
@@ -26,6 +27,7 @@ func TestProgressSyncCannotRestoreReplacedPayloadBytes(t *testing.T) {
 	if err := os.WriteFile(path, bytes.Repeat([]byte("X"), 1024), 0600); err != nil {
 		t.Fatal(err)
 	}
+	persistForTest(t, uc, tor.Hash)
 	sw.Refresh()
 	if err := repo.SaveTorrent(stale); err != nil {
 		t.Fatal(err)

@@ -70,6 +70,9 @@ type Torrent struct {
 	ProgressObservedAt int64             `json:"progress_observed_at_ns,omitempty"`
 	LegacyDownloaded   int64             `json:"legacy_downloaded,omitempty"`
 	MetadataKnown      bool              `json:"metadata_known"`
+	CatalogVersion     string            `json:"catalog_version,omitempty"`
+	SnapshotFreshness  string            `json:"snapshot_freshness,omitempty"`
+	MetadataFormat     string            `json:"metadata_format,omitempty"`
 	QueuePosition      int64             `json:"-"`
 	SelectionComplete  bool              `json:"selection_complete"`
 	Recheck            *RecheckOperation `json:"recheck,omitempty"`
@@ -122,7 +125,6 @@ type BTHealth struct {
 	ListenPort                 int               `json:"listen_port"`
 	ClientProfile              string            `json:"client_profile"`
 	DownloadProfile            string            `json:"download_profile"`
-	BenchmarkMode              bool              `json:"benchmark_mode"`
 	EstablishedConnsPerTorrent int               `json:"established_conns_per_torrent"`
 	HalfOpenConnsPerTorrent    int               `json:"half_open_conns_per_torrent"`
 	TotalHalfOpenConns         int               `json:"total_half_open_conns"`
@@ -142,6 +144,8 @@ type BTHealth struct {
 	PieceCompletionBackend     string            `json:"piece_completion_backend"`
 	PieceCompletionPersistent  bool              `json:"piece_completion_persistent"`
 	PieceCompletionError       string            `json:"piece_completion_error,omitempty"`
+	PieceCompletionDropped     uint64            `json:"piece_completion_dropped"`
+	PieceCompletionPending     int               `json:"piece_completion_pending"`
 	PeerDropRatio              float64           `json:"peer_drop_ratio"`
 	SeedDropRatio              float64           `json:"seed_drop_ratio"`
 	SpeedDropRatio             float64           `json:"speed_drop_ratio"`

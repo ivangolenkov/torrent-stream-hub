@@ -8,66 +8,72 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"torrent-stream-hub/internal/metafetch"
 )
 
 type Config struct {
-	MaxTemporaryTorrents               int
-	temporaryConfigError               error
-	Port                               string
-	TorrentPort                        int
-	DownloadDir                        string
-	DBPath                             string
-	MaxActiveStreams                   int
-	MaxActiveDownloads                 int
-	MinFreeSpaceGB                     int
-	DownloadLimit                      int
-	UploadLimit                        int
-	StreamCacheSize                    int64
-	LogLevel                           string
-	LogDir                             string
-	LogRetentionDays                   int
-	LogMaxFileBytes                    int64
-	LogMaxTotalBytes                   int64
-	logConfigError                     error
-	BTSeed                             bool
-	BTSeedConfigured                   bool
-	BTNoUpload                         bool
-	BTClientProfile                    string
-	BTDownloadProfile                  string
-	BTBenchmarkMode                    bool
-	BTPublicIPDiscoveryEnabled         bool
-	BTPublicIPv4                       string
-	BTPublicIPv6                       string
-	BTPublicIPv4Status                 string
-	BTPublicIPv6Status                 string
-	BTRetrackersMode                   string
-	BTRetrackersFile                   string
-	BTDisableDHT                       bool
-	BTDisablePEX                       bool
-	BTDisableUPNP                      bool
-	BTDisableTCP                       bool
-	BTDisableUTP                       bool
-	BTDisableIPv6                      bool
-	BTEstablishedConns                 int
-	BTHalfOpenConns                    int
-	BTTotalHalfOpen                    int
-	BTPeersLowWater                    int
-	BTPeersHighWater                   int
-	BTDialRateLimit                    int
-	BTSwarmWatchdogEnabled             bool
-	BTSwarmWatchdogConfigured          bool
-	BTSwarmCheckIntervalSec            int
-	BTSwarmRefreshCooldownSec          int
-	BTSwarmMinConnectedPeers           int
-	BTSwarmMinConnectedSeeds           int
-	BTSwarmStalledSpeedBps             int
-	BTSwarmStalledDurationSec          int
-	BTSwarmBoostConns                  int
-	BTSwarmBoostDurationSec            int
-	BTSwarmPeerDropRatio               float64
-	BTSwarmSeedDropRatio               float64
-	BTSwarmSpeedDropRatio              float64
-	BTSwarmPeakTTLSec                  int
+	DeprecatedOptions          []string
+	MetainfoTempDir            string
+	MetainfoAllowlist          string
+	MaxTemporaryTorrents       int
+	temporaryConfigError       error
+	Port                       string
+	TorrentPort                int
+	DownloadDir                string
+	DBPath                     string
+	MaxActiveStreams           int
+	MaxStreamsConfigured       bool
+	MaxActiveDownloads         int
+	MinFreeSpaceGB             int
+	DownloadLimit              int
+	UploadLimit                int
+	StreamCacheSize            int64
+	LogLevel                   string
+	LogDir                     string
+	LogRetentionDays           int
+	LogMaxFileBytes            int64
+	LogMaxTotalBytes           int64
+	logConfigError             error
+	BTSeed                     bool
+	BTSeedConfigured           bool
+	BTNoUpload                 bool
+	BTClientProfile            string
+	BTDownloadProfile          string
+	BTBenchmarkMode            bool
+	BTPublicIPDiscoveryEnabled bool
+	BTPublicIPv4               string
+	BTPublicIPv6               string
+	BTPublicIPv4Status         string
+	BTPublicIPv6Status         string
+	BTRetrackersMode           string
+	BTRetrackersFile           string
+	BTDisableDHT               bool
+	BTDisablePEX               bool
+	BTDisableUPNP              bool
+	BTDisableTCP               bool
+	BTDisableUTP               bool
+	BTDisableIPv6              bool
+	BTEstablishedConns         int
+	BTHalfOpenConns            int
+	BTTotalHalfOpen            int
+	BTPeersLowWater            int
+	BTPeersHighWater           int
+	BTDialRateLimit            int
+	BTSwarmWatchdogEnabled     bool
+	BTSwarmWatchdogConfigured  bool
+	BTSwarmCheckIntervalSec    int
+	BTSwarmRefreshCooldownSec  int
+	BTSwarmMinConnectedPeers   int
+	BTSwarmMinConnectedSeeds   int
+	BTSwarmStalledSpeedBps     int
+	BTSwarmStalledDurationSec  int
+	BTSwarmBoostConns          int
+	BTSwarmBoostDurationSec    int
+	BTSwarmPeerDropRatio       float64
+	BTSwarmSeedDropRatio       float64
+	BTSwarmSpeedDropRatio      float64
+	BTSwarmPeakTTLSec          int
+	// Deprecated compatibility fields below have no runtime effect.
 	BTSwarmHardRefreshEnabled          bool
 	BTSwarmHardRefreshConfigured       bool
 	BTSwarmAutoHardRefreshEnabled      bool
@@ -101,6 +107,8 @@ func Load() *Config {
 	flag.StringVar(&logMaxTotal, "log-max-total-bytes", getEnv("HUB_LOG_MAX_TOTAL_BYTES", "134217728"), "Maximum managed log bytes")
 	flag.StringVar(&logRetention, "log-retention-days", getEnv("HUB_LOG_RETENTION_DAYS", "3"), "Previous calendar days of logs to retain (0 = today only)")
 	flag.StringVar(&maxTemporary, "max-temporary-torrents", getEnv("HUB_MAX_TEMPORARY_TORRENTS", "3"), "Maximum temporary torrents (positive integer)")
+	flag.StringVar(&cfg.MetainfoTempDir, "metainfo-temp-dir", getEnv("HUB_METAINFO_TEMP_DIR", ""), "Managed metainfo upload directory")
+	flag.StringVar(&cfg.MetainfoAllowlist, "metainfo-allowlist", getEnv("HUB_METAINFO_ALLOWLIST", ""), "Allowed LAN metainfo sources (comma-separated host:port or CIDR)")
 	flag.IntVar(&cfg.MaxActiveStreams, "max-streams", getEnvAsInt("HUB_MAX_ACTIVE_STREAMS", 4), "Maximum number of active streams")
 	flag.IntVar(&cfg.MaxActiveDownloads, "max-downloads", getEnvAsInt("HUB_MAX_ACTIVE_DOWNLOADS", 5), "Maximum number of active background downloads")
 	flag.IntVar(&cfg.MinFreeSpaceGB, "min-free-space", getEnvAsInt("HUB_MIN_FREE_SPACE_GB", 5), "Minimum free space in GB to allow downloading")
@@ -111,7 +119,7 @@ func Load() *Config {
 	flag.BoolVar(&cfg.BTNoUpload, "bt-no-upload", getEnvAsBool("HUB_BT_NO_UPLOAD", false), "Disable BitTorrent uploads")
 	flag.StringVar(&cfg.BTClientProfile, "bt-client-profile", getEnv("HUB_BT_CLIENT_PROFILE", "qbittorrent"), "BitTorrent client profile: qbittorrent or default")
 	flag.StringVar(&cfg.BTDownloadProfile, "bt-download-profile", getEnv("HUB_BT_DOWNLOAD_PROFILE", "balanced"), "BitTorrent download profile: torrserver, balanced, aggressive")
-	flag.BoolVar(&cfg.BTBenchmarkMode, "bt-benchmark-mode", getEnvAsBool("HUB_BT_BENCHMARK_MODE", false), "Suppress automatic recovery mutations for download benchmarking")
+	flag.BoolVar(&cfg.BTBenchmarkMode, "bt-benchmark-mode", getEnvAsBool("HUB_BT_BENCHMARK_MODE", false), "Deprecated: accepted for compatibility; has no effect")
 	flag.BoolVar(&cfg.BTPublicIPDiscoveryEnabled, "bt-public-ip-discovery-enabled", getEnvAsBool("HUB_BT_PUBLIC_IP_DISCOVERY_ENABLED", false), "Enable best-effort public IP discovery for BitTorrent announces")
 	flag.StringVar(&cfg.BTPublicIPv4, "bt-public-ipv4", getEnv("HUB_BT_PUBLIC_IPV4", ""), "Public IPv4 to advertise to BitTorrent peers")
 	flag.StringVar(&cfg.BTPublicIPv6, "bt-public-ipv6", getEnv("HUB_BT_PUBLIC_IPV6", ""), "Public IPv6 to advertise to BitTorrent peers")
@@ -142,22 +150,23 @@ func Load() *Config {
 	flag.Float64Var(&cfg.BTSwarmSeedDropRatio, "bt-swarm-seed-drop-ratio", getEnvAsFloat("HUB_BT_SWARM_SEED_DROP_RATIO", 0.45), "Connected seed ratio below recent peak that marks an incomplete torrent degraded")
 	flag.Float64Var(&cfg.BTSwarmSpeedDropRatio, "bt-swarm-speed-drop-ratio", getEnvAsFloat("HUB_BT_SWARM_SPEED_DROP_RATIO", 0.35), "Download speed ratio below recent peak that marks an incomplete torrent degraded")
 	flag.IntVar(&cfg.BTSwarmPeakTTLSec, "bt-swarm-peak-ttl", getEnvAsInt("HUB_BT_SWARM_PEAK_TTL_SEC", 1800), "Seconds to keep swarm peak metrics for trend detection")
-	flag.BoolVar(&cfg.BTSwarmHardRefreshEnabled, "bt-swarm-hard-refresh-enabled", getEnvAsBool("HUB_BT_SWARM_HARD_REFRESH_ENABLED", true), "Enable per-torrent runtime drop and re-add after repeated soft refresh failures")
-	flag.BoolVar(&cfg.BTSwarmAutoHardRefreshEnabled, "bt-swarm-auto-hard-refresh-enabled", getEnvAsBool("HUB_BT_SWARM_AUTO_HARD_REFRESH_ENABLED", false), "Enable automatic per-torrent runtime drop and re-add; disabled by default")
-	flag.IntVar(&cfg.BTSwarmHardRefreshCooldownSec, "bt-swarm-hard-refresh-cooldown", getEnvAsInt("HUB_BT_SWARM_HARD_REFRESH_COOLDOWN_SEC", 900), "Minimum seconds between hard refresh attempts per torrent")
-	flag.IntVar(&cfg.BTSwarmHardRefreshAfterSoftFails, "bt-swarm-hard-refresh-after-soft-fails", getEnvAsInt("HUB_BT_SWARM_HARD_REFRESH_AFTER_SOFT_FAILS", 1), "Soft refresh attempts before hard refresh is allowed")
-	flag.IntVar(&cfg.BTSwarmHardRefreshMinTorrentAgeSec, "bt-swarm-hard-refresh-min-torrent-age", getEnvAsInt("HUB_BT_SWARM_HARD_REFRESH_MIN_TORRENT_AGE_SEC", 60), "Minimum torrent runtime age before hard refresh is allowed")
-	flag.IntVar(&cfg.BTSwarmDegradationEpisodeTTLSec, "bt-swarm-degradation-episode-ttl", getEnvAsInt("HUB_BT_SWARM_DEGRADATION_EPISODE_TTL_SEC", 900), "Seconds to keep a degradation episode active")
-	flag.IntVar(&cfg.BTSwarmRecoveryGraceSec, "bt-swarm-recovery-grace", getEnvAsInt("HUB_BT_SWARM_RECOVERY_GRACE_SEC", 180), "Seconds of stable health before resetting degradation escalation")
-	flag.BoolVar(&cfg.BTClientRecycleEnabled, "bt-client-recycle-enabled", getEnvAsBool("HUB_BT_CLIENT_RECYCLE_ENABLED", true), "Enable in-process BitTorrent client recycle fallback")
-	flag.IntVar(&cfg.BTClientRecycleCooldownSec, "bt-client-recycle-cooldown", getEnvAsInt("HUB_BT_CLIENT_RECYCLE_COOLDOWN_SEC", 900), "Minimum seconds between BitTorrent client recycle attempts")
-	flag.IntVar(&cfg.BTClientRecycleAfterHardFails, "bt-client-recycle-after-hard-fails", getEnvAsInt("HUB_BT_CLIENT_RECYCLE_AFTER_HARD_FAILS", 1), "Hard refresh attempts within an episode before client recycle is allowed")
-	flag.IntVar(&cfg.BTClientRecycleAfterSoftFails, "bt-client-recycle-after-soft-fails", getEnvAsInt("HUB_BT_CLIENT_RECYCLE_AFTER_SOFT_FAILS", 1), "Soft refresh attempts within an episode before automatic client recycle is allowed")
-	flag.IntVar(&cfg.BTClientRecycleMinTorrentAgeSec, "bt-client-recycle-min-torrent-age", getEnvAsInt("HUB_BT_CLIENT_RECYCLE_MIN_TORRENT_AGE_SEC", 60), "Minimum torrent runtime age before automatic client recycle is allowed")
-	flag.IntVar(&cfg.BTClientRecycleMinTorrents, "bt-client-recycle-min-torrents", getEnvAsInt("HUB_BT_CLIENT_RECYCLE_MIN_TORRENTS", 1), "Minimum managed torrents before client recycle is allowed")
-	flag.IntVar(&cfg.BTClientRecycleMaxPerHour, "bt-client-recycle-max-per-hour", getEnvAsInt("HUB_BT_CLIENT_RECYCLE_MAX_PER_HOUR", 2), "Maximum BitTorrent client recycle attempts per hour")
+	flag.BoolVar(&cfg.BTSwarmHardRefreshEnabled, "bt-swarm-hard-refresh-enabled", getEnvAsBool("HUB_BT_SWARM_HARD_REFRESH_ENABLED", false), "Deprecated: accepted for compatibility; has no effect")
+	flag.BoolVar(&cfg.BTSwarmAutoHardRefreshEnabled, "bt-swarm-auto-hard-refresh-enabled", getEnvAsBool("HUB_BT_SWARM_AUTO_HARD_REFRESH_ENABLED", false), "Deprecated: accepted for compatibility; has no effect")
+	flag.IntVar(&cfg.BTSwarmHardRefreshCooldownSec, "bt-swarm-hard-refresh-cooldown", getEnvAsInt("HUB_BT_SWARM_HARD_REFRESH_COOLDOWN_SEC", 0), "Deprecated: accepted for compatibility; has no effect")
+	flag.IntVar(&cfg.BTSwarmHardRefreshAfterSoftFails, "bt-swarm-hard-refresh-after-soft-fails", getEnvAsInt("HUB_BT_SWARM_HARD_REFRESH_AFTER_SOFT_FAILS", 0), "Deprecated: accepted for compatibility; has no effect")
+	flag.IntVar(&cfg.BTSwarmHardRefreshMinTorrentAgeSec, "bt-swarm-hard-refresh-min-torrent-age", getEnvAsInt("HUB_BT_SWARM_HARD_REFRESH_MIN_TORRENT_AGE_SEC", 0), "Deprecated: accepted for compatibility; has no effect")
+	flag.IntVar(&cfg.BTSwarmDegradationEpisodeTTLSec, "bt-swarm-degradation-episode-ttl", getEnvAsInt("HUB_BT_SWARM_DEGRADATION_EPISODE_TTL_SEC", 0), "Deprecated: accepted for compatibility; has no effect")
+	flag.IntVar(&cfg.BTSwarmRecoveryGraceSec, "bt-swarm-recovery-grace", getEnvAsInt("HUB_BT_SWARM_RECOVERY_GRACE_SEC", 0), "Deprecated: accepted for compatibility; has no effect")
+	flag.BoolVar(&cfg.BTClientRecycleEnabled, "bt-client-recycle-enabled", getEnvAsBool("HUB_BT_CLIENT_RECYCLE_ENABLED", false), "Deprecated: accepted for compatibility; has no effect")
+	flag.IntVar(&cfg.BTClientRecycleCooldownSec, "bt-client-recycle-cooldown", getEnvAsInt("HUB_BT_CLIENT_RECYCLE_COOLDOWN_SEC", 0), "Deprecated: accepted for compatibility; has no effect")
+	flag.IntVar(&cfg.BTClientRecycleAfterHardFails, "bt-client-recycle-after-hard-fails", getEnvAsInt("HUB_BT_CLIENT_RECYCLE_AFTER_HARD_FAILS", 0), "Deprecated: accepted for compatibility; has no effect")
+	flag.IntVar(&cfg.BTClientRecycleAfterSoftFails, "bt-client-recycle-after-soft-fails", getEnvAsInt("HUB_BT_CLIENT_RECYCLE_AFTER_SOFT_FAILS", 0), "Deprecated: accepted for compatibility; has no effect")
+	flag.IntVar(&cfg.BTClientRecycleMinTorrentAgeSec, "bt-client-recycle-min-torrent-age", getEnvAsInt("HUB_BT_CLIENT_RECYCLE_MIN_TORRENT_AGE_SEC", 0), "Deprecated: accepted for compatibility; has no effect")
+	flag.IntVar(&cfg.BTClientRecycleMinTorrents, "bt-client-recycle-min-torrents", getEnvAsInt("HUB_BT_CLIENT_RECYCLE_MIN_TORRENTS", 0), "Deprecated: accepted for compatibility; has no effect")
+	flag.IntVar(&cfg.BTClientRecycleMaxPerHour, "bt-client-recycle-max-per-hour", getEnvAsInt("HUB_BT_CLIENT_RECYCLE_MAX_PER_HOUR", 0), "Deprecated: accepted for compatibility; has no effect")
 
 	flag.Parse()
+	cfg.DeprecatedOptions = deprecatedOptions(flag.CommandLine, os.LookupEnv)
 	cfg.MaxTemporaryTorrents, cfg.temporaryConfigError = strconv.Atoi(maxTemporary)
 	var retentionErr error
 	cfg.LogRetentionDays, retentionErr = strconv.Atoi(logRetention)
@@ -172,6 +181,7 @@ func Load() *Config {
 	}
 	cfg.BTSeedConfigured = true
 	cfg.BTSwarmWatchdogConfigured = true
+	cfg.MaxStreamsConfigured = true
 	cfg.BTSwarmHardRefreshConfigured = true
 	cfg.BTClientRecycleConfigured = true
 	cfg.LogLevel = getEnv("HUB_LOG_LEVEL", "info")
@@ -183,6 +193,12 @@ func Load() *Config {
 func ApplyDefaults(cfg *Config) {
 	if cfg == nil {
 		return
+	}
+	if cfg.MaxActiveStreams == 0 && !cfg.MaxStreamsConfigured {
+		cfg.MaxActiveStreams = 4
+	}
+	if cfg.MetainfoTempDir == "" {
+		cfg.MetainfoTempDir = filepath.Join(filepath.Dir(cfg.DBPath), "http-tmp")
 	}
 	if cfg.LogMaxFileBytes == 0 {
 		cfg.LogMaxFileBytes = 16 << 20
@@ -267,48 +283,7 @@ func ApplyDefaults(cfg *Config) {
 	if cfg.BTSwarmPeakTTLSec <= 0 {
 		cfg.BTSwarmPeakTTLSec = 1800
 	}
-	if !cfg.BTSwarmHardRefreshConfigured {
-		cfg.BTSwarmHardRefreshEnabled = true
-	}
-	if cfg.BTSwarmHardRefreshCooldownSec <= 0 {
-		cfg.BTSwarmHardRefreshCooldownSec = 900
-	}
-	if cfg.BTSwarmHardRefreshCooldownSec < cfg.BTSwarmRefreshCooldownSec {
-		cfg.BTSwarmHardRefreshCooldownSec = cfg.BTSwarmRefreshCooldownSec
-	}
-	if cfg.BTSwarmHardRefreshAfterSoftFails <= 0 {
-		cfg.BTSwarmHardRefreshAfterSoftFails = 1
-	}
-	if cfg.BTSwarmHardRefreshMinTorrentAgeSec <= 0 {
-		cfg.BTSwarmHardRefreshMinTorrentAgeSec = 60
-	}
-	if cfg.BTSwarmDegradationEpisodeTTLSec <= 0 {
-		cfg.BTSwarmDegradationEpisodeTTLSec = 900
-	}
-	if cfg.BTSwarmRecoveryGraceSec <= 0 {
-		cfg.BTSwarmRecoveryGraceSec = 180
-	}
-	if !cfg.BTClientRecycleConfigured {
-		cfg.BTClientRecycleEnabled = true
-	}
-	if cfg.BTClientRecycleCooldownSec <= 0 {
-		cfg.BTClientRecycleCooldownSec = 900
-	}
-	if cfg.BTClientRecycleAfterHardFails <= 0 {
-		cfg.BTClientRecycleAfterHardFails = 1
-	}
-	if cfg.BTClientRecycleAfterSoftFails <= 0 {
-		cfg.BTClientRecycleAfterSoftFails = 1
-	}
-	if cfg.BTClientRecycleMinTorrentAgeSec <= 0 {
-		cfg.BTClientRecycleMinTorrentAgeSec = 60
-	}
-	if cfg.BTClientRecycleMinTorrents <= 0 {
-		cfg.BTClientRecycleMinTorrents = 1
-	}
-	if cfg.BTClientRecycleMaxPerHour <= 0 {
-		cfg.BTClientRecycleMaxPerHour = 2
-	}
+
 }
 
 func (cfg *Config) ValidateLogging() error {
@@ -453,4 +428,14 @@ func getEnvAsBool(key string, fallback bool) bool {
 		}
 	}
 	return fallback
+}
+
+func (cfg *Config) ValidateResources() error {
+	if cfg.MaxActiveStreams <= 0 {
+		return fmt.Errorf("max-streams must be positive")
+	}
+	if _, err := metafetch.New(cfg.MetainfoAllowlist); err != nil {
+		return err
+	}
+	return nil
 }

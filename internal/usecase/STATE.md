@@ -114,12 +114,13 @@ context. A syscall already running need not be interruptible.
 ## Read models and publication order
 
 REST single/list, SSE and TorrServer share the validated projection. Each attempt
-reads a consistent SQLite snapshot, captures runtime pointer/policy/binding stamp
-and owned DTOs, rereads SQLite and validates runtime. At most two attempts;
+reads a durable global/per-record version, materializes one SQLite snapshot,
+captures runtime pointer/policy/binding stamp and owned DTOs, then rechecks the
+compact durable version and runtime stamp. At most two attempts;
 continued churn returns `ErrSnapshotConflict`, never guessed/empty success. REST
-list/files return 409; SSE retains its last publication. Comparing complete durable
-DTOs is conservative and costs another read; telemetry (speed/peers/bytes/activity)
-is sampled, not a distributed transaction or readiness authority.
+list/files return 409; SSE retains its last publication. There is no second full materialization/DeepEqual. Relevant intent, identity,
+catalog, storage and safety changes advance durable versions; telemetry updates
+do not. Speed/peers/bytes/activity are sampled, not readiness authority.
 
 DB metadata/base priorities win over runtime. Engine-only records are omitted;
 different record IDs/invalid applied revisions fall back to detached durable
@@ -141,3 +142,33 @@ switch the browser back. Record identity changes clear selection/pin/file caches
 late command acknowledgments cannot mutate a different current record. Legacy
 timestamp barriers work only before version negotiation. Closed EventSource
 callbacks cannot publish, and async file/piece/list requests retain request guards.
+
+## Phase 40 command and publication boundaries
+
+`runIntentCommand` / `applyCommittedIntent` own commit/apply/bind failure handling.
+Duplicate Add commits metadata/permanence together, with one revision. A semantic
+no-op does not advance it and cannot acknowledge an earlier failed apply. Full
+explicit reconciliation remains necessary after a failed incremental command.
+
+Catalog format and SHA-256 version come from validated immutable layout. V2 offsets
+include alignment gaps independently of payload size. Unknown legacy metadata stays
+unknown. Unchanged catalogs skip the writer reservation; observations update only
+changed file bytes, while sequence/provenance still advance transactionally.
+
+SyncWorker publishes independently of record locks and observation commits. Cached
+runtime telemetry is marked `snapshot_freshness: sampled`; current durable intent
+and identity always win. Two persistence workers consume at most 128 coalesced hash
+jobs, each with record/runtime fencing and a two-second application context. Busy
+record keys are retried on the next sample; old work cannot attach to a replacement.
+SQLite writer waits use 50 ms busy intervals and cancellation on a dedicated
+connection, restoring the normal 5000 ms timeout before returning it to the pool.
+
+REST/SSE `?view=compact` omits catalogs and opaque data. Full responses remain the
+default. Full/compact publications retain at most 16 MiB/2 MiB; oversized publication
+is rejected and logged, keeping the previous snapshot. At most 128 subscribers each
+retain one shared immutable latest buffer. GUI fetches files only for the selected
+record and validates `X-Hub-Details` against record/catalog/desired revision.
+Confirmed priority overrides end at the first newer authoritative snapshot, even
+if another client has changed the priority again. Receipt generations fence older
+in-flight details responses as well as lists. Neither details nor snapshots grant
+payload readiness.

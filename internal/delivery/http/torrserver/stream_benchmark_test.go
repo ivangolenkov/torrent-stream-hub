@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-	"time"
 
 	"torrent-stream-hub/internal/config"
 	"torrent-stream-hub/internal/engine"
@@ -17,7 +16,7 @@ import (
 	"github.com/anacrolix/torrent/metainfo"
 )
 
-func setupBenchmarkEngine(b *testing.B, totalSize int64, pieceLength int64) (*usecase.TorrentUseCase, string, []byte, func()) {
+func setupBenchmarkEngine(b *testing.B, totalSize int64, pieceLength int64) (*usecase.TorrentUseCase, *engine.Engine, string, []byte, func()) {
 	b.Helper()
 	dir := b.TempDir()
 	db, err := repository.NewSQLiteDB(filepath.Join(dir, "bench.db"))
@@ -69,35 +68,19 @@ func setupBenchmarkEngine(b *testing.B, totalSize int64, pieceLength int64) (*us
 		b.Fatalf("failed to write file: %v", err)
 	}
 
-	tf, err := uc.GetTorrentFile(hash, 0)
-	if err != nil {
-		eng.Close()
-		db.Close()
-		b.Fatalf("failed to get torrent file: %v", err)
-	}
-	tRaw := tf.Torrent()
-	for i := 0; i < tRaw.NumPieces(); i++ {
-		_ = tRaw.Piece(i).VerifyData()
-	}
-	deadline := time.Now().Add(5 * time.Second)
-	for i := 0; i < tRaw.NumPieces(); i++ {
-		p := tRaw.Piece(i)
-		for p.State().Marking && time.Now().Before(deadline) {
-			time.Sleep(5 * time.Millisecond)
-		}
-	}
+	verifyHTTPFixture(b, uc, hash)
 
 	cleanup := func() {
 		eng.Close()
 		db.Close()
 	}
 
-	return uc, hash, fileData, cleanup
+	return uc, eng, hash, fileData, cleanup
 }
 
 func BenchmarkStream_DiskSource(b *testing.B) {
 	const totalSize = 4 << 20 // 4 MiB
-	uc, hash, _, cleanup := setupBenchmarkEngine(b, totalSize, 256<<10)
+	uc, _, hash, _, cleanup := setupBenchmarkEngine(b, totalSize, 256<<10)
 	defer cleanup()
 
 	ctx := context.Background()
@@ -139,10 +122,10 @@ func BenchmarkStream_DiskSource(b *testing.B) {
 
 func BenchmarkStream_TorrentSource(b *testing.B) {
 	const totalSize = 4 << 20 // 4 MiB
-	uc, hash, _, cleanup := setupBenchmarkEngine(b, totalSize, 256<<10)
+	_, eng, hash, _, cleanup := setupBenchmarkEngine(b, totalSize, 256<<10)
 	defer cleanup()
 
-	tf, err := uc.GetTorrentFile(hash, 0)
+	tf, err := eng.GetTorrentFile(hash, 0)
 	if err != nil {
 		b.Fatalf("GetTorrentFile failed: %v", err)
 	}

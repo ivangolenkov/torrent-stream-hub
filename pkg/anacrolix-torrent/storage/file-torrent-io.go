@@ -50,7 +50,7 @@ func (fst fileTorrentImplIO) readFileAt(file file, b []byte, off int64) (n int, 
 // Only returns EOF at the end of the torrent. Premature EOF is ErrUnexpectedEOF.
 func (fst fileTorrentImplIO) ReadAt(b []byte, off int64) (n int, err error) {
 	for i, e := range fst.fts.segmentLocater.LocateIter(
-		segments.Extent{off, int64(len(b))},
+		segments.Extent{Start: off, Length: int64(len(b))},
 	) {
 		n1, err1 := fst.readFileAt(fst.fts.file(i), b[:e.Length], e.Start)
 		n += n1
@@ -82,7 +82,7 @@ func (fst fileTorrentImplIO) WriteAt(p []byte, off int64) (n int, err error) {
 	}
 	defer fst.fts.lifecycle.RUnlock()
 	for i, e := range fst.fts.segmentLocater.LocateIter(
-		segments.Extent{off, int64(len(p))},
+		segments.Extent{Start: off, Length: int64(len(p))},
 	) {
 		var f fileWriter
 		f, err = fst.fts.openForWrite(fst.fts.file(i))
@@ -97,7 +97,7 @@ func (fst fileTorrentImplIO) WriteAt(p []byte, off int64) (n int, err error) {
 		n1, err = f.WriteAt(p[:e.Length], e.Start)
 		if statter, ok := f.(interface{ Stat() (os.FileInfo, error) }); ok {
 			after, _ := statter.Stat()
-			fst.fts.acceptWrite(before, after, off+int64(n), int64(n1))
+			fst.fts.acceptFileWrite(i, before, after, off+int64(n), int64(n1))
 		}
 		closeErr := f.Close()
 		n += n1

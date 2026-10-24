@@ -42,6 +42,7 @@ func TorrentSpecFromMagnetUri(uri string) (spec *TorrentSpec, err error) {
 		PeerAddrs:   m.Params["x.pe"], // BEP 9
 		// TODO: What's the parameter for DHT nodes?
 	}
+	spec.PrivateSafe = m.Params.Get("x.hub-private") == "1"
 	spec.InfoHash = m.InfoHash.UnwrapOrZeroValue()
 	spec.InfoHashV2 = m.V2InfoHash
 	return

@@ -397,6 +397,7 @@ func TestDownloadMultiFileTorrentStreamsZip(t *testing.T) {
 			t.Fatalf("entry %q expected %q, got %q", entry.Name, expected, actual)
 		}
 	}
+	assertSharedTransferBudget(t, uc, apiTestInfoHash)
 }
 
 func TestDownloadMultiFileTorrentRejectsRangeForZip(t *testing.T) {
@@ -554,11 +555,7 @@ func activateDownloadFixture(t *testing.T, uc *usecase.TorrentUseCase, repo *rep
 	if err := uc.RestoreTorrents(); err != nil {
 		t.Fatal(err)
 	}
-	f, err := uc.GetTorrentFile(hash, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := f.Torrent().VerifyData(); err != nil {
+	if _, err := uc.Recheck(hash); err != nil {
 		t.Fatal(err)
 	}
 	deadline := time.Now().Add(3 * time.Second)
@@ -590,6 +587,8 @@ func setupAPITestUseCase(t *testing.T) (*usecase.TorrentUseCase, *repository.Tor
 		t.Fatalf("failed to create test DB: %v", err)
 	}
 	eng, err := engine.New(&config.Config{
+		DBPath:       filepath.Join(dir, "hub.db"),
+		BTDisableDHT: true, BTDisablePEX: true, BTDisableUPNP: true, BTDisableUTP: true, BTRetrackersMode: "off",
 		DownloadDir:        dir,
 		TorrentPort:        0,
 		MaxActiveDownloads: 1,

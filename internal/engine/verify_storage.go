@@ -64,8 +64,8 @@ func VerifyStorage(ctx context.Context, dir, hash string, mi *metainfo.MetaInfo)
 	return t.VerifyDataContext(ctx)
 }
 
-func (e *Engine) RunStorageTask(fn func(context.Context)) {
-	e.startBackground(fn)
+func (e *Engine) RunStorageTask(fn func(context.Context)) bool {
+	return e.StartTask(fn)
 }
 
 func (e *Engine) CheckMigrationSpace(path string, bytes uint64) error {

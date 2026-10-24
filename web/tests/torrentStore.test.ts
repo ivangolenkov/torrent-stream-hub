@@ -55,6 +55,22 @@ it('does not apply an older REST response after SSE or stale priorities after co
 const epochA = 'aaaaaaaaaaaaaaaa', epochB = 'bbbbbbbbbbbbbbbb';
 const snapshot = (items: Torrent[], version: string) => Object.assign(items, { snapshotVersion: version });
 
+it('loads compact details only for the selected torrent and refreshes on revision changes', async () => {
+  const store = useTorrentStore(); store.initSSE();
+  const receive = vi.mocked(setupSSE).mock.calls[0][0];
+  const compact = (revision: string): Torrent => ({ ...fixture(), files: undefined, catalog_version: 'catalog', control: { record_id: 'record', desired_run: 'paused', desired_revision: revision, applied_revision: revision, reconcile_pending: false, activation_blocks: [] } });
+  receive([compact('1')], `${epochA}/1`);
+  expect(apiClient.getFiles).not.toHaveBeenCalled();
+  vi.mocked(apiClient.getFiles).mockResolvedValueOnce(fixture().files!);
+  await store.selectTorrent('one');
+  receive([compact('1')], `${epochA}/2`); await flushPromises();
+  expect(apiClient.getFiles).toHaveBeenCalledTimes(1);
+  vi.mocked(apiClient.getFiles).mockResolvedValueOnce(fixture(1).files!);
+  receive([compact('2')], `${epochA}/3`); await flushPromises();
+  expect(apiClient.getFiles).toHaveBeenCalledTimes(2);
+  expect(store.files.one[0].priority).toBe(1);
+});
+
 it('does not resurrect a deleted hash from an old list or erase re-add with an old empty list', async () => {
   const store = useTorrentStore(); store.initSSE();
   const receive = vi.mocked(setupSSE).mock.calls[0][0];
@@ -114,4 +130,42 @@ it('ignores a late command acknowledgment after delete/re-add within the same ep
   finish({ commandAtNS: 2, snapshotVersion: `${epochA}/4` }); await command;
   expect(store.torrents[0].control?.record_id).toBe('new');
   expect(store.torrents[0].files![0].priority).toBe(1);
+});
+
+it('accepts another client priority after our receipt even when the intermediate snapshot was missed', async () => {
+  const store = useTorrentStore(); store.initSSE();
+  const receive = vi.mocked(setupSSE).mock.calls[0][0];
+  receive([fixture()], `${epochA}/1`);
+  vi.mocked(apiClient.setFilePriority).mockResolvedValueOnce({ commandAtNS: 100, snapshotVersion: `${epochA}/3` });
+  await store.setFilePriority('one', 0, -1);
+  receive([fixture(0)], `${epochA}/2`);
+  expect(store.torrents[0].files![0].priority).toBe(-1);
+  receive([fixture(1)], `${epochA}/5`);
+  expect(store.torrents[0].files![0].priority).toBe(1);
+  receive([fixture(-1)], `${epochA}/4`);
+  expect(store.torrents[0].files![0].priority).toBe(1);
+});
+
+it('accepts newer legacy state without waiting for a matching local priority', async () => {
+  const store = useTorrentStore(); store.torrents = [fixture()]; store.initSSE();
+  vi.mocked(apiClient.setFilePriority).mockResolvedValueOnce(100);
+  await store.setFilePriority('one', 0, -1);
+  vi.mocked(setupSSE).mock.calls[0][0]([{ ...fixture(1), snapshot_at_ns: 110 }]);
+  expect(store.torrents[0].files![0].priority).toBe(1);
+});
+
+it('fences an in-flight details response across a priority receipt', async () => {
+  const store = useTorrentStore(); store.initSSE();
+  const receive = vi.mocked(setupSSE).mock.calls[0][0];
+  receive([{ ...fixture(), files: undefined }], `${epochA}/1`);
+  let resolve!: (files: NonNullable<Torrent['files']>) => void;
+  vi.mocked(apiClient.getFiles).mockReturnValueOnce(new Promise(r => { resolve = r; }));
+  const load = store.selectTorrent('one');
+  vi.mocked(apiClient.setFilePriority).mockResolvedValueOnce({ commandAtNS: 100, snapshotVersion: `${epochA}/3` });
+  await store.setFilePriority('one', 0, -1);
+  resolve(fixture().files!); await load;
+  expect(store.files.one).toBeUndefined();
+  vi.mocked(apiClient.getFiles).mockResolvedValueOnce(fixture(1).files!);
+  receive([{ ...fixture(), files: undefined }], `${epochA}/5`); await flushPromises();
+  expect(store.files.one[0].priority).toBe(1);
 });

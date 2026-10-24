@@ -268,8 +268,8 @@ Known persisted file selections can be changed while metadata is pending; an
 unknown index or bulk operation without a file list is not silently accepted.
 Successful commands also return `command_at_ns`; views carry `snapshot_at_ns`.
 The GUI ignores delayed pre-command views instead of undoing a confirmed action.
-These ordering diagnostics assume a stable server wall clock and are not access
-control/readiness tokens; they do not use the browser clock.
+Legacy timestamp ordering assumes a stable server wall clock. Current clients use
+`X-Hub-Snapshot` sequences instead; neither mechanism is a readiness or access token.
 
 Background queue order uses the existing persisted FIFO sequence. Resume and
 duplicate add do not move it; deletion/re-add creates a new position. Skip All or
@@ -299,8 +299,100 @@ are specific to SSE and do not impose a short video WriteTimeout.
 
 The emulated cache window uses `HUB_STREAM_CACHE_SIZE` for both partial and fully
 verified files. Zero disables the reported window; negative values normalize to
-zero. Full-file readiness remains independent of that fake limit. These changes
-do not implement general upload/body/SSRF protections (audit F11/F12).
+zero. Full-file readiness remains independent of that fake limit. HTTP input and remote-metainfo budgets are described below.
+
+## Storage Publication And SQLite Completion (Phase 40)
+
+The production completion cache uses the existing SQLite WAL database. Migrations
+0011–0013 add explicit v1/v2/hybrid catalog layout, disposable completion hints and
+read-model versions. V2 aligned offsets are stored independently of payload size;
+unknown legacy layout is not guessed. Old Bolt completion files are neither opened
+nor deleted; retain them with backups if an offline rollback is needed. Hints never
+replace verification after reopen. The cache retains 4096 entries, up to 1024 queued
+writes and one detached batch of at most 1024. Overload drops hints, counted in
+`piece_completion_dropped`; persistence errors appear in engine diagnostics.
+
+Completed `.part` files are flushed and published with one native atomic
+**no-replace** rename within the same directory: Linux `renameat2`, macOS
+`renameatx_np`, Windows handle-relative rename. Filesystems must implement that
+primitive; unsupported filesystems fail the operation without falling back to
+Link+Remove or overwriting an existing name. Linux/macOS sync the parent directory;
+Windows has no portable directory fsync in this implementation. Atomic visibility
+is not a claim of survival of every hardware/power failure.
+
+A legacy interrupted Link+Remove may leave `.part` and final names for one inode.
+Both are preserved and rejected as ambiguous hardlinks. Stop the service, back up
+both names and metadata, and establish ownership of **all** links before manually
+removing a redundant name or restoring a consistent backup. The service cannot
+prove ownership of an arbitrary old hardlink and never automatically unlinks it.
+Restart and verify the payload after recovery. No new publication creates that
+intermediate state. Downgrade still requires restoring the entire offline backup.
+
+## HTTP Resource Limits And Remote Metainfo
+
+| Resource | Limit / behavior |
+| --- | --- |
+| JSON/form/control body, including `/cache` | 1 MiB, 30 seconds, at most 32 simultaneous requests retaining a parsed body |
+| Multipart `.torrent` upload | One file up to 32 MiB, 34 MiB total envelope, 16 parts, 64 KiB total fields, 30 seconds |
+| Upload and remote-metainfo jobs | Two shared jobs per service; managed upload files total at most 64 MiB while running |
+| HTTP metainfo fetch | 32 MiB, five redirects, 60 seconds for the entire operation |
+| Video/file/archive responses | `HUB_MAX_ACTIVE_STREAMS` shared slots, default 4; reserve before preparation |
+
+Oversize returns **413**, body/fetch timeout **408**, occupied budget **429**,
+forbidden source **403**, cancellation/shutdown **503**, upload filesystem failure
+**507**. CORS `*` applies to errors too. Failed multipart parsing/cancellation removes
+its temporary file. A killed process can leave an orphan spool file: stop the
+service before removing only `metainfo-*.tmp` from its dedicated spool directory.
+No global video/SSE write timeout is imposed. HEAD holds a short deletion-safe
+lease but consumes no transfer slot and creates no playback debounce. A response
+releases its slot immediately; the separate ten-second seek debounce remains.
+
+Remote HTTP/HTTPS metainfo resolution (TorrServer `POST /torrents`) rejects
+loopback, private, link-local, unspecified, multicast and mapped private addresses
+by default. Every redirect and every DNS answer is checked. Connections dial a
+validated IP pinned for that operation; HTTPS still checks the original hostname
+and certificate. Environment HTTP proxies are intentionally ignored. Userinfo in
+URLs is rejected, sensitive headers are not forwarded, and hostname input is ASCII
+(use punycode for IDNs). A magnet redirect changes the result type and does not
+cause a network request to an arbitrary scheme.
+
+For an intended LAN source, configure a narrow allowlist, for example
+`HUB_METAINFO_ALLOWLIST=nas.lan:8081,192.168.50.10/32`. Host rules authorize the exact
+hostname/port; CIDR rules authorize that address range on any port. Each redirect
+must independently pass policy. An allowlist does not disable TLS validation or
+permit unspecified/multicast destinations.
+
+## Discovery And Supported Diagnostics
+
+Known private torrents keep their original trackers and never receive public
+retrackers, DHT or PEX. Before magnet metadata arrives, the private flag is unknown:
+only supplied trackers and ordinary DHT/PEX are available; extra retrackers wait
+for confirmed public metadata. Discovering private metadata cancels public DHT
+work and discards prior peer connections/reserve. It cannot undo an earlier public
+announce. For privacy from the first request, pass `"private_safe": true` in the
+native/TorrServer Add JSON, or `x.hub-private=1` in a magnet. This disables DHT/PEX
+and public retrackers from admission and is preserved on restart. Changing an
+existing public record to private-safe requires deletion/re-add, not duplicate Add.
+Explicit trackers in such an Add must themselves be suitable for the private swarm.
+With DHT disabled, an unknown magnet needs a supplied tracker/peer for metadata.
+For deferred public magnets, `replace` supplies additional retrackers after
+metadata while retaining the original bootstrap trackers; known public `.torrent`
+inputs apply replacement before admission.
+
+Upload burst is at least 64 KiB even with a low sustained B/s limit, allowing normal
+protocol blocks while rate reservations continue to enforce average speed. Swarm
+boost expires (default 300 seconds); repeating it extends the deadline, and expiry
+restores the previous connection limit. Diagnostics display the actual boost until
+the engine restores that limit.
+
+Hard refresh/client recycle operations are not supported. Legacy
+`HUB_BT_SWARM_HARD_REFRESH_*`, `HUB_BT_SWARM_AUTO_HARD_REFRESH_ENABLED`,
+`HUB_BT_CLIENT_RECYCLE_*`, `HUB_BT_SWARM_DEGRADATION_EPISODE_TTL_SEC`,
+`HUB_BT_SWARM_RECOVERY_GRACE_SEC`, `HUB_BT_BENCHMARK_MODE` and corresponding CLI flags
+remain parseable for phase-40 compatibility, but explicit use logs **deprecated,
+has no effect**. Remove them from deployments. Their parsers will only be removed
+in a separate versioned configuration change with migration notes. Use the
+supported Pause/Resume/Recheck/priority actions and diagnostic Reload.
 
 ## Ports
 
@@ -418,7 +510,9 @@ The service can be configured with command-line flags or environment variables. 
 | `HUB_TORRENT_PORT` | `50007` | BitTorrent listen port. |
 | `HUB_DOWNLOAD_DIR` | `/downloads` | Directory for downloaded torrent files. |
 | `HUB_DB_PATH` | `/config/hub.db` | SQLite database path. |
-| `HUB_MAX_ACTIVE_STREAMS` | `4` | Maximum active streams. |
+| `HUB_MAX_ACTIVE_STREAMS` | `4` | Shared HTTP payload response limit; positive integer, includes file/ZIP downloads, excludes HEAD. |
+| `HUB_METAINFO_TEMP_DIR` | `http-tmp` beside the database | Managed multipart spool directory (`--metainfo-temp-dir`). |
+| `HUB_METAINFO_ALLOWLIST` | empty | Explicit LAN HTTP metainfo destinations: comma-separated host:port or CIDR (`--metainfo-allowlist`). |
 | `HUB_MAX_ACTIVE_DOWNLOADS` | `5` | Maximum active background downloads. |
 | `HUB_MAX_TEMPORARY_TORRENTS` | `3` | Maximum temporary torrents (`--max-temporary-torrents`); positive integer, restart required. |
 | `HUB_MIN_FREE_SPACE_GB` | `5` | Minimum free disk space required for downloading. |
@@ -461,7 +555,7 @@ Keep the service on a trusted LAN or behind an authenticated proxy: there is no 
 
 Manual deletion and automatic cleanup use the same exact metadata-derived paths, including `.part`, and remove only empty parent directories. They never guess a second path or recursively delete a directory by torrent name. Active transfers and the ten-second debounce also block manual deletion (`409`). A pending deletion is paused and cannot be resumed, re-added or used for a new transfer; retry Delete after fixing the reported storage conflict, or explicitly remove only the record to retain the files. Automatic cleanup retries within its FIFO/limit policy; manual deletion is retried explicitly.
 
-File/ZIP downloads open inside the download root and reject symlinks, service storage, shared/aliased paths and unconfirmed layouts (`409`). Missing files return `404`; storage failures return generic `500` errors. Legacy records without matching metainfo must not be served or deleted by guessing from their name/size. Restore their original metainfo from backup before retrying. Keep a backup before manipulating legacy data. Filesystem operations are not a sandbox against a local administrator or external writer: hardlinks outside registered storage and same-size content changes are not cryptographically detected. Verified completion and isolated payload layout are planned separately.
+File/ZIP downloads open inside the download root and reject symlinks, service storage, shared/aliased paths and unconfirmed layouts (`409`). Missing files return `404`; storage failures return generic `500` errors. Legacy records without matching metainfo must not be served or deleted by guessing from their name/size. Restore their original metainfo from backup before retrying. Keep a backup before manipulating legacy data. Filesystem operations are not a sandbox against a local administrator or external writer: hardlinks outside registered storage and same-size content changes are not cryptographically detected. Current-open verification and isolated payload layout are described above.
 
 Removed nonfunctional authentication options are no longer supported: remove old authentication CLI flags (now rejected) and environment entries (no longer read) from deployment scripts. There is no built-in access control; management API and logs are accessible to anyone who can reach the service. Use a trusted network or protected reverse proxy.
 
@@ -527,7 +621,7 @@ Sensitive query parameters are masked before console/file output. Access logs om
 Requirements:
 
 - Go `1.25.8` or compatible.
-- Node.js `22` or compatible.
+- Node.js `22.15.0` (the version used by CI/Docker).
 - npm.
 
 Install frontend dependencies:
@@ -548,11 +642,21 @@ Run locally with default LAN-oriented settings:
 make run-local
 ```
 
-Run tests and frontend build:
+Run both Go modules, frontend tests and frontend build:
 
 ```bash
 make test
 ```
+
+`make test-root`, `make test-fork` and `make test-web` run individual suites.
+`make race` covers the root module and fork core/storage; `make vet` checks both.
+`make check` combines tests, race, vet and the application build. Run `make deps`
+first on a fresh checkout. The fork package list is explicit (`.` and `./storage`)
+and must grow if changes touch other fork packages.
+
+The Checks workflow runs Linux integration/race and native macOS/Windows storage
+suites on PRs. Release binary/image jobs depend on the same workflow. Cross-build
+alone does not establish runtime filesystem support.
 
 ## Releases
 

@@ -10,11 +10,14 @@ import (
 	"mime"
 	"net/http"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+	"torrent-stream-hub/internal/delivery/http/budget"
+	"torrent-stream-hub/internal/metafetch"
 
 	"torrent-stream-hub/internal/delivery/http/response"
 	"torrent-stream-hub/internal/engine"
@@ -27,11 +30,13 @@ import (
 )
 
 type TorrServerHandler struct {
-	uc          *usecase.TorrentUseCase
-	preloads    map[preloadKey]preloadState
-	mu          sync.Mutex
-	warmup      func(context.Context, string, int, int64) (int64, int64, error)
-	warmupSlots chan struct{}
+	uc           *usecase.TorrentUseCase
+	preloads     map[preloadKey]preloadState
+	mu           sync.Mutex
+	warmup       func(context.Context, string, int, int64) (int64, int64, error)
+	warmupSlots  chan struct{}
+	metainfoJobs *budget.Jobs
+	fetcher      *metafetch.Fetcher
 }
 
 const defaultPreloadSize int64 = 20 << 20
@@ -56,9 +61,15 @@ func NewTorrServerHandler(uc *usecase.TorrentUseCase) *TorrServerHandler {
 		preloads:    make(map[preloadKey]preloadState),
 		warmupSlots: make(chan struct{}, 4),
 	}
+	tempDir := filepath.Join(os.TempDir(), "torrent-stream-hub-metainfo")
+	allowlist := ""
 	if uc != nil {
+		tempDir, allowlist = uc.MetainfoSettings()
 		h.warmup = uc.Warmup
 	}
+	h.metainfoJobs = budget.NewJobs(tempDir)
+	h.fetcher, _ = metafetch.New(allowlist) // Validated by engine construction.
+
 	if uc != nil {
 		uc.StartTask(func(ctx context.Context) {
 			ticker := time.NewTicker(time.Minute)
@@ -101,14 +112,15 @@ func (h *TorrServerHandler) Echo(w http.ResponseWriter, r *http.Request) {
 }
 
 type TorrentsReq struct {
-	Action   string `json:"action"`
-	Link     string `json:"link"`
-	Hash     string `json:"hash"`
-	Title    string `json:"title"`
-	Data     string `json:"data"`
-	Poster   string `json:"poster"`
-	Category string `json:"category"`
-	SaveToDB bool   `json:"save_to_db"`
+	PrivateSafe bool   `json:"private_safe"`
+	Action      string `json:"action"`
+	Link        string `json:"link"`
+	Hash        string `json:"hash"`
+	Title       string `json:"title"`
+	Data        string `json:"data"`
+	Poster      string `json:"poster"`
+	Category    string `json:"category"`
+	SaveToDB    bool   `json:"save_to_db"`
 }
 
 type torrentResponse struct {
@@ -186,10 +198,17 @@ func (h *TorrServerHandler) Torrents(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if req.Action == "add" {
-		t, err := h.addTorrent(req)
+		t, err := h.addTorrent(req, r.Context())
 		if err != nil {
 			logging.Warnf("torrserver add failed %s: %v", logging.SafeMagnetSummary(req.Link), err)
-			response.Error(w, http.StatusInternalServerError, err.Error())
+			status := budget.Status(err, http.StatusInternalServerError)
+			if errors.Is(err, usecase.ErrStorageConflict) || errors.Is(err, engine.ErrDownloadBlocked) {
+				status = http.StatusConflict
+			}
+			if errors.Is(err, engine.ErrTaskLimit) {
+				status = http.StatusTooManyRequests
+			}
+			response.Error(w, status, err.Error())
 			return
 		}
 		response.JSON(w, http.StatusOK, toTorrentResponse(t, true))
@@ -246,16 +265,26 @@ func (h *TorrServerHandler) Torrents(w http.ResponseWriter, r *http.Request) {
 	response.Error(w, http.StatusBadRequest, "Unknown action")
 }
 
-func (h *TorrServerHandler) addTorrent(req TorrentsReq) (*models.Torrent, error) {
+func (h *TorrServerHandler) addTorrent(req TorrentsReq, contexts ...context.Context) (*models.Torrent, error) {
+	ctx := context.Background()
+	if len(contexts) > 0 {
+		ctx = contexts[0]
+	}
 	metadata := usecase.TorrentMetadata{
-		Title:    req.Title,
-		Data:     req.Data,
-		Poster:   req.Poster,
-		Category: req.Category,
+		PrivateSafe: req.PrivateSafe,
+		Title:       req.Title,
+		Data:        req.Data,
+		Poster:      req.Poster,
+		Category:    req.Category,
 	}
 	link := normalizeTorrentLink(req.Link)
 	if strings.HasPrefix(strings.ToLower(link), "http://") || strings.HasPrefix(strings.ToLower(link), "https://") {
-		resolved, torrentData, err := resolveHTTPLink(link)
+		release, err := h.metainfoJobs.Acquire(ctx)
+		if err != nil {
+			return nil, err
+		}
+		defer release()
+		resolved, torrentData, err := h.fetcher.Fetch(ctx, link)
 		if err != nil {
 			return nil, err
 		}
@@ -323,32 +352,26 @@ func (h *TorrServerHandler) Cache(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *TorrServerHandler) UploadTorrent(w http.ResponseWriter, r *http.Request) {
-	if err := r.ParseMultipartForm(32 << 20); err != nil {
-		logging.Debugf("torrent upload invalid multipart form: %v", err)
-		response.Error(w, http.StatusBadRequest, "Invalid multipart form")
-		return
-	}
-
-	file, header, err := r.FormFile("file")
+	release, err := h.metainfoJobs.Acquire(r.Context())
 	if err != nil {
-		logging.Debugf("torrent upload missing file: %v", err)
-		response.Error(w, http.StatusBadRequest, "Torrent file is required")
+		budget.BodyError(w, r, budget.Status(err), err.Error())
 		return
 	}
-	defer file.Close()
-
-	filename := ""
-	if header != nil {
-		filename = header.Filename
+	defer release()
+	file, fields, cleanup, err := h.metainfoJobs.ReadUpload(w, r)
+	if err != nil {
+		budget.BodyError(w, r, budget.Status(err), "Cannot read metainfo upload within limits")
+		return
 	}
-	logging.Infof("torrent upload filename=%q", filename)
+	defer cleanup()
+	filename := "upload"
 	t, err := h.uc.AddTorrentFile(file)
 	if err != nil {
 		logging.Warnf("torrent upload failed filename=%q: %v", filename, err)
 		response.Error(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	if poster := strings.TrimSpace(r.FormValue("poster")); poster != "" {
+	if poster := strings.TrimSpace(fields["poster"]); poster != "" {
 		hash := t.Hash
 		t, err = h.uc.UpdateMetadata(hash, usecase.TorrentMetadata{Poster: poster})
 		if err != nil {
@@ -382,7 +405,7 @@ func (h *TorrServerHandler) Playlist(w http.ResponseWriter, r *http.Request) {
 
 	for _, f := range t.Files {
 		if f.IsMedia {
-			fmt.Fprintf(w, "#EXTINF:-1,%s\n", f.Path)
+			fmt.Fprintf(w, "#EXTINF:-1,%s\n", playlistLabel(f.Path))
 			// Assuming server runs on the same host, ideally construct full URL
 			host := r.Host
 			scheme := "http"
@@ -758,11 +781,17 @@ func (h *TorrServerHandler) PlayAlias(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *TorrServerHandler) serveStream(w http.ResponseWriter, r *http.Request, hash string, index int) {
-	release, err := h.uc.AcquireTransfer(hash, r.Context())
+	release, err := h.uc.AcquireHTTPTransfer(hash, r.Context(), r.Method == http.MethodHead)
 	if err != nil {
 		status := http.StatusNotFound
 		if errors.Is(err, usecase.ErrStorageConflict) {
 			status = http.StatusConflict
+		}
+		if errors.Is(err, engine.ErrTransferLimit) || errors.Is(err, engine.ErrTaskLimit) {
+			status = http.StatusTooManyRequests
+		}
+		if errors.Is(err, context.Canceled) {
+			status = http.StatusServiceUnavailable
 		}
 		response.Error(w, status, "Transfer unavailable")
 		return
@@ -815,10 +844,15 @@ func (h *TorrServerHandler) serveStream(w http.ResponseWriter, r *http.Request, 
 		err = h.uc.AddStream(ctx, hash, index, streamOpts)
 		if err != nil {
 			logging.Warnf("stream QoS registration failed req_id=%s hash=%s file_index=%d: %v", reqID, hash, index, err)
-			if errors.Is(err, engine.ErrDownloadBlocked) {
-				response.Error(w, http.StatusConflict, err.Error())
-				return
+			status := http.StatusConflict
+			if errors.Is(err, engine.ErrTaskLimit) {
+				status = http.StatusTooManyRequests
 			}
+			if errors.Is(err, context.Canceled) {
+				status = http.StatusServiceUnavailable
+			}
+			response.Error(w, status, err.Error())
+			return
 		}
 	} else {
 		logging.Debugf("stream QoS registration skipped req_id=%s hash=%s file_index=%d head=%t skip=%t",
@@ -890,8 +924,11 @@ func (h *TorrServerHandler) serveM3U(w http.ResponseWriter, r *http.Request, has
 	}
 	for _, f := range t.Files {
 		if f != nil && f.IsMedia {
-			fmt.Fprintf(w, "#EXTINF:-1,%s\n", f.Path)
-			fmt.Fprintf(w, "%s://%s/stream/%s?link=%s&index=%d&play\n", scheme, host, filepath.Base(f.Path), hash, internalIndexToTorrserver(f.Index))
+			fmt.Fprintf(w, "#EXTINF:-1,%s\n", playlistLabel(f.Path))
+			u := url.URL{Scheme: scheme, Host: host, Path: "/stream/" + filepath.Base(f.Path)}
+			query := url.Values{"link": {hash}, "index": {strconv.Itoa(internalIndexToTorrserver(f.Index))}, "play": {""}}
+			u.RawQuery = query.Encode()
+			fmt.Fprintln(w, u.String())
 		}
 	}
 }
@@ -905,37 +942,6 @@ func normalizeTorrentLink(link string) string {
 		return "magnet:?xt=urn:btih:" + trimmed
 	}
 	return trimmed
-}
-
-func resolveHTTPLink(link string) (string, []byte, error) {
-	client := &http.Client{Timeout: 60 * time.Second}
-	req, err := http.NewRequest(http.MethodGet, link, nil)
-	if err != nil {
-		return "", nil, err
-	}
-	req.Header.Set("User-Agent", "DWL/1.1.1 (Torrent)")
-
-	resp, err := client.Do(req)
-	if err != nil {
-		if urlErr, ok := err.(*url.Error); ok && strings.HasPrefix(strings.ToLower(urlErr.URL), "magnet:") {
-			return urlErr.URL, nil, nil
-		}
-		return "", nil, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return "", nil, errors.New(resp.Status)
-	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 64<<20))
-	if err != nil {
-		return "", nil, err
-	}
-	trimmed := strings.TrimSpace(string(body))
-	if strings.HasPrefix(strings.ToLower(trimmed), "magnet:") {
-		return trimmed, nil, nil
-	}
-	return "", body, nil
 }
 
 func internalIndexToTorrserver(index int) int {
@@ -1018,4 +1024,8 @@ func streamContentType(name string) string {
 	}
 
 	return "application/octet-stream"
+}
+
+func playlistLabel(value string) string {
+	return strings.NewReplacer("\r", " ", "\n", " ").Replace(value)
 }

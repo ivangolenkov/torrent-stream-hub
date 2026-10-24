@@ -84,6 +84,9 @@ type Torrent struct {
 	lastSlogGroupInput torrentSlogGroupInput // To guard against generating slog.Group
 
 	networkingEnabled        chansync.Flag
+	privateSafe              bool
+	publicDiscoveryCtx       context.Context
+	stopPublicDiscovery      context.CancelFunc
 	dataDownloadDisallowed   chansync.Flag
 	dataUploadDisallowed     bool
 	userOnWriteChunkErr      func(error)
@@ -343,24 +346,45 @@ func (t *Torrent) pieceComplete(piece pieceIndex) bool {
 	if !t._completedPieces.Contains(bitmap.BitIndex(piece)) {
 		return false
 	}
+	if t.storage != nil && t.storage.CachedComplete != nil {
+		return t.storage.CachedComplete(piece)
+	}
 	return t.storage == nil || t.storage.FreshComplete == nil || t.storage.FreshComplete(piece)
 }
 
 // RefreshStorageCompletion revokes stale verified data and queues bounded
 // library hashers. It never waits for disk verification under application locks.
 func (t *Torrent) RefreshStorageCompletion() {
+	t.refreshStorageCompletionRange(0, int(^uint(0)>>1))
+}
+
+func (t *Torrent) refreshStorageCompletionRange(begin, end int) {
 	if t == nil {
 		return
 	}
-	t.cl.lock()
-	defer t.cl.unlock()
-	if t.closed.IsSet() || t.storage == nil || t.storage.FreshComplete == nil {
+	t.cl.rLock()
+	backend := t.storage
+	if t.closed.IsSet() || backend == nil || backend.FreshComplete == nil {
+		t.cl.rUnlock()
 		return
 	}
-	for _, index := range t._completedPieces.ToArray() {
-		if !t.storage.FreshComplete(int(index)) {
-			t.updatePieceCompletion(int(index))
-			_, _ = t.queuePieceCheck(int(index))
+	end = min(end, t.numPieces())
+	begin = max(0, begin)
+	t.cl.rUnlock()
+	if backend.RefreshFresh != nil {
+		backend.RefreshFresh(begin, end)
+	}
+	// Filesystem work happened outside client synchronization. Only this same
+	// storage generation may revoke cached completion after reacquiring the lock.
+	t.cl.lock()
+	defer t.cl.unlock()
+	if t.closed.IsSet() || t.storage != backend {
+		return
+	}
+	for index := begin; index < end; index++ {
+		if t._completedPieces.Contains(bitmap.BitIndex(index)) && !t.pieceComplete(index) {
+			t.updatePieceCompletion(index)
+			_, _ = t.queuePieceCheck(index)
 		}
 	}
 }
@@ -372,6 +396,10 @@ func (t *Torrent) pieceCompleteUncached(piece pieceIndex) (ret storage.Completio
 	}
 	if t.storage == nil {
 		return storage.Completion{Complete: false, Ok: false}
+	}
+	if t.storage.CachedComplete != nil {
+		complete := t.storage.CachedComplete(piece)
+		return storage.Completion{Complete: complete, Ok: complete}
 	}
 	return p.Storage().Completion()
 }
@@ -395,7 +423,7 @@ func (t *Torrent) appendConns(ret []*PeerConn, f func(*PeerConn) bool) []*PeerCo
 func (t *Torrent) addPeer(p PeerInfo) (added bool) {
 	cl := t.cl
 	torrent.Add(fmt.Sprintf("peers added by source %q", p.Source), 1)
-	if t.closed.IsSet() {
+	if t.closed.IsSet() || !t.publicDiscoveryAllowedLocked() && publicPeerSource(p.Source) {
 		return false
 	}
 	if ipAddr, ok := tryIpPortFromNetAddr(p.Addr); ok {
@@ -609,6 +637,7 @@ func (t *Torrent) pieceRequestOrderKey(i int) request_strategy.PieceRequestOrder
 
 // This seems to be all the follow-up tasks after info is set, that can't fail.
 func (t *Torrent) onSetInfo() {
+	t.enforceDiscoveryPolicyLocked()
 	t.pieceRequestOrder = rand.Perm(t.numPieces())
 	t.initPieceRequestOrder()
 	MakeSliceWithLength(&t.requestPieceStates, t.numPieces())
@@ -2013,7 +2042,7 @@ func (t *Torrent) deletePeerConn(c *PeerConn) (ret bool) {
 	// Avoid adding a drop event more than once. Probably we should track whether we've generated
 	// the drop event against the PexConnState instead.
 	if ret {
-		if !t.cl.config.DisablePEX {
+		if !t.cl.config.DisablePEX && t.publicDiscoveryAllowedLocked() {
 			t.pex.Drop(c)
 		}
 	}
@@ -2356,15 +2385,15 @@ func (t *Torrent) consumeDhtAnnouncePeers(pvs <-chan dht.PeersValues) {
 func (t *Torrent) AnnounceToDht(s DhtServer) (done <-chan struct{}, stop func(), err error) {
 	var ihs [][20]byte
 	t.cl.lock()
-	if !t.networkingEnabled.Bool() {
+	if !t.networkingEnabled.Bool() || !t.publicDiscoveryAllowedLocked() || t.closed.IsSet() {
 		t.cl.unlock()
 		return nil, nil, fmt.Errorf("torrent networking is disabled")
 	}
 	t.eachShortInfohash(func(short [20]byte) {
 		ihs = append(ihs, short)
 	})
-	t.cl.unlock()
-	ctx, stop := context.WithCancel(context.Background())
+	defer t.cl.unlock()
+	ctx, stop := context.WithCancel(t.publicDiscoveryCtx)
 	eg, ctx := errgroup.WithContext(ctx)
 	for _, ih := range ihs {
 		var ann DhtAnnounce
@@ -2430,11 +2459,13 @@ func (t *Torrent) dhtAnnounceConsumer(
 }
 
 func (t *Torrent) timeboxedAnnounceToDht(s DhtServer) error {
-	_, stop, err := t.AnnounceToDht(s)
+	done, stop, err := t.AnnounceToDht(s)
 	if err != nil {
 		return err
 	}
 	select {
+	case <-done:
+	case <-t.publicDiscoveryCtx.Done():
 	case <-t.closed.Done():
 		// Arbitrary, but reported in
 		// https://github.com/anacrolix/torrent/issues/1005#issuecomment-2856881633. Should able to
@@ -2457,7 +2488,7 @@ func (t *Torrent) dhtAnnouncer(s DhtServer) {
 			// We're also announcing ourselves as a listener, so we don't just want peer addresses.
 			// TODO: We can include the announce_peer step depending on whether we can receive
 			// inbound connections. We should probably only announce once every 15 mins too.
-			if !t.wantAnyConns() {
+			if !t.publicDiscoveryAllowedLocked() || !t.wantAnyConns() {
 				goto wait
 			}
 			// TODO: Determine if there's a listener on the port we're announcing.
@@ -2478,7 +2509,11 @@ func (t *Torrent) dhtAnnouncer(s DhtServer) {
 				// Assume DNS issues. This is hacky, but DHT announcing needs be overhauled and
 				// managed at a client level without unnecessary goroutines, just like with regular
 				// trackers. Works around https://github.com/anacrolix/torrent/issues/1029.
-				time.Sleep(5 * time.Minute)
+				select {
+				case <-t.closed.Done():
+				case <-t.publicDiscoveryCtx.Done():
+				case <-time.After(5 * time.Minute):
+				}
 			}
 		}()
 	}
@@ -2553,6 +2588,9 @@ func (t *Torrent) numTotalPeers() int {
 
 // Returns true if the connection is added.
 func (t *Torrent) addPeerConn(c *PeerConn) (err error) {
+	if !t.publicDiscoveryAllowedLocked() && publicPeerSource(c.Discovery) {
+		return errors.New("public peer discovery is disabled")
+	}
 	defer func() {
 		if err == nil {
 			torrent.Add("added connections", 1)
@@ -2596,7 +2634,7 @@ func (t *Torrent) addPeerConn(c *PeerConn) (err error) {
 	t.conns[c] = struct{}{}
 	t.cl.event.Broadcast()
 	// We'll never receive the "p" extended handshake parameter.
-	if !t.cl.config.DisablePEX && !c.PeerExtensionBytes.SupportsExtended() {
+	if !t.cl.config.DisablePEX && t.publicDiscoveryAllowedLocked() && !c.PeerExtensionBytes.SupportsExtended() {
 		t.pex.Add(c)
 	}
 	return nil
@@ -3373,8 +3411,8 @@ func (t *Torrent) peerIsActive(p *Peer) (active bool) {
 func (t *Torrent) requestIndexToRequest(ri RequestIndex) Request {
 	index := t.pieceIndexOfRequestIndex(ri)
 	return Request{
-		pp.Integer(index),
-		t.chunkIndexSpec(index, ri%t.chunksPerRegularPiece()),
+		Index:     pp.Integer(index),
+		ChunkSpec: t.chunkIndexSpec(index, ri%t.chunksPerRegularPiece()),
 	}
 }
 

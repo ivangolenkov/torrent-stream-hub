@@ -12,7 +12,7 @@ async function commandReceipt(response: Response): Promise<CommandReceipt> {
 
 export const apiClient = {
   async getTorrents(): Promise<TorrentSnapshot> {
-    const response = await fetch(`${API_BASE}/torrents`);
+    const response = await fetch(`${API_BASE}/torrents?view=compact`);
     if (!response.ok) throw new Error(await readError(response, 'Failed to fetch torrents'));
     const data = await response.json();
     if (!Array.isArray(data)) throw new Error('Invalid torrent snapshot');
@@ -42,7 +42,7 @@ export const apiClient = {
     if (!response.ok) throw new Error(await readError(response, 'Failed to upload torrent file'));
   },
 
-  async action(hash: string, action: 'pause' | 'resume' | 'delete' | 'recheck' | 'hard_refresh' | 'make_permanent', deleteFiles: boolean = false): Promise<CommandResult> {
+  async action(hash: string, action: 'pause' | 'resume' | 'delete' | 'recheck' | 'make_permanent', deleteFiles: boolean = false): Promise<CommandResult> {
     const response = await fetch(`${API_BASE}/torrent/${hash}/action`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -72,11 +72,13 @@ export const apiClient = {
     return commandReceipt(response);
   },
 
-  async getFiles(hash: string): Promise<File[]> {
+  async getFiles(hash: string): Promise<File[] & { detailsVersion?: string }> {
     const response = await fetch(`${API_BASE}/torrent/${hash}/files`);
     if (!response.ok) throw new Error(await readError(response, 'Failed to fetch files'));
     const data = await response.json();
-    return Array.isArray(data) ? data : [];
+    if (!Array.isArray(data)) return [];
+    Object.defineProperty(data, 'detailsVersion', { value: response.headers.get('X-Hub-Details') || undefined });
+    return data;
   },
 
   async getPieces(hash: string): Promise<string> {
@@ -91,11 +93,6 @@ export const apiClient = {
     return await response.json();
   },
 
-  async recycleBTClient(): Promise<void> {
-    const response = await fetch(`${API_BASE}/health/bt/recycle`, { method: 'POST' });
-    if (!response.ok) throw new Error(await readError(response, 'Failed to recycle BitTorrent client'));
-  },
-
   torrentDownloadUrl(hash: string): string {
     return `${API_BASE}/torrent/${encodeURIComponent(hash)}/download`;
   },
@@ -107,7 +104,8 @@ export const apiClient = {
 
 async function readError(response: Response, fallback: string) {
   const text = await response.text().catch(() => '');
-  if (!text) return fallback;
+  const statusMessage: Record<number, string> = { 413: 'Request exceeds the size limit', 429: 'Server is busy; try again after active operations finish', 403: 'Source is blocked by the server address policy', 408: 'Request timed out', 507: 'Cannot store upload on the server' };
+  if (!text) return statusMessage[response.status] || fallback;
 
   try {
     const data = JSON.parse(text);
@@ -129,7 +127,7 @@ function normalizeTorrentLink(link: string) {
 }
 
 export function setupSSE(onUpdate: (torrents: Torrent[], version?: string) => void) {
-  const eventSource = new EventSource(`${API_BASE}/events`);
+  const eventSource = new EventSource(`${API_BASE}/events?view=compact`);
   let stopped = false;
   
   eventSource.onmessage = (event) => {

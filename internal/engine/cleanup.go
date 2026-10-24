@@ -8,6 +8,7 @@ func (e *Engine) CleanupProtectedPaths() []string {
 	paths := []string{
 		filepath.Join(e.cfg.DownloadDir, ".torrent.bolt.db"),
 		filepath.Join(e.ConfigDir(), "metainfo"),
+		e.cfg.MetainfoTempDir,
 	}
 	if e.cfg.DBPath != "" {
 		for _, suffix := range []string{"", "-wal", "-shm", "-journal"} {

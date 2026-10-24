@@ -846,6 +846,13 @@ func (c *PeerConn) useBestReject(r Request) {
 }
 
 func (c *PeerConn) readPeerRequestData(r Request) ([]byte, error) {
+	c.t.refreshStorageCompletionRange(int(r.Index), int(r.Index)+1)
+	c.t.cl.rLock()
+	ready := !c.t.closed.IsSet() && c.t.havePiece(pieceIndex(r.Index))
+	c.t.cl.rUnlock()
+	if !ready {
+		return nil, errors.New("upload piece verification revoked")
+	}
 	b := make([]byte, r.Length)
 	p := c.t.info.Piece(int(r.Index))
 	n, err := c.t.readAt(b, p.Offset()+int64(r.Begin))
@@ -1101,7 +1108,7 @@ func (c *PeerConn) onReadExtendedMsg(id pp.ExtensionNumber, payload []byte) (err
 			}
 		}
 		c.requestPendingMetadata()
-		if !t.cl.config.DisablePEX {
+		if !t.cl.config.DisablePEX && t.publicDiscoveryAllowedLocked() {
 			t.pex.Add(c) // we learnt enough now
 			// This checks the extension is supported internally.
 			c.pex.Init(c)

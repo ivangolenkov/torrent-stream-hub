@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -11,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"torrent-stream-hub/internal/completion"
 	"torrent-stream-hub/internal/config"
 	deliveryhttp "torrent-stream-hub/internal/delivery/http"
 	"torrent-stream-hub/internal/engine"
@@ -29,6 +31,9 @@ func main() {
 
 func run() (runErr error) {
 	cfg := config.Load()
+	if err := cfg.ValidateResources(); err != nil {
+		return err
+	}
 	if err := cfg.ValidateTemporaryTorrents(); err != nil {
 		return err
 	}
@@ -48,6 +53,9 @@ func run() (runErr error) {
 			logging.Errorf("server stopped: %v", runErr)
 		}
 	}()
+	for _, option := range cfg.DeprecatedOptions {
+		logging.Warnf("deprecated setting %s has no effect; remove it from configuration", option)
+	}
 	logging.Infof("logging initialized level=%s", logging.CurrentLevel())
 
 	if err := ensureRuntimeDirs(cfg.DownloadDir, cfg.DBPath); err != nil {
@@ -60,7 +68,12 @@ func run() (runErr error) {
 	}
 	defer db.Close()
 
-	eng, err := engine.New(cfg)
+	completionCache, err := completion.New(db.DB())
+	if err != nil {
+		return fmt.Errorf("failed to initialize completion cache: %w", err)
+	}
+	defer completionCache.Close() // Also join the worker if engine construction fails.
+	eng, err := engine.New(cfg, engine.WithPieceCompletion(completionCache))
 	if err != nil {
 		return fmt.Errorf("failed to initialize torrent engine: %w", err)
 	}
@@ -82,11 +95,12 @@ func run() (runErr error) {
 	cleanupDone := make(chan struct{})
 	go func() { defer close(cleanupDone); uc.RunTemporaryCleanup(workerCtx) }()
 	go func() { defer close(workerDone); syncWorker.StartContext(workerCtx) }()
-	defer func() { stopWorker(); <-workerDone; <-cleanupDone }()
+	defer func() { eng.BeginShutdown(); stopWorker(); <-workerDone; <-cleanupDone }()
 
 	server := &http.Server{
 		Addr:              ":" + cfg.Port,
 		Handler:           deliveryhttp.NewRouterWithLogs(uc, syncWorker, files, web.DistFS()),
+		BaseContext:       func(net.Listener) context.Context { return eng.Context() },
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
@@ -110,6 +124,7 @@ func run() (runErr error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	// Close long-lived SSE subscriptions before waiting for HTTP handlers.
+	eng.BeginShutdown()
 	syncWorker.Close()
 	stopWorker()
 

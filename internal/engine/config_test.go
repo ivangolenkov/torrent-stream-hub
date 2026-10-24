@@ -78,6 +78,7 @@ func TestRetrackersAppendReplaceAndOff(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			e := &Engine{cfg: &config.Config{BTRetrackersMode: tt.mode, BTRetrackersFile: filepath.Join(t.TempDir(), "missing.txt")}}
 			spec := &torrent.TorrentSpec{Trackers: tt.existing}
+			spec.InfoBytes = []byte("d6:lengthi1e4:name1:x12:piece lengthi1e6:pieces20:00000000000000000000e")
 
 			e.augmentTorrentSpec(spec)
 

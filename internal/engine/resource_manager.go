@@ -86,8 +86,6 @@ func (e *Engine) manageResources() {
 		if mt == nil || mt.t == nil {
 			continue
 		}
-		// Refresh may stat storage; it cannot own the global admission lock.
-		mt.t.RefreshStorageCompletion()
 		e.admissionMu.Lock()
 		if !e.currentTorrent(mt) {
 			e.admissionMu.Unlock()
@@ -105,6 +103,8 @@ func (e *Engine) manageResources() {
 		mt.healthProbe = probeTicket
 		probe, minimum := e.diskProbe, e.minimumDiskBytes()
 		e.admissionMu.Unlock()
+		// The generation owns a probe ticket before any potentially slow stat.
+		mt.t.RefreshStorageCompletion()
 		probeErr := e.diskErrorWithProbe(mt.hash, probe, minimum)
 		e.admissionMu.Lock()
 		mt.mu.Lock()

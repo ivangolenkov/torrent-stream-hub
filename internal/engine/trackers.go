@@ -9,10 +9,16 @@ import (
 	"torrent-stream-hub/internal/logging"
 
 	"github.com/anacrolix/torrent"
+	"github.com/anacrolix/torrent/bencode"
+	"github.com/anacrolix/torrent/metainfo"
 )
 
 func (e *Engine) augmentTorrentSpec(spec *torrent.TorrentSpec) {
-	if spec == nil {
+	if spec == nil || spec.PrivateSafe || len(spec.InfoBytes) == 0 {
+		return
+	}
+	var info metainfo.Info
+	if err := bencode.Unmarshal(spec.InfoBytes, &info); err != nil || info.Private != nil && *info.Private {
 		return
 	}
 	trackers := e.retrackers()

@@ -2,6 +2,7 @@ package torrserver
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha1"
 	"encoding/json"
 	"fmt"
@@ -12,6 +13,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"torrent-stream-hub/internal/metafetch"
 
 	"torrent-stream-hub/internal/config"
 	"torrent-stream-hub/internal/engine"
@@ -155,7 +157,11 @@ func TestResolveHTTPLinkSupportsMagnetRedirect(t *testing.T) {
 	}))
 	defer server.Close()
 
-	link, data, err := resolveHTTPLink(server.URL)
+	fetcher, err := metafetch.New("127.0.0.1/32")
+	if err != nil {
+		t.Fatal(err)
+	}
+	link, data, err := fetcher.Fetch(context.Background(), server.URL)
 	if err != nil {
 		t.Fatalf("expected magnet redirect to resolve, got error: %v", err)
 	}
@@ -262,6 +268,8 @@ func setupTorrServerIntegration(t *testing.T) (string, *repository.TorrentRepo, 
 	}
 
 	eng, err := engine.New(&config.Config{
+		DBPath:       filepath.Join(dir, "hub.db"),
+		BTDisableDHT: true, BTDisablePEX: true, BTDisableUPNP: true, BTDisableUTP: true, BTRetrackersMode: "off",
 		DownloadDir:        dir,
 		TorrentPort:        0,
 		MaxActiveDownloads: 1,
@@ -407,21 +415,7 @@ func TestPreload_CompletedFileReturnsFastPath(t *testing.T) {
 	}
 
 	// Verify pieces in engine
-	tf, err := h.uc.GetTorrentFile(hash, 0)
-	if err != nil {
-		t.Fatalf("failed to get torrent file: %v", err)
-	}
-	tRaw := tf.Torrent()
-	for i := 0; i < tRaw.NumPieces(); i++ {
-		_ = tRaw.Piece(i).VerifyData()
-	}
-	deadline := time.Now().Add(2 * time.Second)
-	for i := 0; i < tRaw.NumPieces(); i++ {
-		p := tRaw.Piece(i)
-		for p.State().Marking && time.Now().Before(deadline) {
-			time.Sleep(5 * time.Millisecond)
-		}
-	}
+	verifyHTTPFixture(t, h.uc, hash)
 
 	// Send GET /stream?link=HASH&index=1&preload (torrserver uses 1-based index with link)
 	req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/stream?link=%s&index=1&preload", hash), nil)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base32"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -52,7 +53,15 @@ func (e *Engine) newTorrentClient() (*torrent.Client, storage.ClientImplCloser, 
 		if owner == nil {
 			return
 		}
-		e.RunStorageTask(func(context.Context) {
+		mt, ok := owner.(*ManagedTorrent)
+		if !ok {
+			return
+		}
+		event.Url = truncateDiagnostic(event.Url)
+		if event.Error != nil {
+			event.Error = fmt.Errorf("%s", sanitizeDiagnosticError(event.Error))
+		}
+		e.queueEvent(mt, "status", func(context.Context) {
 			e.admissionMu.Lock()
 			defer e.admissionMu.Unlock()
 			if mt, ok := owner.(*ManagedTorrent); ok && e.currentTorrent(mt) {
@@ -119,7 +128,7 @@ func buildClientConfig(cfg *config.Config) *torrent.ClientConfig {
 		clientConfig.DownloadRateLimiter = rate.NewLimiter(rate.Limit(cfg.DownloadLimit), cfg.DownloadLimit)
 	}
 	if cfg.UploadLimit > 0 {
-		clientConfig.UploadRateLimiter = rate.NewLimiter(rate.Limit(cfg.UploadLimit), cfg.UploadLimit)
+		clientConfig.UploadRateLimiter = rate.NewLimiter(rate.Limit(cfg.UploadLimit), max(cfg.UploadLimit, 64<<10))
 	}
 
 	return clientConfig

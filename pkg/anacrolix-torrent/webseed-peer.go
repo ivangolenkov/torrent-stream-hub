@@ -137,7 +137,7 @@ func (ws *webseedPeer) intoSpec(begin, end RequestIndex) webseed.RequestSpec {
 	t := ws.peer.t
 	start := t.requestIndexBegin(begin)
 	endOff := t.requestIndexEnd(end - 1)
-	return webseed.RequestSpec{start, endOff - start}
+	return webseed.RequestSpec{Start: start, Length: endOff - start}
 }
 
 func (ws *webseedPeer) spawnRequest(begin, end RequestIndex, logger *slog.Logger) {

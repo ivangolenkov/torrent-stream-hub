@@ -108,3 +108,35 @@ retire earlier in-flight snapshots, including empty lists. Timestamp is diagnost
 SQLite is not atomic with filesystem/library apply. Committed desired intent is
 not rolled back by observations; deletion/migration journals survive partial
 failure. Context/deadlines limit caller waits, not arbitrary running syscalls.
+
+## Phase 40 budgets and I/O boundaries
+
+Task admission has independent caps: 64 service tasks, 256 metadata watchers,
+2 verification jobs, `MaxActiveStreams + 4` stream watchers and 256 QoS file states.
+Two event workers retain at most 128 coalesced owner/kind events. Optional duplicate
+telemetry can be dropped; storage-error gates close synchronously in the library,
+and pending durable effects are retried by maintenance. Command admission failure
+is an error, never an unowned overflow goroutine or false success.
+
+All HTTP payload endpoints share the positive MaxActiveStreams limit (default 4).
+Reservation precedes record/read preparation. Release is idempotent and separate
+from playback debounce; HEAD owns only the short record lease. Transfer/metadata/
+read preparation propagates caller cancellation. Main connects HTTP BaseContext to
+engine lifetime, interrupts outstanding body reads, cancels engine admission before
+joining sync/cleanup, closes SSE, drains HTTP, joins engine work, then closes storage,
+completion and SQLite. HTTP's drain deadline may force connection closure; it never
+closes storage beneath an already-running filesystem syscall. Such a syscall may
+extend process exit beyond the HTTP deadline.
+
+Verified storage uses shared per-file signatures and incremental piece counts.
+Internal writes touch affected ranges/file signatures; external inode/size/mtime
+changes revoke all dependent pieces. Range refresh stats unique files outside the
+client lock, then validates the same storage generation before updating completion.
+Read/upload/direct-open/handshake boundaries refresh before consuming cached bits.
+A cached bit, final name or SQLite hint alone is never proof of readable bytes.
+
+Completion Get/Set run only bounded memory operations under library callbacks.
+The adapter has one writer, 4096 LRU entries, 1024 pending hints plus a 1024-entry
+in-flight batch. Lost hints are observable and safe because open always verifies.
+Close stops admission and joins the writer before SQLite closes. Application
+contexts bound queue/SQLite waits, not an arbitrary blocked filesystem syscall.

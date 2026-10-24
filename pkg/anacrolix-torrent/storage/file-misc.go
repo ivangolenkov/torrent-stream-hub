@@ -84,6 +84,7 @@ func (f *file) torrentOffset() int64 {
 
 // Extra state in the file storage for each file.
 type fileExtra struct {
+	index int
 	// This protects high level OS file state like partial file name, permission mod, renaming etc.
 	mu sync.RWMutex
 	// The safe, OS-local file path.

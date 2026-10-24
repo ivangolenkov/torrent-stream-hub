@@ -76,8 +76,8 @@ func (uc *TorrentUseCase) metadataStoragePaths(t *models.Torrent) ([]string, boo
 }
 
 func (uc *TorrentUseCase) metadataStorageInfo(t *models.Torrent) (*metainfo.Info, error) {
-	if raw := uc.engine.GetRawTorrent(t.Hash); raw != nil && raw.Info() != nil {
-		return raw.Info(), nil
+	if info, err := uc.engine.StorageMetadata(t.Hash).Info(); err != nil || info != nil {
+		return info, err
 	}
 	mi, err := metainfo.LoadFromFile(filepath.Join(uc.engine.ConfigDir(), "metainfo", strings.ToLower(t.Hash)+".torrent"))
 	if err == nil {
@@ -145,7 +145,7 @@ func (uc *TorrentUseCase) deletePayloadLocked(t *models.Torrent) (retErr error) 
 	}
 	if !pending || !ready {
 		// Drop first, then inspect frozen metadata: metadata may arrive during Drop.
-		raw := uc.engine.GetRawTorrent(hash)
+		raw := uc.engine.StorageMetadata(hash)
 		var known bool
 		paths, known, err = uc.metadataStoragePaths(t)
 		if err != nil {
@@ -154,7 +154,7 @@ func (uc *TorrentUseCase) deletePayloadLocked(t *models.Torrent) (retErr error) 
 		if pending && !known {
 			return fmt.Errorf("%w: incomplete cleanup manifest requires metadata before retry", ErrStorageConflict)
 		}
-		if !known && raw == nil {
+		if !known && !raw.Exists() {
 			return fmt.Errorf("%w: cannot prove storage layout", ErrStorageConflict)
 		}
 		if err := uc.repo.BeginCleanup(hash, paths); err != nil {
@@ -166,8 +166,10 @@ func (uc *TorrentUseCase) deletePayloadLocked(t *models.Torrent) (retErr error) 
 		if err := uc.engine.Delete(hash); err != nil {
 			return err
 		}
-		if raw != nil && raw.Info() != nil {
-			paths, err = storagePaths(raw.Info())
+		if info, infoErr := raw.Info(); infoErr != nil {
+			return infoErr
+		} else if info != nil {
+			paths, err = storagePaths(info)
 			if m, e := uc.repo.StorageMapping(hash); e != nil {
 				return e
 			} else if m != nil && m.Version == payload.LayoutVersion {

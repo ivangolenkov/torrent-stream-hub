@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/anacrolix/torrent/metainfo"
 	"github.com/go-chi/chi/v5"
@@ -49,23 +48,7 @@ func setupHTTPStreamServer(t *testing.T, pieceLength int64, name string, fileDat
 	}
 
 	// Verify pieces in engine
-	tf, err := h.uc.GetTorrentFile(hash, 0)
-	if err != nil {
-		ts.Close()
-		cleanup()
-		t.Fatalf("failed to get torrent file: %v", err)
-	}
-	tRaw := tf.Torrent()
-	for i := 0; i < tRaw.NumPieces(); i++ {
-		_ = tRaw.Piece(i).VerifyData()
-	}
-	deadline := time.Now().Add(2 * time.Second)
-	for i := 0; i < tRaw.NumPieces(); i++ {
-		p := tRaw.Piece(i)
-		for p.State().Marking && time.Now().Before(deadline) {
-			time.Sleep(5 * time.Millisecond)
-		}
-	}
+	verifyHTTPFixture(t, h.uc, hash)
 
 	allCleanup := func() {
 		ts.Close()

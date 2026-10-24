@@ -1,6 +1,6 @@
 module github.com/anacrolix/torrent
 
-go 1.24.0
+go 1.25.8
 
 require (
 	github.com/RoaringBitmap/roaring v1.2.3

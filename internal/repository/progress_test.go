@@ -80,6 +80,10 @@ func TestProgressMigrationPreservesLegacyWithoutTrust(t *testing.T) {
 	if err := repo.SaveTorrent(&models.Torrent{Hash: "legacy", Size: 100, Downloaded: 60, State: models.StatePaused, Files: []*models.File{{Index: 0, Path: "video", Size: 100, Downloaded: 60}}}); err != nil {
 		t.Fatal(err)
 	}
+	// Later-version triggers cannot exist in a pre-upgrade fixture.
+	if _, err := db.DB().Exec(`DROP TRIGGER version_torrents_update; DROP TRIGGER version_files_update`); err != nil {
+		t.Fatal(err)
+	}
 	// Reconstruct the pre-0008 schema and execute the real upgrade on reopen.
 	for _, column := range []string{"legacy_downloaded", "progress_observed_at", "progress_source", "piece_length", "num_pieces", "metadata_known"} {
 		if _, err := db.DB().Exec(`ALTER TABLE torrents DROP COLUMN ` + column); err != nil {

@@ -28,6 +28,7 @@ type FileKey struct {
 }
 
 type StreamState struct {
+	debounceUntil  time.Time
 	Torrent        *ManagedTorrent
 	TimerVersion   uint64
 	ActiveStreams  int
@@ -282,7 +283,10 @@ func (sm *StreamManager) AddStream(ctx context.Context, hash string, fileIndex i
 	}
 
 	// Watch for context cancellation to remove the stream.
-	sm.watchSession(ctx, hash, fileIndex, sessionID, true)
+	if !sm.watchSession(ctx, hash, fileIndex, sessionID, true) {
+		sm.removeSession(hash, fileIndex, sessionID, false)
+		return ErrTaskLimit
+	}
 
 	return nil
 }
@@ -307,24 +311,27 @@ func (sm *StreamManager) AddPreload(ctx context.Context, hash string, fileIndex 
 			sm.removeSession(hash, fileIndex, sessionID, false)
 		})
 	}
-	sm.watchSession(ctx, hash, fileIndex, sessionID, false)
+	if !sm.watchSession(ctx, hash, fileIndex, sessionID, false) {
+		cleanup()
+		return nil, ErrTaskLimit
+	}
 	return cleanup, nil
 }
 
-func (sm *StreamManager) watchSession(ctx context.Context, hash string, index int, id int64, debounce bool) {
+func (sm *StreamManager) watchSession(ctx context.Context, hash string, index int, id int64, debounce bool) bool {
 	sm.mu.Lock()
 	state := sm.states[FileKey{Hash: hash, Index: index}]
 	if state == nil {
 		sm.mu.Unlock()
-		return
+		return false
 	}
 	session, ok := state.Sessions[id]
 	owner := state.Torrent
 	sm.mu.Unlock()
 	if !ok || owner == nil {
-		return
+		return false
 	}
-	sm.engine.RunStorageTask(func(engineCtx context.Context) {
+	return sm.engine.startTaskClass("stream", sm.engine.cfg.MaxActiveStreams+4, func(engineCtx context.Context) {
 		select {
 		case <-session.Done:
 			return
@@ -346,7 +353,7 @@ func (sm *StreamManager) addSession(hash string, fileIndex int, opts StreamOptio
 	if err != nil {
 		return 0, err
 	}
-	if !opts.AccountingOnly && !file.ReadyForDirectRead() {
+	if !opts.AccountingOnly && !file.CachedReadyForDirectRead() {
 		if err := sm.engine.admitPayloadLocked(mt); err != nil {
 			return 0, err
 		}
@@ -362,6 +369,10 @@ func (sm *StreamManager) addSession(hash string, fileIndex int, opts StreamOptio
 	logging.Infof("stream add requested hash=%s file_index=%d existing=%t", hash, fileIndex, exists)
 
 	if !exists {
+		if len(sm.states) >= 256 {
+			sm.mu.Unlock()
+			return 0, ErrTaskLimit
+		}
 		state = &StreamState{
 			Torrent:  mt,
 			Sessions: make(map[int64]StreamSession),
@@ -557,8 +568,9 @@ func (sm *StreamManager) scheduleDebounceLocked(hash string, fileIndex int) {
 
 	state.TimerVersion++
 	version := state.TimerVersion
+	state.debounceUntil = time.Now().Add(DebounceDelay)
 	state.DebounceTimer = time.AfterFunc(DebounceDelay, func() {
-		sm.engine.RunStorageTask(func(context.Context) { sm.expireDebounce(key, state, version) })
+		sm.engine.queueEvent(state.Torrent, fmt.Sprintf("debounce:%d", fileIndex), func(context.Context) { sm.expireDebounce(key, state, version) })
 	})
 	logging.Debugf("stream debounce scheduled hash=%s file_index=%d delay=%s", hash, fileIndex, DebounceDelay)
 }

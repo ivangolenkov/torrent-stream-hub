@@ -253,7 +253,7 @@ func (cl *Client) getLoggers() (log.Logger, *slog.Logger) {
 		// I see "warning - 1" become info by the time it reaches an Erigon/geth logger. I think
 		// we've lost the old default of debug somewhere along the way.
 		logger = log.NewLogger().WithDefaultLevel(log.Debug)
-		logger.SetHandlers(log.SlogHandlerAsHandler{slogger.Handler()})
+		logger.SetHandlers(log.SlogHandlerAsHandler{SlogHandler: slogger.Handler()})
 	}
 	// The unhandled case is that both logger and slogger are set. In this case, use them as normal.
 	return logger, slogger
@@ -1188,11 +1188,19 @@ func (t *Torrent) runHandshookConn(pc *PeerConn) error {
 	if connIsIpv6(pc.conn) {
 		torrent.Add("completed handshake over ipv6", 1)
 	}
+	// Refresh the advertised snapshot before registering the connection. Filesystem
+	// work must not hold the client lock shared by every torrent.
+	cl.unlock()
+	t.RefreshStorageCompletion()
+	cl.lock()
+	if t.closed.IsSet() || pc.closed.IsSet() {
+		return errors.New("connection closed during storage refresh")
+	}
 	if err := t.addPeerConn(pc); err != nil {
 		return fmt.Errorf("adding connection: %w", err)
 	}
 	defer t.dropConnection(pc)
-	pc.addBuiltinLtepProtocols(!cl.config.DisablePEX)
+	pc.addBuiltinLtepProtocols(!cl.config.DisablePEX && t.publicDiscoveryAllowedLocked())
 	for _, cb := range pc.callbacks.PeerConnAdded {
 		cb(pc)
 	}
@@ -1440,6 +1448,7 @@ func (cl *Client) newTorrentOpt(opts AddTorrentOpts) (t *Torrent) {
 		ignoreUnverifiedPieceCompletion: opts.IgnoreUnverifiedPieceCompletion,
 		initialPieceCheckDisabled:       opts.DisableInitialPieceCheck,
 		dataUploadDisallowed:            opts.DisallowDataUpload,
+		privateSafe:                     opts.PrivateSafe,
 	}
 	// Apply admission before metadata, discovery and readers can schedule work.
 	if opts.DisallowDataDownload {
@@ -1448,6 +1457,10 @@ func (cl *Client) newTorrentOpt(opts AddTorrentOpts) (t *Torrent) {
 	g.MakeMap(&t.webSeeds)
 	t.closedCtx, t.closedCtxCancel = context.WithCancelCause(context.Background())
 	t.getInfoCtx, t.getInfoCtxCancel = context.WithCancelCause(t.closedCtx)
+	t.publicDiscoveryCtx, t.stopPublicDiscovery = context.WithCancel(t.closedCtx)
+	if t.privateSafe {
+		t.stopPublicDiscovery()
+	}
 	var salt [8]byte
 	rand.Read(salt[:])
 	t.smartBanCache.Hash = func(b []byte) uint64 {
@@ -1576,6 +1589,8 @@ type AddTorrentOpts struct {
 	DisallowDataDownload bool
 	// Start without discovery/connections; intended for verified local reads.
 	DisableNetworking bool
+	// Disable DHT/PEX before metadata, including private magnets. Sticky on merge.
+	PrivateSafe bool
 }
 
 // Add or merge a torrent spec. Returns new if the torrent wasn't already in the client. See also
@@ -1597,6 +1612,12 @@ func (cl *Client) AddTorrentSpec(spec *TorrentSpec) (t *Torrent, new bool, err e
 // Many fields in the AddTorrentOpts field in TorrentSpec are ignored because the Torrent is already
 // added.
 func (t *Torrent) MergeSpec(spec *TorrentSpec) error {
+	if spec.PrivateSafe {
+		t.cl.lock()
+		t.privateSafe = true
+		t.enforceDiscoveryPolicyLocked()
+		t.cl.unlock()
+	}
 	if spec.DisplayName != "" {
 		t.SetDisplayName(spec.DisplayName)
 	}

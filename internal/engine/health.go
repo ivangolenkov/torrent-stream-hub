@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"torrent-stream-hub/internal/completion"
 	"torrent-stream-hub/internal/config"
 	"torrent-stream-hub/internal/logging"
 	"torrent-stream-hub/internal/models"
@@ -18,7 +19,6 @@ func (e *Engine) BTHealth() *models.BTHealth {
 	for _, mt := range e.managedTorrents {
 		mts = append(mts, mt)
 	}
-	now := time.Now()
 
 	health := &models.BTHealth{
 		SeedEnabled:                e.cfg.BTSeed,
@@ -32,7 +32,6 @@ func (e *Engine) BTHealth() *models.BTHealth {
 		ListenPort:                 e.cfg.TorrentPort,
 		ClientProfile:              normalizedBTClientProfile(e.cfg.BTClientProfile),
 		DownloadProfile:            e.cfg.BTDownloadProfile,
-		BenchmarkMode:              e.cfg.BTBenchmarkMode,
 		EstablishedConnsPerTorrent: e.cfg.BTEstablishedConns,
 		HalfOpenConnsPerTorrent:    e.cfg.BTHalfOpenConns,
 		TotalHalfOpenConns:         e.cfg.BTTotalHalfOpen,
@@ -59,6 +58,12 @@ func (e *Engine) BTHealth() *models.BTHealth {
 		Torrents:                   make([]models.BTTorrentHealth, 0, len(mts)),
 	}
 	e.mu.RUnlock()
+	if pc, ok := e.pieceCompletion.(interface{ Status() completion.Stats }); ok {
+		status := pc.Status()
+		health.PieceCompletionError = status.Error
+		health.PieceCompletionDropped = status.Dropped
+		health.PieceCompletionPending = status.Pending
+	}
 
 	for _, mt := range mts {
 		stats := mt.t.Stats()
@@ -68,7 +73,7 @@ func (e *Engine) BTHealth() *models.BTHealth {
 		if maxEstablishedConns == 0 {
 			maxEstablishedConns = e.cfg.BTEstablishedConns
 		}
-		if !mt.boostUntil.IsZero() && now.Before(mt.boostUntil) {
+		if !mt.boostUntil.IsZero() {
 			maxEstablishedConns = e.cfg.BTSwarmBoostConns
 		}
 		mtTrackerStatus := mt.trackerStatus
@@ -257,6 +262,13 @@ func (e *Engine) mapManagedTorrent(mt *ManagedTorrent) *models.Torrent {
 	}
 
 	if info != nil {
+		model.MetadataFormat = "v1"
+		if info.HasV2() {
+			model.MetadataFormat = "v2"
+			if info.HasV1() {
+				model.MetadataFormat = "hybrid"
+			}
+		}
 		model.PieceLength = info.PieceLength
 		model.NumPieces = info.NumPieces()
 		model.ProgressSource = "verified"

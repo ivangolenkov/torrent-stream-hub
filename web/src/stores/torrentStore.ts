@@ -16,7 +16,13 @@ export const useTorrentStore = defineStore('torrents', () => {
   const actionPending = ref<Record<string, boolean>>({});
   let dataVersion = 0;
   let listRequest = 0;
-  const confirmedPriorities = new Map<string, Map<number, number>>();
+  const detailVersions = new Map<string, string>();
+  const detailRequests = new Map<string, string>();
+  const detailsIdentity = (t?: Torrent) => t ? `${t.control?.record_id || ''}/${t.catalog_version || ''}/${t.control?.desired_revision || ''}` : '';
+  const priorityGeneration = new Map<string, number>();
+  const detailsKey = (t?: Torrent) => t ? `${priorityGeneration.get(t.hash) || 0}/${snapshotOrder.epoch || ''}/${detailsIdentity(t)}/${t.metadata_known}/${t.downloaded}/${t.progress_source}/${t.recheck?.status || ''}` : '';
+
+  const confirmedPriorities = new Map<string, { values: Map<number, number>; recordID?: string; commandAt: number; snapshotVersion?: string }>();
   const commandBarriers = new Map<string, number>();
   // Protect a confirmed pin from an older SSE event already in flight.
   const confirmedPermanent = new Set<string>();
@@ -24,7 +30,7 @@ export const useTorrentStore = defineStore('torrents', () => {
   const recordID = (hash: string) => torrents.value.find(t => t.hash === hash)?.control?.record_id;
   const sameRecord = (hash: string, issuedID?: string) => !issuedID || issuedID === recordID(hash);
   const clearEpochCaches = () => {
-    confirmedPriorities.clear(); confirmedPermanent.clear(); commandBarriers.clear();
+    confirmedPriorities.clear(); priorityGeneration.clear(); confirmedPermanent.clear(); commandBarriers.clear(); detailVersions.clear(); detailRequests.clear();
     files.value = {}; pieces.value = {}; pinErrors.value = {}; actionErrors.value = {};
   };
   const receipt = (result: CommandResult, issuedEpoch?: string) => {
@@ -60,11 +66,22 @@ export const useTorrentStore = defineStore('torrents', () => {
           delete pieces.value[t.hash];
         }
       }
-      const priorities = confirmedPriorities.get(t.hash);
-      if (priorities && t.files && [...priorities].every(([index, priority]) => t.files?.some(f => f.index === index && f.priority === priority))) confirmedPriorities.delete(t.hash);
+      const confirmed = confirmedPriorities.get(t.hash);
+      // acceptSnapshot has already fenced this version after every accepted
+      // receipt. The next authoritative snapshot may contain another client's
+      // command; it need not repeat our priority before superseding it.
+      if (confirmed && (version || (t.snapshot_at_ns && t.snapshot_at_ns >= confirmed.commandAt) ||
+          (confirmed.recordID && t.control?.record_id !== confirmed.recordID))) {
+        confirmedPriorities.delete(t.hash);
+        detailVersions.delete(t.hash);
+      }
+      const priorities = confirmedPriorities.get(t.hash)?.values;
       return [{ ...t, files: t.files?.map(f => priorities?.has(f.index) ? { ...f, priority: priorities.get(f.index)! } : f) }];
     });
     const hashes = new Set(data.map(t => t.hash));
+    for (const cache of [priorityGeneration, detailVersions, detailRequests]) {
+      for (const hash of cache.keys()) if (!hashes.has(hash)) cache.delete(hash);
+    }
     for (const hash of confirmedPriorities.keys()) if (!hashes.has(hash)) confirmedPriorities.delete(hash);
     for (const hash of confirmedPermanent) {
       if (!hashes.has(hash)) confirmedPermanent.delete(hash);
@@ -83,6 +100,8 @@ export const useTorrentStore = defineStore('torrents', () => {
     }
     if (selectedHash.value && !hashes.has(selectedHash.value)) selectedHash.value = null;
     torrents.value = data.map(t => confirmedPermanent.has(t.hash) ? { ...t, is_temporary: false } : t);
+    for (const t of torrents.value) if (t.files && selectedHash.value===t.hash) { files.value[t.hash] = t.files; detailVersions.set(t.hash, detailsKey(t)); }
+    if (selectedHash.value) void loadDetails(selectedHash.value);
   };
 
   const makePermanent = async (hash: string) => {
@@ -131,17 +150,27 @@ export const useTorrentStore = defineStore('torrents', () => {
     }
   };
 
+  const loadDetails = async (hash: string) => {
+    const torrent = torrents.value.find(t => t.hash === hash);
+    if (!torrent || selectedHash.value !== hash) return;
+    const key = detailsKey(torrent);
+    if (detailVersions.get(hash) === key || detailRequests.get(hash) === key) return;
+    const identity = detailsIdentity(torrent);
+    detailRequests.set(hash, key);
+    try {
+      const data = await apiClient.getFiles(hash);
+      if (selectedHash.value !== hash || detailsKey(torrents.value.find(t => t.hash === hash)) !== key) return;
+      if (data.detailsVersion && data.detailsVersion !== identity) return;
+      const priorities = confirmedPriorities.get(hash)?.values;
+      files.value[hash] = data.map(f => priorities?.has(f.index) ? { ...f, priority: priorities.get(f.index)! } : f);
+      detailVersions.set(hash, key);
+    } catch (e) { console.error(e); }
+    finally { if (detailRequests.get(hash) === key) detailRequests.delete(hash); }
+  };
+
   const selectTorrent = async (hash: string) => {
     selectedHash.value = hash;
-    const version = dataVersion;
-    if (!files.value[hash]) {
-      try {
-        const data = await apiClient.getFiles(hash);
-        if (version === dataVersion && selectedHash.value === hash && torrents.value.some(t => t.hash === hash)) files.value[hash] = data;
-      } catch (e) {
-        console.error(e);
-      }
-    }
+    await loadDetails(hash);
   };
 
   const fetchPieces = async (hash: string) => {
@@ -176,13 +205,15 @@ export const useTorrentStore = defineStore('torrents', () => {
     if (!sameRecord(hash, issuedID)) { await loadTorrents(); return; }
     const barrier = receipt(result, issuedEpoch);
     if (barrier === undefined) { await loadTorrents(); return; }
-    if (barrier) commandBarriers.set(hash, barrier);
+    if (barrier && !snapshotOrder.epoch) commandBarriers.set(hash, barrier);
     if (action === 'delete' && selectedHash.value === hash) {
       closeInspector();
     }
     if (action === 'delete') {
       torrents.value = torrents.value.filter(t => t.hash !== hash);
       confirmedPermanent.delete(hash);
+      confirmedPriorities.delete(hash);
+      priorityGeneration.delete(hash);
       delete files.value[hash];
     }
     await loadTorrents();
@@ -195,9 +226,10 @@ export const useTorrentStore = defineStore('torrents', () => {
     if (!sameRecord(hash, issuedID)) { await loadTorrents(); return; }
     const barrier = receipt(result, issuedEpoch);
     if (barrier === undefined) { await loadTorrents(); return; }
-    if (barrier) commandBarriers.set(hash, barrier);
+    if (barrier && !snapshotOrder.epoch) commandBarriers.set(hash, barrier);
     const current = torrents.value.find(t => t.hash === hash)?.files || files.value[hash] || [];
-    confirmedPriorities.set(hash, new Map(current.map(f => [f.index, priority])));
+    confirmedPriorities.set(hash, { values: new Map(current.map(f => [f.index, priority])), recordID: issuedID, commandAt: barrier, snapshotVersion: typeof result === 'number' ? undefined : result.snapshotVersion });
+    priorityGeneration.set(hash, (priorityGeneration.get(hash) || 0) + 1);
     for (const file of current) file.priority = priority;
     await loadTorrents();
   });
@@ -209,10 +241,11 @@ export const useTorrentStore = defineStore('torrents', () => {
     if (!sameRecord(hash, issuedID)) { await loadTorrents(); return; }
     const barrier = receipt(result, issuedEpoch);
     if (barrier === undefined) { await loadTorrents(); return; }
-    if (barrier) commandBarriers.set(hash, barrier);
-    const priorities = confirmedPriorities.get(hash) || new Map<number, number>();
+    if (barrier && !snapshotOrder.epoch) commandBarriers.set(hash, barrier);
+    const priorities = confirmedPriorities.get(hash)?.values || new Map<number, number>();
     priorities.set(index, priority);
-    confirmedPriorities.set(hash, priorities);
+    confirmedPriorities.set(hash, { values: priorities, recordID: issuedID, commandAt: barrier, snapshotVersion: typeof result === 'number' ? undefined : result.snapshotVersion });
+    priorityGeneration.set(hash, (priorityGeneration.get(hash) || 0) + 1);
     // Update local file state
     if (files.value[hash]) {
       const file = files.value[hash].find(f => f.index === index);

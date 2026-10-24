@@ -14,6 +14,24 @@ import (
 // Record/root command handles serialize lease admission with policy/deletion.
 // The release carries record identity, not a hash-only counter capability.
 func (uc *TorrentUseCase) AcquireTransfer(hash string, contexts ...context.Context) (func(), error) {
+	return uc.acquireTransfer(hash, true, contexts...)
+}
+
+func (uc *TorrentUseCase) AcquireHTTPTransfer(hash string, ctx context.Context, head bool) (func(), error) {
+	slot, err := uc.engine.AcquireHTTPTransfer(ctx, head)
+	if err != nil {
+		return nil, err
+	}
+	lease, err := uc.acquireTransfer(hash, !head, ctx)
+	if err != nil {
+		slot()
+		return nil, err
+	}
+	var once sync.Once
+	return func() { once.Do(func() { lease(); slot() }) }, nil
+}
+
+func (uc *TorrentUseCase) acquireTransfer(hash string, playback bool, contexts ...context.Context) (func(), error) {
 	release, err := uc.lockRecord(hash, contexts...)
 	if err != nil {
 		return nil, err
@@ -55,9 +73,12 @@ func (uc *TorrentUseCase) AcquireTransfer(hash string, contexts ...context.Conte
 				return
 			}
 			uc.transfers[hash]--
+			if playback {
+				uc.protectedUntil[hash] = time.Now().Add(engine.DebounceDelay)
+			}
 			if uc.transfers[hash] == 0 {
 				delete(uc.transfers, hash)
-				uc.protectedUntil[hash] = time.Now().Add(engine.DebounceDelay)
+
 			}
 		})
 	}, nil
@@ -69,21 +90,15 @@ func (uc *TorrentUseCase) MakePermanent(hash string, contexts ...context.Context
 		return err
 	}
 	defer release()
-	expected := uc.engine.GetRawTorrent(hash)
 	i, err := uc.currentIntent(hash)
 	if err != nil {
 		return err
 	}
-	found, err := uc.repo.MakePermanent(hash)
+	_, err = uc.runIntentCommand(i.Version, false, false, func() (models.IntentVersion, error) {
+		return uc.repo.CommitAddMetadata(i.Version, models.UserMetadata{}, true)
+	}, nil)
 	if err != nil {
 		return err
-	}
-	if !found {
-		return TorrentNotFoundError{Hash: hash}
-	}
-	i.Version.Revision++
-	if err := bindIncrementalRuntime(uc.engine, uc.repo, i.Version); err != nil {
-		return uc.failedIntentApply(expected, i.Version, "runtime_bind_failed", err)
 	}
 	logging.Infof("torrent made permanent hash=%s", hash)
 	return nil
@@ -111,15 +126,11 @@ func (uc *TorrentUseCase) finishAddLocked(t *models.Torrent, metadata TorrentMet
 		if err != nil {
 			return nil, err
 		}
-		if metadata != (TorrentMetadata{}) {
-			if _, err := uc.repo.UpdateUserMetadata(i.Version, models.UserMetadata{Title: metadata.Title, Data: metadata.Data, Poster: metadata.Poster, Category: metadata.Category}); err != nil {
-				return nil, err
-			}
-		}
-		if !temporary {
-			if _, err := uc.repo.MakePermanent(t.Hash); err != nil {
-				return nil, err
-			}
+		_, err = uc.runIntentCommand(i.Version, false, false, func() (models.IntentVersion, error) {
+			return uc.repo.CommitAddMetadata(i.Version, models.UserMetadata{Title: metadata.Title, Data: metadata.Data, Poster: metadata.Poster, Category: metadata.Category}, !temporary)
+		}, nil)
+		if err != nil {
+			return nil, err
 		}
 	}
 	saved, err := uc.repo.GetTorrent(t.Hash)
@@ -133,16 +144,11 @@ func (uc *TorrentUseCase) finishAddLocked(t *models.Torrent, metadata TorrentMet
 	}
 	expected := uc.engine.GetRawTorrent(t.Hash)
 	if existing == nil {
-		if err := uc.engine.FinishRestore(t.Hash, models.StateQueued); err != nil {
-			return nil, uc.failedIntentApply(expected, i.Version, "runtime_apply_failed", err)
+		if err := uc.applyCommittedIntent(expected, i.Version, true, func() error {
+			return uc.engine.FinishRestore(t.Hash, models.StateQueued)
+		}); err != nil {
+			return nil, err
 		}
-	}
-	bind := bindAppliedRuntime
-	if existing != nil {
-		bind = bindIncrementalRuntime
-	}
-	if err := bind(uc.engine, uc.repo, i.Version); err != nil {
-		return nil, uc.failedIntentApply(expected, i.Version, "runtime_bind_failed", err)
 	}
 	t.IsTemporary = temporary && (existing == nil || existing.IsTemporary)
 	result, err := uc.GetTorrent(t.Hash)

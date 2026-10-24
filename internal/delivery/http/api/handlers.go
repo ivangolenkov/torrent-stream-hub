@@ -62,14 +62,18 @@ func (h *APIHandler) GetAllTorrents(w http.ResponseWriter, r *http.Request) {
 	}
 	logging.Debugf("api get torrents count=%d", len(torrents))
 	w.Header().Set("X-Hub-Snapshot", version)
+	if r.URL.Query().Get("view") == "compact" {
+		torrents = usecase.CompactTorrents(torrents)
+	}
 	response.JSON(w, http.StatusOK, torrents)
 }
 
 type AddTorrentReq struct {
-	Link       string `json:"link"`
-	SavePath   string `json:"save_path"`
-	Sequential bool   `json:"sequential"`
-	Poster     string `json:"poster"`
+	PrivateSafe bool   `json:"private_safe"`
+	Link        string `json:"link"`
+	SavePath    string `json:"save_path"`
+	Sequential  bool   `json:"sequential"`
+	Poster      string `json:"poster"`
 }
 
 func (h *APIHandler) AddTorrent(w http.ResponseWriter, r *http.Request) {
@@ -87,7 +91,7 @@ func (h *APIHandler) AddTorrent(w http.ResponseWriter, r *http.Request) {
 	}
 
 	logging.Infof("api add torrent %s", logging.SafeMagnetSummary(req.Link))
-	t, err := h.uc.AddMagnetWithMetadata(req.Link, usecase.TorrentMetadata{Poster: req.Poster})
+	t, err := h.uc.AddMagnetWithMetadata(req.Link, usecase.TorrentMetadata{Poster: req.Poster, PrivateSafe: req.PrivateSafe})
 	if err != nil {
 		if errors.Is(err, engine.ErrDownloadBlocked) || errors.Is(err, usecase.ErrStorageConflict) {
 			response.Error(w, http.StatusConflict, err.Error())
@@ -273,6 +277,9 @@ func (h *APIHandler) GetTorrentFiles(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if t.Control != nil {
+		w.Header().Set("X-Hub-Details", fmt.Sprintf("%s/%s/%d", t.Control.RecordID, t.CatalogVersion, t.Control.DesiredRevision))
+	}
 	logging.Debugf("api get torrent files hash=%s files=%d", hash, len(t.Files))
 	response.JSON(w, http.StatusOK, t.Files)
 }
@@ -318,7 +325,10 @@ func (h *APIHandler) SSEEvents(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Connection", "keep-alive")
 
 	ch := make(chan usecase.PublishedSnapshot, 1)
-	h.syncWorker.AddSnapshotClient(ch)
+	if !h.syncWorker.AddSnapshotClient(ch) {
+		response.Error(w, http.StatusServiceUnavailable, "SSE subscriber limit reached")
+		return
+	}
 	defer h.syncWorker.RemoveSnapshotClient(ch)
 	logging.Infof("api sse client connected remote=%s", r.RemoteAddr)
 	heartbeat := time.NewTicker(15 * time.Second)
@@ -339,7 +349,11 @@ func (h *APIHandler) SSEEvents(w http.ResponseWriter, r *http.Request) {
 			if !ok {
 				return
 			}
-			if !write(fmt.Sprintf("id: %s\ndata: %s\n\n", data.Version, data.Data)) {
+			payload := data.Data
+			if r.URL.Query().Get("view") == "compact" && data.Compact != nil {
+				payload = data.Compact
+			}
+			if !write(fmt.Sprintf("id: %s\ndata: %s\n\n", data.Version, payload)) {
 				return
 			}
 		case <-heartbeat.C:

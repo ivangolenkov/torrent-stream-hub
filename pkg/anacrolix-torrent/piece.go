@@ -482,8 +482,5 @@ func (p *Piece) publishStateChange() {
 }
 
 func (p *Piece) fileExtents(offsetIntoPiece int64) iter.Seq2[int, segments.Extent] {
-	return p.t.fileSegmentsIndex.Unwrap().LocateIter(segments.Extent{
-		p.torrentBeginOffset() + offsetIntoPiece,
-		int64(p.length()) - offsetIntoPiece,
-	})
+	return p.t.fileSegmentsIndex.Unwrap().LocateIter(segments.Extent{Start: p.torrentBeginOffset() + offsetIntoPiece, Length: int64(p.length()) - offsetIntoPiece})
 }

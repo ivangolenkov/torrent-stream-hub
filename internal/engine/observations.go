@@ -180,6 +180,13 @@ func (e *Engine) FailIntentApply(expected *torrent.Torrent, v models.IntentVersi
 // replaces it. Fence and sequence travel with the captured facts, not a later
 // repository lookup. Ordinary REST/health reads never advance this sequence.
 func (e *Engine) CaptureObservation(hash string) (*models.Torrent, models.RuntimeObservation, error) {
+	e.mu.RLock()
+	expected := e.managedTorrents[hash]
+	e.mu.RUnlock()
+	if expected == nil {
+		return nil, models.RuntimeObservation{}, TorrentNotFoundError{Hash: hash}
+	}
+	expected.t.RefreshStorageCompletion()
 	e.admissionMu.Lock()
 	defer e.admissionMu.Unlock()
 	e.mu.RLock()
@@ -187,6 +194,9 @@ func (e *Engine) CaptureObservation(hash string) (*models.Torrent, models.Runtim
 	e.mu.RUnlock()
 	if mt == nil {
 		return nil, models.RuntimeObservation{}, TorrentNotFoundError{Hash: hash}
+	}
+	if mt != expected {
+		return nil, models.RuntimeObservation{}, ErrOperationConflict
 	}
 	mt.mu.Lock()
 	if mt.runtimeFence.Attachment == "" || mt.observationSequence == math.MaxInt64 {

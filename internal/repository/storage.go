@@ -69,3 +69,27 @@ func (r *TorrentRepo) SaveStorageAlias(m *StorageMapping) error {
 	}
 	return nil
 }
+
+// StorageOwner resolves an alias to its persisted record without deriving an
+// identity from a filesystem path. Ambiguous legacy ownership is a conflict.
+func (r *TorrentRepo) StorageOwner(hash string) (string, error) {
+	rows, err := r.db.DB().Query(`SELECT t.hash FROM torrents t WHERE t.hash=? OR t.hash IN (
+ SELECT s.hash FROM torrent_storage s JOIN torrent_storage alias ON s.root=alias.root
+ WHERE alias.hash=? AND s.root!='')`, hash, hash)
+	if err != nil {
+		return "", err
+	}
+	defer rows.Close()
+	var owner string
+	for rows.Next() {
+		var next string
+		if err := rows.Scan(&next); err != nil {
+			return "", err
+		}
+		if owner != "" && owner != next {
+			return "", ErrStateConflict
+		}
+		owner = next
+	}
+	return owner, rows.Err()
+}

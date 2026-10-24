@@ -20,7 +20,7 @@ func makeTypicalRequests() map[Request]struct{} {
 	m := make(map[Request]struct{})
 	for p := pp.Integer(0); p < 4; p++ {
 		for c := pp.Integer(0); c < 16; c++ {
-			m[Request{p, ChunkSpec{c * defaultChunkSize, defaultChunkSize}}] = struct{}{}
+			m[Request{Index: p, ChunkSpec: ChunkSpec{Begin: c * defaultChunkSize, Length: defaultChunkSize}}] = struct{}{}
 		}
 	}
 	return m
@@ -75,4 +75,22 @@ func TestForLoopRepeatItem(t *testing.T) {
 		// Range ignores any mutation to i.
 		qt.Assert(t, qt.DeepEquals(seen, []int{0, 1, 2, 3}))
 	})
+}
+
+func TestPeerTraceIdentityRoundTripDoesNotReconstructPointer(t *testing.T) {
+	original := peerId{Peer: &Peer{}, ptr: 12345}
+	data, err := original.GobEncode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded peerId
+	if err := decoded.GobDecode(data); err != nil {
+		t.Fatal(err)
+	}
+	if decoded.Uintptr() != original.Uintptr() || decoded.Peer != nil {
+		t.Fatal("trace identity became live pointer")
+	}
+	if err := decoded.GobDecode(data[:1]); err == nil {
+		t.Fatal("accepted truncated identity")
+	}
 }

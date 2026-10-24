@@ -187,7 +187,7 @@ func (e *Engine) OpenStreamSource(ctx context.Context, hash string, index int, i
 		return nil, fmt.Errorf("file index out of bounds: %d", index)
 	}
 	file := files[index]
-	expected := mt.rememberExpectedPayload(index, file.ReadyForDirectRead())
+	expected := mt.rememberExpectedPayload(index, file.CachedReadyForDirectRead())
 	mt.t.RefreshStorageCompletion()
 	if expected && !file.ReadyForDirectRead() {
 		if err := e.detectMissingExpectedPayload(mt, file); err != nil {

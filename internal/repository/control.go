@@ -1,13 +1,12 @@
 package repository
 
 import (
-	"database/sql"
 	"torrent-stream-hub/internal/models"
 )
 
 // Called in the same read transaction as catalog/selection/workflows. Persisted
 // applied_revision is historical, not acknowledgment by the current runtime.
-func loadControls(tx *sql.Tx, torrents map[string]*models.Torrent) error {
+func loadControls(tx sqlReader, torrents map[string]*models.Torrent) error {
 	if len(torrents) == 0 {
 		return nil
 	}

@@ -90,6 +90,9 @@ func (e *Engine) RestoreTorrent(spec *torrent.TorrentSpec, saved *models.Torrent
 	}
 	spec.DisallowDataDownload = true
 	spec.DisallowDataUpload = true
+	if source, err := torrent.TorrentSpecFromMagnetUri(saved.SourceURI); err == nil && source.PrivateSafe {
+		spec.PrivateSafe = true
+	}
 	inactive := spec.DisableNetworking || saved.State == models.StatePaused || saved.State == models.StateError || saved.State == models.StateMissingFiles
 	if inactive {
 		spec.DisableNetworking = true

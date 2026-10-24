@@ -1,6 +1,7 @@
 package repository
 
 import (
+	"context"
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
@@ -105,7 +106,7 @@ func (r *TorrentRepo) AttachRuntime(v models.IntentVersion) (models.RuntimeFence
 	return f, nil
 }
 
-func (r *TorrentRepo) SaveRuntimeObservation(o models.RuntimeObservation) error {
+func (r *TorrentRepo) SaveRuntimeObservation(o models.RuntimeObservation, contexts ...context.Context) error {
 	if o.Fence.Hash == "" || o.Fence.RecordID == "" || o.Fence.Attachment == "" || o.Fence.Revision < 1 || o.Sequence < 1 || o.AppliedRevision < 0 || o.AppliedRevision > o.Fence.Revision || o.VerifiedBytes < 0 {
 		return fmt.Errorf("invalid runtime observation")
 	}
@@ -122,7 +123,7 @@ func (r *TorrentRepo) SaveRuntimeObservation(o models.RuntimeObservation) error 
 		seen[f.Index] = true
 		fileBytes += f.VerifiedBytes
 	}
-	tx, err := r.db.BeginWrite()
+	tx, err := r.db.BeginWrite(contexts...)
 	if err != nil {
 		return err
 	}
@@ -163,19 +164,39 @@ func (r *TorrentRepo) SaveRuntimeObservation(o models.RuntimeObservation) error 
 			return fmt.Errorf("verified bytes exceed catalog size")
 		}
 	}
+	// Validate the catalog once; unchanged observations do not update file rows.
+	rows, err := tx.Query(`SELECT "index",size,downloaded FROM files WHERE hash=?`, o.Fence.Hash)
+	if err != nil {
+		return err
+	}
+	type fileValue struct{ size, bytes int64 }
+	values := make(map[int]fileValue, len(o.Files))
+	for rows.Next() {
+		var index int
+		var v fileValue
+		if err := rows.Scan(&index, &v.size, &v.bytes); err != nil {
+			rows.Close()
+			return err
+		}
+		values[index] = v
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
 	for _, f := range o.Files {
-		res, err = tx.Exec(`UPDATE files SET downloaded=CASE WHEN ? THEN ? ELSE downloaded END WHERE hash=? AND "index"=? AND ?<=size`, verified, f.VerifiedBytes, o.Fence.Hash, f.Index, f.VerifiedBytes)
-		if err != nil {
-			return err
-		}
-		n, err = res.RowsAffected()
-		if err != nil {
-			return err
-		}
-		if n != 1 {
+		current, ok := values[f.Index]
+		if !ok || f.VerifiedBytes > current.size {
 			return ErrFileNotFound
 		}
+		if verified && f.VerifiedBytes != current.bytes {
+			if _, err := tx.Exec(`UPDATE files SET downloaded=? WHERE hash=? AND "index"=?`, f.VerifiedBytes, o.Fence.Hash, f.Index); err != nil {
+				return err
+			}
+		}
 	}
+
 	return tx.Commit()
 }
 

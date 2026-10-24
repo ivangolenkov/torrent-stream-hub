@@ -86,7 +86,7 @@ func (me mmapStoragePiece) Flush() error {
 }
 
 func (me mmapStoragePiece) pieceKey() metainfo.PieceKey {
-	return metainfo.PieceKey{me.t.infoHash, me.p.Index()}
+	return metainfo.PieceKey{InfoHash: me.t.infoHash, Index: me.p.Index()}
 }
 
 func (sp mmapStoragePiece) Completion() Completion {

@@ -1,7 +1,10 @@
 package repository
 
 import (
+	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"math"
 	"path"
@@ -26,11 +29,30 @@ func requireFence(tx sqlWriter, f models.RuntimeFence) error {
 
 // SaveCatalog accepts only current runtime metainfo. It does not create parent
 // records or accept selection/progress/user metadata; existing priorities survive.
-func (r *TorrentRepo) SaveCatalog(f models.RuntimeFence, c models.TorrentCatalog) error {
+func (r *TorrentRepo) SaveCatalog(f models.RuntimeFence, c models.TorrentCatalog, contexts ...context.Context) error {
 	if err := validateCatalog(c); err != nil {
 		return err
 	}
-	tx, err := r.db.BeginWrite()
+	// A matching immutable catalog needs no writer reservation. The read fence
+	// is the linearization point of this no-op, so later commands cannot be applied.
+	ctx := context.Background()
+	if len(contexts) > 0 && contexts[0] != nil {
+		ctx = contexts[0]
+	}
+	var digest string
+	err := r.db.DB().QueryRowContext(ctx, `SELECT t.catalog_version FROM torrents t JOIN torrent_intents i ON i.hash=t.hash
+ WHERE i.hash=? AND i.record_id=? AND i.revision=? AND i.runtime_attachment=? AND t.deletion_mode=''
+ AND NOT EXISTS(SELECT 1 FROM torrent_storage s WHERE s.hash=i.hash AND s.state='moving')`, f.Hash, f.RecordID, f.Revision, f.Attachment).Scan(&digest)
+	if err == sql.ErrNoRows {
+		return ErrStateConflict
+	}
+	if err != nil {
+		return err
+	}
+	if digest == catalogVersion(c) {
+		return nil
+	}
+	tx, err := r.db.BeginWrite(contexts...)
 	if err != nil {
 		return err
 	}
@@ -44,19 +66,47 @@ func (r *TorrentRepo) SaveCatalog(f models.RuntimeFence, c models.TorrentCatalog
 	return tx.Commit()
 }
 
+func catalogVersion(c models.TorrentCatalog) string {
+	data, _ := json.Marshal(c)
+	return fmt.Sprintf("%x", sha256.Sum256(data))
+}
+
 func validateCatalog(c models.TorrentCatalog) error {
-	if c.Size < 0 || c.PieceLength <= 0 || c.NumPieces < 0 {
+	if c.Size < 0 || c.PieceLength <= 0 || c.NumPieces < 0 ||
+		(c.Format != "" && c.Format != "v1" && c.Format != "v2" && c.Format != "hybrid") {
 		return fmt.Errorf("invalid catalog metadata")
 	}
-	var size int64
+	var size, offset, pieces int64
+	aligned := c.Format == "v2" || c.Format == "hybrid"
 	for i, file := range c.Files {
-		if file.Index != i || file.Size < 0 || file.Offset != size || file.Size > math.MaxInt64-size || payload.ValidateRelative(file.Path) != nil {
+		if file.Index != i || file.Size < 0 || file.Offset != offset || file.Size > math.MaxInt64-size || file.Size > math.MaxInt64-offset || payload.ValidateRelative(file.Path) != nil {
 			return fmt.Errorf("invalid file catalog")
 		}
 		size += file.Size
+		offset += file.Size
+		if aligned {
+			pieces += file.Size / c.PieceLength
+			if rem := file.Size % c.PieceLength; rem != 0 {
+				pieces++
+				padding := c.PieceLength - rem
+				if padding > math.MaxInt64-offset {
+					return fmt.Errorf("catalog offset overflow")
+				}
+				offset += padding
+			}
+		}
 	}
 	if size != c.Size {
 		return fmt.Errorf("inconsistent catalog size")
+	}
+	if !aligned {
+		pieces = size / c.PieceLength
+		if size%c.PieceLength != 0 {
+			pieces++
+		}
+	}
+	if c.Format != "" && pieces != int64(c.NumPieces) {
+		return fmt.Errorf("inconsistent catalog piece count")
 	}
 	return nil
 }
@@ -65,10 +115,14 @@ func saveCatalogTx(tx sqlWriter, hash string, c models.TorrentCatalog) error {
 	var known bool
 	var oldSize, oldPiece int64
 	var oldCount int
-	if err := tx.QueryRow(`SELECT metadata_known,size,piece_length,num_pieces FROM torrents WHERE hash=?`, hash).Scan(&known, &oldSize, &oldPiece, &oldCount); err != nil {
+	var oldFormat string
+	if err := tx.QueryRow(`SELECT metadata_known,size,piece_length,num_pieces,metadata_format FROM torrents WHERE hash=?`, hash).Scan(&known, &oldSize, &oldPiece, &oldCount, &oldFormat); err != nil {
 		return err
 	}
 	if known && (oldSize != c.Size || oldPiece != c.PieceLength || oldCount != c.NumPieces) {
+		return ErrStateConflict
+	}
+	if oldFormat != "" && oldFormat != c.Format {
 		return ErrStateConflict
 	}
 	// A metainfo generation cannot replace an already known file identity.
@@ -93,7 +147,7 @@ func saveCatalogTx(tx sqlWriter, hash string, c models.TorrentCatalog) error {
 		// Legacy snapshots sometimes stored the root-prefixed metainfo path.
 		// Normalize only this exact representation, never probe filesystem paths.
 		legacyPath := !known && storedPath == path.Join(c.Name, file.Path)
-		if storedPath != file.Path && !legacyPath || bytes != file.Size || offsetKnown && offset != file.Offset {
+		if storedPath != file.Path && !legacyPath || bytes != file.Size || offsetKnown && offset != file.Offset && (oldFormat != "" || c.Format == "") {
 			rows.Close()
 			return ErrStateConflict
 		}
@@ -103,7 +157,7 @@ func saveCatalogTx(tx sqlWriter, hash string, c models.TorrentCatalog) error {
 		return err
 	}
 	rows.Close()
-	if _, err := tx.Exec(`UPDATE torrents SET name=?,size=?,piece_length=?,num_pieces=?,metadata_known=1 WHERE hash=?`, c.Name, c.Size, c.PieceLength, c.NumPieces, hash); err != nil {
+	if _, err := tx.Exec(`UPDATE torrents SET name=?,size=?,piece_length=?,num_pieces=?,metadata_known=1,metadata_format=?,catalog_version=? WHERE hash=?`, c.Name, c.Size, c.PieceLength, c.NumPieces, c.Format, catalogVersion(c), hash); err != nil {
 		return err
 	}
 	stmt, err := tx.Prepare(`INSERT INTO files(hash,"index",path,size,downloaded,priority,is_media,file_offset,offset_known)
@@ -155,17 +209,45 @@ func (r *TorrentRepo) CreateTorrent(n models.NewTorrentRecord) error {
 // UpdateUserMetadata preserves the historical nonempty-field patch contract.
 // The explicit column list cannot write runtime state, bytes or catalog fields.
 func (r *TorrentRepo) UpdateUserMetadata(v models.IntentVersion, m models.UserMetadata) (models.IntentVersion, error) {
+	return r.CommitAddMetadata(v, m, false)
+}
+
+// CommitAddMetadata is one command, even when metadata and permanence both
+// change. Empty fields preserve the existing value. A no-op retains its revision
+// and cannot acknowledge an earlier failed runtime apply.
+func (r *TorrentRepo) CommitAddMetadata(v models.IntentVersion, m models.UserMetadata, permanent bool) (models.IntentVersion, error) {
 	tx, err := r.db.BeginWrite()
 	if err != nil {
 		return v, err
 	}
 	defer tx.Rollback()
+	var old models.UserMetadata
+	var temporary bool
+	var current models.IntentVersion
+	current.Hash = v.Hash
+	if err := tx.QueryRow(`SELECT i.record_id,i.revision,t.title,t.data,t.poster,t.category,t.is_temporary
+		FROM torrents t JOIN torrent_intents i ON i.hash=t.hash WHERE t.hash=? AND t.deletion_mode=''
+		AND NOT EXISTS(SELECT 1 FROM torrent_storage s WHERE s.hash=t.hash AND s.state='moving')`, v.Hash).
+		Scan(&current.RecordID, &current.Revision, &old.Title, &old.Data, &old.Poster, &old.Category, &temporary); err != nil {
+		if err == sql.ErrNoRows {
+			return v, ErrStateConflict
+		}
+		return v, err
+	}
+	if current != v {
+		return v, ErrStateConflict
+	}
+	changed := permanent && temporary || m.Title != "" && m.Title != old.Title || m.Data != "" && m.Data != old.Data || m.Poster != "" && m.Poster != old.Poster || m.Category != "" && m.Category != old.Category
+	if !changed {
+		return v, tx.Commit()
+	}
 	if err := advanceIntent(tx, v); err != nil {
 		return v, err
 	}
 	if _, err := tx.Exec(`UPDATE torrents SET title=CASE WHEN ?!='' THEN ? ELSE title END,
         data=CASE WHEN ?!='' THEN ? ELSE data END,poster=CASE WHEN ?!='' THEN ? ELSE poster END,
-        category=CASE WHEN ?!='' THEN ? ELSE category END WHERE hash=?`, m.Title, m.Title, m.Data, m.Data, m.Poster, m.Poster, m.Category, m.Category, v.Hash); err != nil {
+		category=CASE WHEN ?!='' THEN ? ELSE category END,
+		is_temporary=CASE WHEN ? THEN 0 ELSE is_temporary END WHERE hash=?`, m.Title, m.Title, m.Data, m.Data, m.Poster, m.Poster, m.Category, m.Category, permanent, v.Hash); err != nil {
 		return v, err
 	}
 	if err := tx.Commit(); err != nil {

@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 	"torrent-stream-hub/internal/delivery/http/api"
+	"torrent-stream-hub/internal/metafetch"
 	"torrent-stream-hub/internal/usecase"
 
 	"github.com/anacrolix/torrent/metainfo"
@@ -46,6 +47,7 @@ func TestTemporaryAddAllLinkSourcesAndPromotion(t *testing.T) {
 					}
 				}))
 				defer server.Close()
+				h.fetcher, _ = metafetch.New("127.0.0.1/32")
 				link = server.URL
 				if source == "http-file" {
 					hash = fileHash
@@ -104,15 +106,8 @@ func TestTemporaryHTTPTransfersBlockCleanup(t *testing.T) {
 			if err := os.WriteFile(path, data, 0600); err != nil {
 				t.Fatal(err)
 			}
-			file, err := h.uc.GetTorrentFile(old.Hash, 0)
-			if err != nil {
+			if _, err := h.uc.Recheck(old.Hash); err != nil {
 				t.Fatal(err)
-			}
-			raw := file.Torrent()
-			for i := 0; i < raw.NumPieces(); i++ {
-				if err := raw.Piece(i).VerifyData(); err != nil {
-					t.Fatal(err)
-				}
 			}
 			deadline := time.Now().Add(3 * time.Second)
 			for {

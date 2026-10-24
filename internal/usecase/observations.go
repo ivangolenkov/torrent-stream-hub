@@ -1,6 +1,7 @@
 package usecase
 
 import (
+	"context"
 	"errors"
 	"github.com/anacrolix/torrent"
 
@@ -58,7 +59,7 @@ func bindVerificationRuntime(e *engine.Engine, r *repository.TorrentRepo, v mode
 	return e.BindObservedRuntime(expected, f)
 }
 
-func capturePersistableRuntime(e *engine.Engine, r *repository.TorrentRepo, hash string) (*models.Torrent, error) {
+func capturePersistableRuntime(e *engine.Engine, r *repository.TorrentRepo, hash string, contexts ...context.Context) (*models.Torrent, error) {
 	expected, f := e.RuntimeBinding(hash)
 	if expected == nil {
 		return nil, engine.ErrTorrentNotFound
@@ -85,18 +86,18 @@ func capturePersistableRuntime(e *engine.Engine, r *repository.TorrentRepo, hash
 	}
 	if t.MetadataKnown {
 		catalog := runtimeCatalog(t)
-		if err := r.SaveCatalog(o.Fence, catalog); err != nil {
+		if err := r.SaveCatalog(o.Fence, catalog, contexts...); err != nil {
 			return nil, err
 		}
 	}
-	if err := r.SaveRuntimeObservation(o); err != nil {
+	if err := r.SaveRuntimeObservation(o, contexts...); err != nil {
 		return nil, err
 	}
 	return t, nil
 }
 
 func runtimeCatalog(t *models.Torrent) models.TorrentCatalog {
-	c := models.TorrentCatalog{Name: t.Name, Size: t.Size, PieceLength: t.PieceLength, NumPieces: t.NumPieces}
+	c := models.TorrentCatalog{Format: t.MetadataFormat, Name: t.Name, Size: t.Size, PieceLength: t.PieceLength, NumPieces: t.NumPieces}
 	for _, f := range t.Files {
 		c.Files = append(c.Files, models.FileCatalog{Index: f.Index, Path: f.Path, Size: f.Size, Offset: f.Offset, IsMedia: f.IsMedia})
 	}

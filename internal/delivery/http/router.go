@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"torrent-stream-hub/internal/delivery/http/api"
+	"torrent-stream-hub/internal/delivery/http/budget"
 	"torrent-stream-hub/internal/delivery/http/response"
 	"torrent-stream-hub/internal/delivery/http/torrserver"
 	"torrent-stream-hub/internal/logging"
@@ -33,7 +34,7 @@ func NewRouterWithLogs(uc *usecase.TorrentUseCase, sw *usecase.SyncWorker, logs 
 		AllowedOrigins:   []string{"*"},
 		AllowedMethods:   []string{"GET", "HEAD", "POST", "PUT", "DELETE", "OPTIONS"},
 		AllowedHeaders:   []string{"*"},
-		ExposedHeaders:   []string{"Accept-Ranges", "Content-Disposition", "Content-Length", "Content-Range", "Content-Type", "X-Hub-Snapshot"},
+		ExposedHeaders:   []string{"Accept-Ranges", "Content-Disposition", "Content-Length", "Content-Range", "Content-Type", "X-Hub-Snapshot", "X-Hub-Details"},
 		AllowCredentials: false,
 		MaxAge:           300,
 	}))
@@ -42,6 +43,7 @@ func NewRouterWithLogs(uc *usecase.TorrentUseCase, sw *usecase.SyncWorker, logs 
 	r.Use(middleware.RealIP)
 	r.Use(accessLogger)
 	r.Use(jsonRecoverer)
+	r.Use(budget.Bodies(budget.Defaults()))
 
 	// TorrServer Layer
 	torrServerHandler := torrserver.NewTorrServerHandler(uc)

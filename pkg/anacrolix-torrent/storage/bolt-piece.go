@@ -29,7 +29,7 @@ func (me *boltPiece) pc() PieceCompletionGetSetter {
 }
 
 func (me *boltPiece) pk() metainfo.PieceKey {
-	return metainfo.PieceKey{me.ih, me.p.Index()}
+	return metainfo.PieceKey{InfoHash: me.ih, Index: me.p.Index()}
 }
 
 func (me *boltPiece) Completion() Completion {

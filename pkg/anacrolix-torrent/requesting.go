@@ -3,17 +3,16 @@ package torrent
 import (
 	"cmp"
 	"context"
+	"encoding/binary"
 	"encoding/gob"
 	"fmt"
-	"reflect"
 	"runtime/pprof"
+	"strconv"
 	"time"
-	"unsafe"
 
 	"github.com/RoaringBitmap/roaring"
 	g "github.com/anacrolix/generics"
 	"github.com/anacrolix/generics/heap"
-	"github.com/anacrolix/log"
 	"github.com/anacrolix/multiless"
 
 	requestStrategy "github.com/anacrolix/torrent/internal/request-strategy"
@@ -49,28 +48,28 @@ func (p peerId) Uintptr() uintptr {
 	return p.ptr
 }
 
-func (p peerId) GobEncode() (b []byte, _ error) {
-	*(*reflect.SliceHeader)(unsafe.Pointer(&b)) = reflect.SliceHeader{
-		Data: uintptr(unsafe.Pointer(&p.ptr)),
-		Len:  int(unsafe.Sizeof(p.ptr)),
-		Cap:  int(unsafe.Sizeof(p.ptr)),
+// Trace identities are numeric diagnostics, not serialized Go pointers. A
+// decoded trace must never fabricate a GC-visible pointer from an old address.
+func (p peerId) GobEncode() ([]byte, error) {
+	b := make([]byte, strconv.IntSize/8)
+	if len(b) == 8 {
+		binary.NativeEndian.PutUint64(b, uint64(p.ptr))
+	} else {
+		binary.NativeEndian.PutUint32(b, uint32(p.ptr))
 	}
-	return
+	return b, nil
 }
 
 func (p *peerId) GobDecode(b []byte) error {
-	if uintptr(len(b)) != unsafe.Sizeof(p.ptr) {
-		panic(len(b))
+	if len(b) != strconv.IntSize/8 {
+		return fmt.Errorf("invalid peer identity length: %d", len(b))
 	}
-	ptr := unsafe.Pointer(&b[0])
-	p.ptr = *(*uintptr)(ptr)
-	log.Printf("%p", ptr)
-	dst := reflect.SliceHeader{
-		Data: uintptr(unsafe.Pointer(&p.Peer)),
-		Len:  int(unsafe.Sizeof(p.Peer)),
-		Cap:  int(unsafe.Sizeof(p.Peer)),
+	p.Peer = nil
+	if len(b) == 8 {
+		p.ptr = uintptr(binary.NativeEndian.Uint64(b))
+	} else {
+		p.ptr = uintptr(binary.NativeEndian.Uint32(b))
 	}
-	copy(*(*[]byte)(unsafe.Pointer(&dst)), b)
 	return nil
 }
 

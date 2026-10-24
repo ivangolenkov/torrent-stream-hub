@@ -25,11 +25,20 @@ type SyncWorker struct {
 	closeOnce       sync.Once
 	syncMu          sync.Mutex // Serializes sampler/publication, never application commands.
 	marshal         func(any) ([]byte, error)
+	persistWorkers  int
+	persistMu       sync.Mutex
+	persistPending  map[string]persistenceJob
+	persistWake     chan struct{}
+	persistCtx      context.Context
+	persistCancel   context.CancelFunc
+	persistWG       sync.WaitGroup
+	latestCompact   []byte
 }
 
 type PublishedSnapshot struct {
 	Data    []byte
 	Version string
+	Compact []byte
 }
 
 func NewSyncWorker(uc *TorrentUseCase) *SyncWorker {
@@ -41,6 +50,9 @@ func NewSyncWorker(uc *TorrentUseCase) *SyncWorker {
 	}
 	if uc != nil {
 		sw.engine, sw.repo = uc.engine, uc.repo
+		sw.persistCtx, sw.persistCancel = context.WithCancel(uc.engine.Context())
+		sw.persistPending = make(map[string]persistenceJob)
+		sw.persistWake = make(chan struct{}, 2)
 	}
 	return sw
 }
@@ -53,6 +65,10 @@ func (sw *SyncWorker) AddClient(ch chan []byte) {
 		close(ch)
 		return
 	default:
+	}
+	if len(sw.clients)+len(sw.snapshotClients) >= 128 {
+		close(ch)
+		return
 	}
 	sw.clients[ch] = true
 	if sw.latest != nil {
@@ -92,17 +108,19 @@ func (sw *SyncWorker) StartContext(ctx context.Context) {
 			return
 		case <-ticker.C:
 		}
-		sw.syncOnce()
+		sw.syncOnceContext(ctx)
 	}
 }
 
-func (sw *SyncWorker) syncOnce() {
+func (sw *SyncWorker) syncOnce() { sw.syncOnceContext(sw.engine.Context()) }
+
+func (sw *SyncWorker) syncOnceContext(ctx context.Context) {
 	sw.syncMu.Lock()
 	defer sw.syncMu.Unlock()
 	// Allocate before capture, never after delayed JSON. A command receipt issued
 	// in between must be able to retire this publication, including an empty list.
 	version := sw.engine.NextSnapshotVersion()
-	stateToSend, err := sw.captureSnapshot()
+	stateToSend, err := sw.captureSnapshotContext(ctx)
 	if err != nil {
 		logging.Warnf("failed to load DB torrents for sync: %v", err)
 		return
@@ -116,44 +134,28 @@ func (sw *SyncWorker) syncOnce() {
 		logging.Warnf("failed to marshal sync state: %v", err)
 		return
 	}
-	sw.publishSnapshot(data, version)
+	compact, err := json.Marshal(CompactTorrents(stateToSend))
+	if err != nil || len(compact) > 2<<20 || len(data) > 16<<20 {
+		logging.Warnf("snapshot exceeds retained publication budget")
+		return
+	}
+	sw.publishPair(data, compact, version)
+	sw.enqueuePersistence(stateToSend)
 }
 
 // Returns owned DTOs: JSON encoding and mailbox publication run after releasing
 // record handles. syncMu prevents concurrent Refresh from reordering them.
 func (sw *SyncWorker) captureSnapshot() ([]*models.Torrent, error) {
-	// Persist each record under its command handles, then validate the cross-source
-	// list. Never reinsert a DB-missing engine entry (including a failed Add).
-	// Get all torrents from engine
-	activeTorrents := sw.engine.GetAllTorrents()
+	return sw.captureSnapshotContext(sw.engine.Context())
+}
 
-	// Save state to DB
-	for _, t := range activeTorrents {
-		release, err := sw.uc.lockRecord(t.Hash)
-		if err != nil {
-			return nil, err
-		}
-		func() {
-			defer release()
-			persisted, err := sw.repo.GetTorrent(t.Hash)
-			if err != nil || persisted == nil {
-				return
-			}
-			if _, pending, err := sw.repo.CleanupPaths(t.Hash); err != nil || pending {
-				return
-			}
-			_, err = capturePersistableRuntime(sw.engine, sw.repo, t.Hash)
-			if err != nil {
-				logging.Warnf("failed to sync torrent state to DB hash=%s: %v", t.Hash, err)
-				// Failed persistence is not proof the runtime disappeared. Keep its
-				// applied revision visible without relabelling it as the new intent.
-				return
-			}
-		}()
+func (sw *SyncWorker) captureSnapshotContext(ctx context.Context) ([]*models.Torrent, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
-
-	// Include DB-only torrents and authoritative storage policy in the SSE snapshot.
-	stateToSend, err := readConsistentTorrents(sw.repo.GetAllTorrents, sw.engine.GetAllTorrents, func() func() bool {
+	// WAL readers never wait for record locks or observation commits. Projection
+	// fences membership, record identity and desired/applied intent independently.
+	stateToSend, err := readConsistentTorrents(func() (int64, error) { return sw.repo.ReadVersionContext(ctx) }, func() ([]*models.Torrent, error) { return sw.repo.GetAllTorrentsContext(ctx) }, sw.engine.GetAllTorrentsCached, func() func() bool {
 		stamp := sw.engine.CaptureReadStamp("")
 		return func() bool { return sw.engine.ValidateReadStamp(stamp) }
 	})
@@ -164,6 +166,7 @@ func (sw *SyncWorker) captureSnapshot() ([]*models.Torrent, error) {
 	// encoding/publication, so an old DTO cannot masquerade as post-command.
 	for _, t := range stateToSend {
 		t.SnapshotAt = time.Now().UnixNano()
+		t.SnapshotFreshness = "sampled"
 	}
 	return stateToSend, nil
 }
@@ -173,6 +176,10 @@ func (sw *SyncWorker) publish(data []byte) {
 }
 
 func (sw *SyncWorker) publishSnapshot(data []byte, version string) {
+	sw.publishPair(data, nil, version)
+}
+
+func (sw *SyncWorker) publishPair(data, compact []byte, version string) {
 	sw.mu.Lock()
 	defer sw.mu.Unlock()
 	select {
@@ -181,6 +188,7 @@ func (sw *SyncWorker) publishSnapshot(data []byte, version string) {
 	default:
 	}
 	sw.latest = data
+	sw.latestCompact = compact
 	sw.latestVersion = version
 	for ch := range sw.snapshotClients {
 	drainSnapshots:
@@ -192,7 +200,7 @@ func (sw *SyncWorker) publishSnapshot(data []byte, version string) {
 			}
 		}
 		select {
-		case ch <- PublishedSnapshot{Data: data, Version: version}:
+		case ch <- PublishedSnapshot{Data: data, Version: version, Compact: compact}:
 		default:
 		}
 	}
@@ -214,22 +222,27 @@ func (sw *SyncWorker) publishSnapshot(data []byte, version string) {
 	}
 }
 
-func (sw *SyncWorker) AddSnapshotClient(ch chan PublishedSnapshot) {
+func (sw *SyncWorker) AddSnapshotClient(ch chan PublishedSnapshot) bool {
 	sw.mu.Lock()
 	defer sw.mu.Unlock()
 	select {
 	case <-sw.done:
 		close(ch)
-		return
+		return false
 	default:
+	}
+	if len(sw.snapshotClients)+len(sw.clients) >= 128 {
+		close(ch)
+		return false
 	}
 	sw.snapshotClients[ch] = true
 	if sw.latest != nil {
 		select {
-		case ch <- PublishedSnapshot{Data: sw.latest, Version: sw.latestVersion}:
+		case ch <- PublishedSnapshot{Data: sw.latest, Version: sw.latestVersion, Compact: sw.latestCompact}:
 		default:
 		}
 	}
+	return true
 }
 
 func (sw *SyncWorker) RemoveSnapshotClient(ch chan PublishedSnapshot) {
@@ -248,6 +261,11 @@ func (sw *SyncWorker) Refresh() { sw.syncOnce() }
 
 func (sw *SyncWorker) Close() {
 	sw.closeOnce.Do(func() {
+		sw.persistMu.Lock()
+		if sw.persistCancel != nil {
+			sw.persistCancel()
+		}
+		sw.persistMu.Unlock()
 		sw.mu.Lock()
 		defer sw.mu.Unlock()
 		close(sw.done)
@@ -260,4 +278,5 @@ func (sw *SyncWorker) Close() {
 			close(ch)
 		}
 	})
+	sw.persistWG.Wait()
 }

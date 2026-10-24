@@ -41,6 +41,10 @@ type TorrentImpl struct {
 	NewPieceReader func(p Piece) PieceReader
 	// Optional generation/freshness check for already verified pieces.
 	FreshComplete func(piece int) bool
+	// CachedComplete is memory-only; RefreshFresh performs filesystem checks
+	// outside the library lock before byte delivery/readiness decisions.
+	CachedComplete func(piece int) bool
+	RefreshFresh   func(begin, end int)
 }
 
 // Interacts with torrent piece data. Optional interfaces to implement include://

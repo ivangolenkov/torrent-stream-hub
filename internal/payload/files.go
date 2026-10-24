@@ -81,25 +81,9 @@ func Open(root *os.Root, name string) (*os.File, error) {
 	if err := Validate(root, name); err != nil {
 		return nil, err
 	}
-	expected, err := root.Lstat(name)
-	if err != nil {
-		return nil, err
-	}
-	if !expected.Mode().IsRegular() {
+	f, err := storage.OpenRootFile(root, name, os.O_RDONLY)
+	if errors.Is(err, storage.ErrUnsafeFile) {
 		return nil, ErrNotRegular
 	}
-	f, err := root.Open(name)
-	if err != nil {
-		return nil, err
-	}
-	st, err := f.Stat()
-	if err != nil || !st.Mode().IsRegular() || storage.FileHasMultipleLinks(f, st) {
-		_ = f.Close()
-		return nil, ErrNotRegular
-	}
-	if !os.SameFile(expected, st) {
-		_ = f.Close()
-		return nil, fmt.Errorf("payload changed during open")
-	}
-	return f, nil
+	return f, err
 }

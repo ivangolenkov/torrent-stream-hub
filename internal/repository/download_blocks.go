@@ -1,7 +1,6 @@
 package repository
 
 import (
-	"database/sql"
 	"torrent-stream-hub/internal/models"
 )
 
@@ -20,7 +19,7 @@ func (r *TorrentRepo) DownloadBlock(hash string) (string, error) {
 	return reason, err
 }
 
-func (r *TorrentRepo) loadDownloadBlocks(tx *sql.Tx, torrents map[string]*models.Torrent) error {
+func (r *TorrentRepo) loadDownloadBlocks(tx sqlReader, torrents map[string]*models.Torrent) error {
 	if len(torrents) == 0 {
 		return nil
 	}

@@ -108,12 +108,14 @@ func (uc *TorrentUseCase) lockRecordsForIdentities(ctx context.Context, identiti
 	return nil, ErrStorageConflict
 }
 
-func (uc *TorrentUseCase) lockRecord(hash string, contexts ...context.Context) (func(), error) {
-	ctx := context.Background()
+func (uc *TorrentUseCase) requestContext(contexts ...context.Context) context.Context {
 	if len(contexts) > 0 && contexts[0] != nil {
-		ctx = contexts[0]
+		return contexts[0]
 	}
-	return uc.lockRecords(ctx, hash)
+	return uc.engine.Context()
+}
+func (uc *TorrentUseCase) lockRecord(hash string, contexts ...context.Context) (func(), error) {
+	return uc.lockRecords(uc.requestContext(contexts...), hash)
 }
 
 func (uc *TorrentUseCase) tryLockRecord(hash string) (func(), error) {

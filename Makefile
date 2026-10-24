@@ -10,7 +10,7 @@ DOWNLOAD_DIR ?= $(CURDIR)/downloads
 CONFIG_DIR ?= $(CURDIR)/config
 DB_PATH ?= $(CONFIG_DIR)/hub.db
 
-.PHONY: help deps web build build-go run run-local test clean docker-down
+.PHONY: help deps web build build-go run run-local test test-root test-fork test-web race race-root race-fork vet check clean docker-down
 
 help:
 	@printf '%s\n' \
@@ -18,7 +18,9 @@ help:
 		'  make build        Build Web GUI and Go service' \
 		'  make run-local    Build and run locally with docker-compose-like env' \
 		'  make run          Alias for run-local' \
-		'  make test         Run Go tests and frontend build' \
+		'  make test         Run root, fork and frontend tests (build GUI first)' \
+		'  make check        Run tests, race, vet and application build' \
+		'  make test-fork    Run fork core/storage suites explicitly' \
 		'  make docker-down  Stop docker-compose service' \
 		'  make clean        Remove local binary' \
 		'' \
@@ -32,11 +34,11 @@ deps:
 web:
 	cd web && npm run build
 
-build-go:
+build-go: web
 	mkdir -p "$(BIN_DIR)"
 	go build -trimpath -ldflags="-s -w" -o "$(BIN)" ./cmd/hub
 
-build: web build-go
+build: build-go
 
 run: run-local
 
@@ -56,7 +58,6 @@ run-local: build
 	HUB_BT_NO_UPLOAD="false" \
 	HUB_BT_CLIENT_PROFILE="qbittorrent" \
 	HUB_BT_DOWNLOAD_PROFILE="balanced" \
-	HUB_BT_BENCHMARK_MODE="false" \
 	HUB_BT_PUBLIC_IP_DISCOVERY_ENABLED="false" \
 	HUB_BT_PUBLIC_IPV4="" \
 	HUB_BT_PUBLIC_IPV6="" \
@@ -80,28 +81,36 @@ run-local: build
 	HUB_BT_SWARM_SEED_DROP_RATIO="0.45" \
 	HUB_BT_SWARM_SPEED_DROP_RATIO="0.35" \
 	HUB_BT_SWARM_PEAK_TTL_SEC="1800" \
-	HUB_BT_SWARM_HARD_REFRESH_ENABLED="true" \
-	HUB_BT_SWARM_AUTO_HARD_REFRESH_ENABLED="false" \
-	HUB_BT_SWARM_HARD_REFRESH_COOLDOWN_SEC="900" \
-	HUB_BT_SWARM_HARD_REFRESH_AFTER_SOFT_FAILS="1" \
-	HUB_BT_SWARM_HARD_REFRESH_MIN_TORRENT_AGE_SEC="60" \
-	HUB_BT_SWARM_DEGRADATION_EPISODE_TTL_SEC="900" \
-	HUB_BT_SWARM_RECOVERY_GRACE_SEC="180" \
-	HUB_BT_CLIENT_RECYCLE_ENABLED="true" \
-	HUB_BT_CLIENT_RECYCLE_COOLDOWN_SEC="300" \
-	HUB_BT_CLIENT_RECYCLE_AFTER_HARD_FAILS="1" \
-	HUB_BT_CLIENT_RECYCLE_AFTER_SOFT_FAILS="1" \
-	HUB_BT_CLIENT_RECYCLE_MIN_TORRENT_AGE_SEC="60" \
-	HUB_BT_CLIENT_RECYCLE_MIN_TORRENTS="1" \
-	HUB_BT_CLIENT_RECYCLE_MAX_PER_HOUR="2" \
-	HUB_AUTH_ENABLED="false" \
-	HUB_AUTH_USER="admin" \
-	HUB_AUTH_PASSWORD="admin" \
 	"$(BIN)"
 
-test:
-	go test ./...
-	cd web && npm run build
+# The nested module is not included by root ./... . Expand this package list
+# whenever another fork package is changed.
+FORK_PACKAGES := . ./storage
+
+test-root: web
+	go test -count=1 ./...
+
+test-fork:
+	cd pkg/anacrolix-torrent && go test -count=1 $(FORK_PACKAGES)
+
+test-web:
+	cd web && npm test
+
+test: test-root test-fork test-web
+
+race-root: web
+	go test -race -count=1 ./...
+
+race-fork:
+	cd pkg/anacrolix-torrent && go test -race -count=1 $(FORK_PACKAGES)
+
+race: race-root race-fork
+
+vet: web
+	go vet ./...
+	cd pkg/anacrolix-torrent && go vet $(FORK_PACKAGES)
+
+check: test race vet build-go
 
 docker-down:
 	docker compose down

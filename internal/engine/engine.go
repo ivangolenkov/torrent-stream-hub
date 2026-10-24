@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -43,6 +44,11 @@ type Engine struct {
 	wg                    sync.WaitGroup
 	closeOnce             sync.Once
 	storageTaskMu         sync.Mutex
+	httpTransfers         int
+	taskCounts            map[string]int
+	eventsMu              sync.Mutex
+	events                map[eventKey]func(context.Context)
+	eventWake             chan struct{}
 	storageRootMu         sync.RWMutex
 	storageRootResolver   func(string) (string, error)
 	storageAliasRegistrar func(string, string) error
@@ -55,6 +61,7 @@ type Engine struct {
 	verificationPersistence func(models.RuntimeFence, bool, string) error
 	safetyPersistence       func(models.RuntimeFence, models.ActivationBlockKind, string) error
 	nextRecheckID           uint64
+	clock                   func() time.Time
 	managedTorrents         map[string]*ManagedTorrent
 	detaching               map[string]*ManagedTorrent // admissionMu: namespace reserved until Drop/closers finish
 	registering             map[string]*ManagedTorrent // unpublished staged generations, admissionMu
@@ -69,6 +76,7 @@ type Engine struct {
 	pieceCompletionBackend    string
 	pieceCompletionPersistent bool
 	pieceCompletionErr        string
+	pieceCompletion           storage.PieceCompletion
 
 	streamManager *StreamManager
 	snapshot      snapshotClock
@@ -137,13 +145,25 @@ type ManagedTorrent struct {
 	slotToken              uint64
 	preparation            *payloadPreparation
 	healthProbe            *payloadPreparation
+	pendingRecheckBytes    int64
 	safetyBlocks           map[models.ActivationBlockKind]string
 	expectedPayload        map[int]bool
 }
 
-func New(cfg *config.Config) (*Engine, error) {
+type Option func(*Engine)
+
+// WithPieceCompletion transfers backend ownership to the engine's storage.
+// The application owns the database and closes it after Engine.Close.
+func WithPieceCompletion(pc storage.PieceCompletion) Option {
+	return func(e *Engine) { e.pieceCompletion = pc }
+}
+
+func New(cfg *config.Config, options ...Option) (*Engine, error) {
 	config.ApplyDefaults(cfg)
-	logging.Infof("initializing torrent engine download_dir=%s torrent_port=%d max_downloads=%d min_free_space_gb=%d bt_seed=%t bt_no_upload=%t bt_profile=%s bt_download_profile=%s bt_benchmark=%t bt_retrackers=%s dht=%t pex=%t upnp=%t tcp=%t utp=%t ipv6=%t established_conns=%d half_open=%d total_half_open=%d peers_low=%d peers_high=%d dial_rate=%d swarm_watchdog=%t swarm_check_sec=%d swarm_refresh_cooldown_sec=%d swarm_min_peers=%d swarm_min_seeds=%d swarm_stalled_speed=%d swarm_stalled_duration_sec=%d swarm_boost_conns=%d swarm_boost_duration_sec=%d peer_drop_ratio=%.2f seed_drop_ratio=%.2f speed_drop_ratio=%.2f peak_ttl_sec=%d hard_refresh=%t auto_hard_refresh=%t hard_refresh_cooldown_sec=%d hard_refresh_after_soft_fails=%d hard_refresh_min_age_sec=%d episode_ttl_sec=%d recovery_grace_sec=%d client_recycle=%t client_recycle_cooldown_sec=%d client_recycle_after_soft_fails=%d client_recycle_min_age_sec=%d client_recycle_after_hard_fails=%d client_recycle_max_per_hour=%d",
+	if err := cfg.ValidateResources(); err != nil {
+		return nil, err
+	}
+	logging.Infof("initializing torrent engine download_dir=%s torrent_port=%d max_downloads=%d min_free_space_gb=%d bt_seed=%t bt_no_upload=%t bt_profile=%s bt_download_profile=%s bt_retrackers=%s dht=%t pex=%t upnp=%t tcp=%t utp=%t ipv6=%t established_conns=%d half_open=%d total_half_open=%d peers_low=%d peers_high=%d dial_rate=%d swarm_watchdog=%t swarm_check_sec=%d swarm_refresh_cooldown_sec=%d swarm_min_peers=%d swarm_min_seeds=%d swarm_stalled_speed=%d swarm_stalled_duration_sec=%d swarm_boost_conns=%d swarm_boost_duration_sec=%d peer_drop_ratio=%.2f seed_drop_ratio=%.2f speed_drop_ratio=%.2f peak_ttl_sec=%d",
 		cfg.DownloadDir,
 		cfg.TorrentPort,
 		cfg.MaxActiveDownloads,
@@ -152,7 +172,6 @@ func New(cfg *config.Config) (*Engine, error) {
 		cfg.BTNoUpload,
 		cfg.BTClientProfile,
 		cfg.BTDownloadProfile,
-		cfg.BTBenchmarkMode,
 		cfg.BTRetrackersMode,
 		!cfg.BTDisableDHT,
 		!cfg.BTDisablePEX,
@@ -179,19 +198,6 @@ func New(cfg *config.Config) (*Engine, error) {
 		cfg.BTSwarmSeedDropRatio,
 		cfg.BTSwarmSpeedDropRatio,
 		cfg.BTSwarmPeakTTLSec,
-		cfg.BTSwarmHardRefreshEnabled,
-		cfg.BTSwarmAutoHardRefreshEnabled,
-		cfg.BTSwarmHardRefreshCooldownSec,
-		cfg.BTSwarmHardRefreshAfterSoftFails,
-		cfg.BTSwarmHardRefreshMinTorrentAgeSec,
-		cfg.BTSwarmDegradationEpisodeTTLSec,
-		cfg.BTSwarmRecoveryGraceSec,
-		cfg.BTClientRecycleEnabled,
-		cfg.BTClientRecycleCooldownSec,
-		cfg.BTClientRecycleAfterSoftFails,
-		cfg.BTClientRecycleMinTorrentAgeSec,
-		cfg.BTClientRecycleAfterHardFails,
-		cfg.BTClientRecycleMaxPerHour,
 	)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -201,6 +207,9 @@ func New(cfg *config.Config) (*Engine, error) {
 		cancel:          cancel,
 		managedTorrents: make(map[string]*ManagedTorrent),
 	}
+	for _, option := range options {
+		option(eng)
+	}
 	client, torrentStorage, err := eng.newTorrentClient()
 	if err != nil {
 		cancel()
@@ -209,6 +218,7 @@ func New(cfg *config.Config) (*Engine, error) {
 	eng.client = client
 	eng.storage = torrentStorage
 	eng.streamManager = NewStreamManager(eng)
+	eng.initEvents()
 
 	eng.startBackground(eng.resourceMonitor)
 	eng.startBackground(eng.speedSampler)
@@ -224,12 +234,27 @@ func (e *Engine) startBackground(fn func(context.Context)) {
 }
 
 // StartTask admits service-owned work atomically against Close.
-func (e *Engine) StartTask(fn func(context.Context)) bool {
-	if !e.beginWork() {
+func (e *Engine) StartTask(fn func(context.Context)) bool { return e.startTaskClass("service", 64, fn) }
+
+func (e *Engine) startTaskClass(class string, limit int, fn func(context.Context)) bool {
+	e.storageTaskMu.Lock()
+	if e.ctx == nil || e.ctx.Err() != nil {
+		e.storageTaskMu.Unlock()
 		return false
 	}
+	if e.taskCounts == nil {
+		e.taskCounts = make(map[string]int)
+	}
+	if e.taskCounts[class] >= limit {
+		e.storageTaskMu.Unlock()
+		return false
+	}
+	e.taskCounts[class]++
+	e.wg.Add(1)
+	e.storageTaskMu.Unlock()
 	go func() {
 		defer e.wg.Done()
+		defer func() { e.storageTaskMu.Lock(); e.taskCounts[class]--; e.storageTaskMu.Unlock() }()
 		fn(e.ctx)
 	}()
 	return true
@@ -313,6 +338,7 @@ func (e *Engine) GetTorrent(hash string) *models.Torrent {
 	if !ok {
 		return nil
 	}
+	mt.t.RefreshStorageCompletion()
 	return e.mapManagedTorrent(mt)
 }
 
@@ -365,14 +391,19 @@ func (e *Engine) Warmup(ctx context.Context, hash string, index int, size int64)
 	return read, target, nil
 }
 
+// BeginShutdown cancels admission and outstanding waits. Close joins owned work before closing resources.
+func (e *Engine) BeginShutdown() {
+	e.storageTaskMu.Lock()
+	if e.cancel != nil {
+		e.cancel()
+	}
+	e.storageTaskMu.Unlock()
+}
+
 func (e *Engine) Close() {
 	e.closeOnce.Do(func() {
 		logging.Infof("closing torrent engine")
-		e.storageTaskMu.Lock()
-		if e.cancel != nil {
-			e.cancel()
-		}
-		e.storageTaskMu.Unlock()
+		e.BeginShutdown()
 		e.admissionMu.Lock()
 		e.mu.RLock()
 		mts := make([]*ManagedTorrent, 0, len(e.managedTorrents))
@@ -471,20 +502,20 @@ func (e *Engine) AddInfoHash(hash string) (*models.Torrent, error) {
 }
 
 func (e *Engine) AddTorrentFile(r io.Reader, identity ...string) (*models.Torrent, error) {
-	return e.addTorrentFile(r, false, identity...)
+	return e.addTorrentFile(r, false, false, identity...)
 }
 
-func (e *Engine) AddStagedTorrentFile(r io.Reader) (*models.Torrent, error) {
-	return e.addTorrentFile(r, true)
+func (e *Engine) AddStagedTorrentFile(r io.Reader, privateSafe ...bool) (*models.Torrent, error) {
+	return e.addTorrentFile(r, true, len(privateSafe) > 0 && privateSafe[0])
 }
 
-func (e *Engine) addTorrentFile(r io.Reader, staged bool, identity ...string) (*models.Torrent, error) {
+func (e *Engine) addTorrentFile(r io.Reader, staged, privateSafe bool, identity ...string) (*models.Torrent, error) {
 	if !e.beginWork() {
 		return nil, context.Canceled
 	}
 	defer e.wg.Done()
 	logging.Infof("adding torrent from .torrent file")
-	metaInfo, err := metainfo.Load(r)
+	metaInfo, err := LoadMetainfo(r)
 	if err != nil {
 		logging.Warnf("failed to read .torrent file: %v", err)
 		return nil, fmt.Errorf("failed to read torrent file: %w", err)
@@ -498,6 +529,7 @@ func (e *Engine) addTorrentFile(r io.Reader, staged bool, identity ...string) (*
 	if err := e.saveMetainfo(metaInfo.HashInfoBytes().HexString(), metaInfo, false); err != nil {
 		logging.Warnf("failed to persist metainfo hash=%s: %v", metaInfo.HashInfoBytes().HexString(), err)
 	}
+	spec.PrivateSafe = privateSafe
 	e.augmentTorrentSpec(spec)
 	spec.DisallowDataDownload = true
 	if staged {
@@ -512,6 +544,12 @@ func (e *Engine) addTorrentFile(r io.Reader, staged bool, identity ...string) (*
 	magnet, err := metaInfo.MagnetV2()
 	if err != nil {
 		return nil, err
+	}
+	if privateSafe {
+		if magnet.Params == nil {
+			magnet.Params = make(url.Values)
+		}
+		magnet.Params.Set("x.hub-private", "1")
 	}
 	var model *models.Torrent
 	if staged {
@@ -541,28 +579,11 @@ func (e *Engine) ScheduleRecheckIfProgressBehind(hash string, persistedDownloade
 		e.mu.RUnlock()
 		return
 	}
-	t := mt.t
 	e.mu.RUnlock()
-
-	e.RunStorageTask(func(context.Context) {
-		select {
-		case <-mt.ctx.Done():
-			return
-		case <-t.Closed():
-			return
-		case <-t.GotInfo():
-		}
-		e.admissionMu.Lock()
-		if !e.currentTorrent(mt) || t.BytesCompleted() >= persistedDownloaded {
-			e.admissionMu.Unlock()
-			return
-		}
-		_, err := e.startRecheckLocked(mt)
-		e.admissionMu.Unlock()
-		if err != nil {
-			logging.Debugf("deferred recheck not admitted hash=%s: %v", hash, err)
-		}
-	})
+	mt.mu.Lock()
+	mt.pendingRecheckBytes = max(mt.pendingRecheckBytes, persistedDownloaded)
+	mt.mu.Unlock()
+	e.queueDeferredRecheck(mt)
 }
 
 func (e *Engine) addTorrent(t *torrent.Torrent) (*models.Torrent, error) {
@@ -700,7 +721,7 @@ func (e *Engine) registerTorrent(t *torrent.Torrent, sourceURI string, restored 
 	}
 	delete(e.registering, hash)
 	t.SetOnWriteChunkError(func(error) {
-		e.RunStorageTask(func(context.Context) { e.payloadWriteError(mt, nil) })
+		e.queueEvent(mt, "storage-error", func(context.Context) { e.payloadWriteError(mt, nil) })
 	})
 	e.mu.Lock()
 	e.managedTorrents[hash] = mt
@@ -710,7 +731,10 @@ func (e *Engine) registerTorrent(t *torrent.Torrent, sourceURI string, restored 
 	e.admissionMu.Unlock()
 
 	e.manageResources()
-	e.watchMetadata(hash, t)
+	if !e.watchMetadata(hash, t) {
+		_ = e.Delete(hash)
+		return nil, ErrTaskLimit
+	}
 
 	return e.mapManagedTorrent(mt), nil
 }
@@ -951,7 +975,12 @@ func (e *Engine) Delete(hash string) error {
 	return nil
 }
 
-func (e *Engine) GetAllTorrents() []*models.Torrent {
+func (e *Engine) GetAllTorrents() []*models.Torrent { return e.allTorrents(true) }
+
+// GetAllTorrentsCached samples counters without filesystem work. It never grants read admission.
+func (e *Engine) GetAllTorrentsCached() []*models.Torrent { return e.allTorrents(false) }
+
+func (e *Engine) allTorrents(refresh bool) []*models.Torrent {
 	e.mu.RLock()
 	mts := make([]*ManagedTorrent, 0, len(e.managedTorrents))
 	for _, mt := range e.managedTorrents {
@@ -961,7 +990,14 @@ func (e *Engine) GetAllTorrents() []*models.Torrent {
 
 	torrents := make([]*models.Torrent, 0, len(mts))
 	for _, mt := range mts {
+		if refresh {
+			mt.t.RefreshStorageCompletion()
+		}
 		torrents = append(torrents, e.mapManagedTorrent(mt))
 	}
 	return torrents
+}
+
+func (e *Engine) MetainfoSettings() (string, string) {
+	return e.cfg.MetainfoTempDir, e.cfg.MetainfoAllowlist
 }

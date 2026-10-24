@@ -488,7 +488,7 @@ func (c *Peer) remoteIp() net.IP {
 
 func (c *Peer) remoteIpPort() IpPort {
 	ipa, _ := tryIpPortFromNetAddr(c.RemoteAddr)
-	return IpPort{ipa.IP, uint16(ipa.Port)}
+	return IpPort{IP: ipa.IP, Port: uint16(ipa.Port)}
 }
 
 func (c *Peer) trust() connectionTrust {

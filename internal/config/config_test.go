@@ -1,7 +1,9 @@
 package config
 
 import (
+	"flag"
 	"os"
+	"reflect"
 	"testing"
 )
 
@@ -119,17 +121,8 @@ func TestApplyDefaultsSetsBTDefaults(t *testing.T) {
 	if cfg.BTSwarmPeerDropRatio != 0.45 || cfg.BTSwarmSeedDropRatio != 0.45 || cfg.BTSwarmSpeedDropRatio != 0.35 {
 		t.Fatalf("unexpected swarm trend defaults: %+v", cfg)
 	}
-	if cfg.BTSwarmPeakTTLSec != 1800 || !cfg.BTSwarmHardRefreshEnabled || cfg.BTSwarmAutoHardRefreshEnabled || cfg.BTSwarmHardRefreshCooldownSec != 900 {
-		t.Fatalf("unexpected hard refresh defaults: %+v", cfg)
-	}
-	if cfg.BTSwarmHardRefreshAfterSoftFails != 1 || cfg.BTSwarmHardRefreshMinTorrentAgeSec != 60 {
-		t.Fatalf("unexpected hard refresh thresholds: %+v", cfg)
-	}
-	if cfg.BTSwarmDegradationEpisodeTTLSec != 900 || cfg.BTSwarmRecoveryGraceSec != 180 {
-		t.Fatalf("unexpected episode defaults: %+v", cfg)
-	}
-	if !cfg.BTClientRecycleEnabled || cfg.BTClientRecycleCooldownSec != 900 || cfg.BTClientRecycleAfterHardFails != 1 || cfg.BTClientRecycleAfterSoftFails != 1 || cfg.BTClientRecycleMinTorrentAgeSec != 60 || cfg.BTClientRecycleMinTorrents != 1 || cfg.BTClientRecycleMaxPerHour != 2 {
-		t.Fatalf("unexpected client recycle defaults: %+v", cfg)
+	if cfg.BTSwarmPeakTTLSec != 1800 || cfg.BTSwarmHardRefreshEnabled || cfg.BTClientRecycleEnabled {
+		t.Fatal("legacy features must not be enabled by defaults")
 	}
 }
 
@@ -199,22 +192,16 @@ func TestApplyDefaultsClampsSwarmRatios(t *testing.T) {
 	}
 }
 
-func TestApplyDefaultsHardRefreshCooldownAtLeastSoftCooldown(t *testing.T) {
-	cfg := &Config{BTSwarmRefreshCooldownSec: 600, BTSwarmHardRefreshCooldownSec: 300}
-
-	ApplyDefaults(cfg)
-
-	if cfg.BTSwarmHardRefreshCooldownSec != cfg.BTSwarmRefreshCooldownSec {
-		t.Fatalf("expected hard cooldown to clamp to soft cooldown, got hard=%d soft=%d", cfg.BTSwarmHardRefreshCooldownSec, cfg.BTSwarmRefreshCooldownSec)
+func TestDeprecatedOptionsWarnOnlyForExplicitInputs(t *testing.T) {
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	fs.Bool("bt-client-recycle-enabled", false, "")
+	fs.Bool("bt-disable-dht", false, "")
+	if err := fs.Parse([]string{"--bt-client-recycle-enabled=false", "--bt-disable-dht"}); err != nil {
+		t.Fatal(err)
 	}
-}
-
-func TestApplyDefaultsClientRecycleCooldownIndependent(t *testing.T) {
-	cfg := &Config{BTSwarmHardRefreshCooldownSec: 900, BTClientRecycleCooldownSec: 300}
-
-	ApplyDefaults(cfg)
-
-	if cfg.BTClientRecycleCooldownSec != 300 {
-		t.Fatalf("expected client recycle cooldown to remain independent, got %d", cfg.BTClientRecycleCooldownSec)
+	got := deprecatedOptions(fs, func(name string) (string, bool) { return "false", name == "HUB_BT_SWARM_HARD_REFRESH_ENABLED" })
+	want := []string{"--bt-client-recycle-enabled", "HUB_BT_SWARM_HARD_REFRESH_ENABLED"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %v want %v", got, want)
 	}
 }

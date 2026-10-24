@@ -1,6 +1,7 @@
 package repository
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"torrent-stream-hub/internal/models"
@@ -132,10 +133,15 @@ func (r *TorrentRepo) saveTorrent(t *models.Torrent, policy *bool) error {
 }
 
 func (r *TorrentRepo) GetTorrent(hash string) (*models.Torrent, error) {
-	tx, err := r.db.DB().Begin()
+	return r.GetTorrentContext(context.Background(), hash)
+}
+
+func (r *TorrentRepo) GetTorrentContext(ctx context.Context, hash string) (*models.Torrent, error) {
+	raw, err := r.db.DB().BeginTx(ctx, nil)
 	if err != nil {
 		return nil, err
 	}
+	tx := contextReadTx{Tx: raw, ctx: ctx}
 	defer tx.Rollback()
 	row := tx.QueryRow(`SELECT hash, name, title, data, poster, category, size, downloaded, state, error, source_uri, is_temporary, COALESCE((SELECT state FROM torrent_storage WHERE hash=torrents.hash),'legacy'), COALESCE((SELECT error FROM torrent_storage WHERE hash=torrents.hash),'') FROM torrents WHERE hash = ?`, hash)
 
@@ -172,10 +178,15 @@ func (r *TorrentRepo) GetTorrent(hash string) (*models.Torrent, error) {
 }
 
 func (r *TorrentRepo) GetAllTorrents() ([]*models.Torrent, error) {
-	tx, err := r.db.DB().Begin()
+	return r.GetAllTorrentsContext(context.Background())
+}
+
+func (r *TorrentRepo) GetAllTorrentsContext(ctx context.Context) ([]*models.Torrent, error) {
+	raw, err := r.db.DB().BeginTx(ctx, nil)
 	if err != nil {
 		return nil, err
 	}
+	tx := contextReadTx{Tx: raw, ctx: ctx}
 	defer tx.Rollback()
 	rows, err := tx.Query(`SELECT hash, name, title, data, poster, category, size, downloaded, state, error, source_uri, is_temporary, COALESCE((SELECT state FROM torrent_storage WHERE hash=torrents.hash),'legacy'), COALESCE((SELECT error FROM torrent_storage WHERE hash=torrents.hash),'') FROM torrents ORDER BY created_at DESC`)
 	if err != nil {
@@ -218,7 +229,7 @@ func (r *TorrentRepo) GetAllTorrents() ([]*models.Torrent, error) {
 	return torrents, tx.Commit()
 }
 
-func (r *TorrentRepo) loadFiles(tx *sql.Tx, t *models.Torrent) error {
+func (r *TorrentRepo) loadFiles(tx sqlReader, t *models.Torrent) error {
 	rows, err := tx.Query(`SELECT "index", path, size, downloaded, priority, is_media, file_offset, offset_known, legacy_downloaded FROM files WHERE hash = ? ORDER BY "index" ASC`, t.Hash)
 	if err != nil {
 		return err
@@ -236,7 +247,7 @@ func (r *TorrentRepo) loadFiles(tx *sql.Tx, t *models.Torrent) error {
 	return rows.Err()
 }
 
-func (r *TorrentRepo) loadFilesForTorrents(tx *sql.Tx, torrents map[string]*models.Torrent) error {
+func (r *TorrentRepo) loadFilesForTorrents(tx sqlReader, torrents map[string]*models.Torrent) error {
 	if len(torrents) == 0 {
 		return nil
 	}
@@ -304,33 +315,12 @@ func (r *TorrentRepo) DeleteTorrent(hash string) error {
 }
 
 func (r *TorrentRepo) MakePermanent(hash string) (bool, error) {
-	tx, err := r.db.BeginWrite()
-	if err != nil {
+	i, err := r.GetIntent(hash)
+	if err != nil || i == nil {
 		return false, err
 	}
-	defer tx.Rollback()
-	v, err := intentVersionTx(tx, hash)
-	if err == sql.ErrNoRows {
-		return false, nil
-	}
-	if err != nil {
-		return false, err
-	}
-	if err := advanceIntent(tx, v); err != nil {
-		return false, err
-	}
-	res, err := tx.Exec(`UPDATE torrents SET is_temporary = 0 WHERE hash = ?`, hash)
-	if err != nil {
-		return false, err
-	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return false, err
-	}
-	if err := tx.Commit(); err != nil {
-		return false, err
-	}
-	return n > 0, nil
+	_, err = r.CommitAddMetadata(i.Version, models.UserMetadata{}, true)
+	return err == nil, err
 }
 
 func (r *TorrentRepo) TemporaryQueue() ([]string, error) {

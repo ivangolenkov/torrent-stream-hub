@@ -1,17 +1,16 @@
 package repository
 
 import (
-	"database/sql"
 	"torrent-stream-hub/internal/models"
 )
 
 // A database observation is always last-known/legacy, never proof of current
 // bytes. Readiness must be established by the engine's storage verification.
-func (r *TorrentRepo) loadProgressObservations(tx *sql.Tx, torrents map[string]*models.Torrent) error {
+func (r *TorrentRepo) loadProgressObservations(tx sqlReader, torrents map[string]*models.Torrent) error {
 	if len(torrents) == 0 {
 		return nil
 	}
-	query := `SELECT t.hash,progress_source,progress_observed_at,legacy_downloaded,piece_length,num_pieces,metadata_known,COALESCE(q.id,0) FROM torrents t LEFT JOIN torrent_order q ON q.hash=t.hash`
+	query := `SELECT t.hash,progress_source,progress_observed_at,legacy_downloaded,piece_length,num_pieces,metadata_known,COALESCE(q.id,0),metadata_format,catalog_version FROM torrents t LEFT JOIN torrent_order q ON q.hash=t.hash`
 	var args []any
 	if len(torrents) == 1 {
 		for hash := range torrents {
@@ -30,7 +29,8 @@ func (r *TorrentRepo) loadProgressObservations(tx *sql.Tx, torrents map[string]*
 		var numPieces int
 		var known bool
 		var queuePosition int64
-		if err := rows.Scan(&hash, &source, &observed, &legacy, &pieceLength, &numPieces, &known, &queuePosition); err != nil {
+		var format, catalogVersion string
+		if err := rows.Scan(&hash, &source, &observed, &legacy, &pieceLength, &numPieces, &known, &queuePosition, &format, &catalogVersion); err != nil {
 			return err
 		}
 		if t := torrents[hash]; t != nil {
@@ -41,6 +41,8 @@ func (r *TorrentRepo) loadProgressObservations(tx *sql.Tx, torrents map[string]*
 			}
 			t.ProgressObservedAt, t.LegacyDownloaded = observed, legacy
 			t.MetadataKnown, t.PieceLength, t.NumPieces = known, pieceLength, numPieces
+			t.MetadataFormat = format
+			t.CatalogVersion = catalogVersion
 			t.Progress = models.ProgressPercent(t.Downloaded, t.Size)
 		}
 	}

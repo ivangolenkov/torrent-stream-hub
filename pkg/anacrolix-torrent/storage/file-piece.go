@@ -49,7 +49,7 @@ func (me *filePieceImpl) logger() *slog.Logger {
 }
 
 func (me *filePieceImpl) pieceKey() metainfo.PieceKey {
-	return metainfo.PieceKey{me.t.infoHash, me.p.Index()}
+	return metainfo.PieceKey{InfoHash: me.t.infoHash, Index: me.p.Index()}
 }
 
 func (me *filePieceImpl) extent() segments.Extent {
@@ -183,7 +183,7 @@ func (me *filePieceImpl) BeginVerification() error {
 		return err
 	}
 	me.t.freshMu.Lock()
-	me.t.hashSnapshot[me.p.Index()] = signature
+	me.t.hashSnapshot[me.p.Index()] = me.t.internSignatureLocked(me.p.Index(), signature)
 	me.t.freshMu.Unlock()
 	return nil
 }
@@ -202,31 +202,33 @@ func (me *filePieceImpl) MarkComplete() (err error) {
 		me.t.freshMu.Lock()
 		snapshot, ok := me.t.hashSnapshot[me.p.Index()]
 		before := append([]os.FileInfo(nil), snapshot...)
-		me.t.freshMu.Unlock()
 		if !ok || len(before) != len(current) {
+			me.t.freshMu.Unlock()
 			return fmt.Errorf("storage generation changed during verification")
 		}
 		for i, st := range before {
 			now := current[i]
-			if !os.SameFile(st, now) || st.Size() != now.Size() || !st.ModTime().Equal(now.ModTime()) {
+			sig, typed := st.(*verifiedFileSignature)
+			if typed && !sig.valid || !sameSignature(st, now) {
+				me.t.freshMu.Unlock()
 				return fmt.Errorf("storage changed during verification")
 			}
 		}
 		verifiedSignature = before
+		me.t.freshMu.Unlock()
+	}
+	if pieceCompletionIsPersistent(me.pieceCompletion()) {
+		if err = me.Flush(); err != nil {
+			return err
+		}
 	}
 	err = me.pieceCompletion().Set(me.pieceKey(), true)
 	if err != nil {
-		return
-	}
-	if pieceCompletionIsPersistent(me.pieceCompletion()) {
-		err := me.Flush()
-		if err != nil {
-			me.logger().Warn("error flushing completed piece", "piece", me.p.Index(), "err", err)
-		}
+		return err
 	}
 	if me.t.client.opts.VerifyOnOpen {
 		me.t.freshMu.Lock()
-		me.t.fresh[me.p.Index()] = verifiedSignature
+		me.t.markFreshLocked(me.p.Index(), verifiedSignature)
 		me.t.freshMu.Unlock()
 	}
 	for f := range me.pieceFiles() {
@@ -243,21 +245,37 @@ func (me *filePieceImpl) MarkComplete() (err error) {
 			err = fmt.Errorf("error promoting part file %q: %w", f.safeOsPath, err)
 			return
 		}
+		me.t.freshMu.Lock()
+		if sig := me.t.signatures[f.index]; sig != nil && sig.valid {
+			sig.published = true
+		}
+		me.t.freshMu.Unlock()
 	}
 	return
 }
 
 func (me *filePieceImpl) allFilePiecesComplete(f file) (ret g.Result[bool]) {
 	if me.t.client.opts.VerifyOnOpen {
-		for index := f.beginPieceIndex(); index < f.endPieceIndex(); index++ {
-			c := me.t.getCompletion(index)
-			if !c.Ok || !c.Complete || c.Err != nil {
+		me.t.freshMu.Lock()
+		sig := me.t.signatures[f.index]
+		ready := sig != nil && sig.valid && !sig.published && sig.complete == f.endPieceIndex()-f.beginPieceIndex()
+		me.t.freshMu.Unlock()
+		if !ready {
+			return
+		}
+		// Once per completed file, validate adjacent shared-boundary files as well.
+		me.t.refreshRange(f.beginPieceIndex(), f.endPieceIndex())
+		me.t.freshMu.Lock()
+		defer me.t.freshMu.Unlock()
+		for i := f.beginPieceIndex(); i < f.endPieceIndex(); i++ {
+			if !me.t.cachedCompletionLocked(i).Complete {
 				return
 			}
 		}
 		ret.SetOk(true)
 		return
 	}
+
 	next, stop := iter.Pull(GetPieceCompletionRange(
 		me.t.pieceCompletion(),
 		me.t.infoHash,
@@ -288,7 +306,7 @@ func (me *filePieceImpl) MarkNotComplete() (err error) {
 	}
 	defer me.t.lifecycle.RUnlock()
 	me.t.freshMu.Lock()
-	delete(me.t.fresh, me.p.Index())
+	me.t.forgetPieceLocked(me.p.Index())
 	me.t.freshMu.Unlock()
 	err = me.pieceCompletion().Set(me.pieceKey(), false)
 	if err != nil {
@@ -311,10 +329,12 @@ func (me *filePieceImpl) promotePartFile(f file) (err error) {
 	}
 	// Flush file on completion, even if we don't promote it.
 	err = me.t.io.flush(f.partFilePath(), 0, f.length())
-	if err != nil {
-		me.logger().Warn("error flushing file before promotion", "file", f.partFilePath(), "err", err)
-		err = nil
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
 	}
+	// An already published file has no .part name; never hide an actual flush
+	// failure and move an unflushed payload into the final namespace.
+	err = nil
 	if !me.partFiles() {
 		return nil
 	}

@@ -243,8 +243,26 @@ func (f *File) Pieces() iter.Seq[*Piece] {
 
 // ReadyForDirectRead returns true if the file is completely downloaded and ready
 // for direct OS filesystem reading, without requiring torrent reader or piece requests.
-// It acquires client read lock once and performs an in-memory check without doing storage I/O.
+// Filesystem evidence is refreshed before taking the client lock; the locked
+// readiness pass uses only cached verification generations.
 func (f *File) ReadyForDirectRead() bool {
+	if f == nil || f.t == nil || f.t.cl == nil {
+		return false
+	}
+	f.t.cl.rLock()
+	if f.t.info == nil || f.t.closed.IsSet() {
+		f.t.cl.rUnlock()
+		return false
+	}
+	begin, end := f.BeginPieceIndex(), f.EndPieceIndex()
+	f.t.cl.rUnlock()
+	f.t.refreshStorageCompletionRange(begin, end)
+	return f.CachedReadyForDirectRead()
+}
+
+// CachedReadyForDirectRead is for policy/priority bookkeeping only. Opening or
+// delivering bytes must call ReadyForDirectRead or refresh storage evidence.
+func (f *File) CachedReadyForDirectRead() bool {
 	if f == nil || f.t == nil || f.t.cl == nil {
 		return false
 	}

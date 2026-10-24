@@ -13,11 +13,17 @@ permissions:
 env:
   APP_NAME: torrent-stream-hub
   GO_VERSION: "1.25.8"
-  NODE_VERSION: "22"
+  NODE_VERSION: "22.15.0"
 
 jobs:
+  checks:
+    uses: ./.github/workflows/checks.yml
+    permissions:
+      contents: read
+
   binaries:
     name: Build ${{ matrix.name }}
+    needs: checks
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -109,6 +115,7 @@ jobs:
 
   docker:
     name: Build and Push Docker Image
+    needs: checks
     runs-on: ubuntu-latest
     env:
       DOCKER_BUILD_RECORD_UPLOAD: "false"

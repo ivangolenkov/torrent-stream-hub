@@ -1,7 +1,6 @@
 package repository
 
 import (
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"torrent-stream-hub/internal/models"
@@ -82,7 +81,7 @@ func (r *TorrentRepo) SaveDeletionError(hash string, cause error) error {
 	return err
 }
 
-func (r *TorrentRepo) loadDeletionIntents(tx *sql.Tx, torrents map[string]*models.Torrent) error {
+func (r *TorrentRepo) loadDeletionIntents(tx sqlReader, torrents map[string]*models.Torrent) error {
 	if len(torrents) == 0 {
 		return nil
 	}

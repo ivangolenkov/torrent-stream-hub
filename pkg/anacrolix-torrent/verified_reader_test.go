@@ -13,6 +13,28 @@ import (
 	"github.com/anacrolix/torrent/storage"
 )
 
+func TestStorageRefreshDoesNotHoldClientLock(t *testing.T) {
+	cl, tor, _ := createTestMultiFileTorrent(t, 1024, []int64{2048})
+	entered, release, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	cl.lock()
+	tor.storage.FreshComplete = func(int) bool { return false }
+	tor.storage.CachedComplete = func(int) bool { return false }
+	tor.storage.RefreshFresh = func(int, int) { close(entered); <-release }
+	cl.unlock()
+	go func() { tor.RefreshStorageCompletion(); close(done) }()
+	<-entered
+	unlocked := make(chan struct{})
+	go func() { cl.lock(); cl.unlock(); close(unlocked) }()
+	select {
+	case <-unlocked:
+	case <-time.After(time.Second):
+		close(release)
+		t.Fatal("storage refresh held global client lock")
+	}
+	close(release)
+	<-done
+}
+
 func TestVerifiedReaderAndBitfieldRejectCorruptFinal(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "data")
@@ -58,6 +80,9 @@ func TestVerifiedReaderAndBitfieldRejectCorruptFinal(t *testing.T) {
 	}
 	assertNoHave := func() {
 		t.Helper()
+		// The handshake refreshes outside the client lock before consulting the
+		// cached bitfield; readers and uploads have the same freshness boundary.
+		tor.RefreshStorageCompletion()
 		cl.lock()
 		defer cl.unlock()
 		if tor.haveAllPieces() || tor.bitfield()[0] || tor.pieceComplete(0) {

@@ -2,6 +2,7 @@ package usecase
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"torrent-stream-hub/internal/models"
@@ -12,7 +13,7 @@ func TestConsistentReadRetriesCommandRevisionChange(t *testing.T) {
 	defer cleanup()
 	tor := temporaryFile(t, uc, "snapshot-command", false)
 	captures := 0
-	items, err := readConsistentTorrents(r.GetAllTorrents, func() []*models.Torrent {
+	items, err := readConsistentTorrents(func() (int64, error) { return r.ReadVersion() }, r.GetAllTorrents, func() []*models.Torrent {
 		captures++
 		old := uc.engine.GetAllTorrents()
 		if captures == 1 {
@@ -35,7 +36,7 @@ func TestConsistentReadRejectsRuntimeABAWithoutDatabaseChange(t *testing.T) {
 	defer cleanup()
 	tor := temporaryFile(t, uc, "snapshot-runtime-aba", false)
 	captures := 0
-	items, err := readConsistentTorrents(r.GetAllTorrents, func() []*models.Torrent {
+	items, err := readConsistentTorrents(func() (int64, error) { return r.ReadVersion() }, r.GetAllTorrents, func() []*models.Torrent {
 		captures++
 		old := uc.engine.GetAllTorrents()
 		if captures == 1 {
@@ -62,7 +63,7 @@ func TestConsistentReadRejectsOldRuntimeAfterRecordReadd(t *testing.T) {
 	tor := temporaryFile(t, uc, "snapshot-readd", false)
 	oldID := tor.Control.RecordID
 	captures := 0
-	items, err := readConsistentTorrents(r.GetAllTorrents, func() []*models.Torrent {
+	items, err := readConsistentTorrents(func() (int64, error) { return r.ReadVersion() }, r.GetAllTorrents, func() []*models.Torrent {
 		captures++
 		old := uc.engine.GetAllTorrents()
 		if captures == 1 {
@@ -88,13 +89,13 @@ func TestConsistentReadBoundsRetriesAndNeverReturnsEmptyOnChurnOrError(t *testin
 	defer cleanup()
 	tor := temporaryFile(t, uc, "snapshot-churn", false)
 	captures := 0
-	items, err := readConsistentTorrents(r.GetAllTorrents, func() []*models.Torrent {
+	items, err := readConsistentTorrents(func() (int64, error) { return r.ReadVersion() }, r.GetAllTorrents, func() []*models.Torrent {
 		captures++
 		i, err := r.GetIntent(tor.Hash)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := r.UpdateUserMetadata(i.Version, models.UserMetadata{Title: "changed"}); err != nil {
+		if _, err := r.UpdateUserMetadata(i.Version, models.UserMetadata{Title: "changed" + strings.Repeat("!", captures)}); err != nil {
 			t.Fatal(err)
 		}
 		return uc.engine.GetAllTorrents()
@@ -103,7 +104,7 @@ func TestConsistentReadBoundsRetriesAndNeverReturnsEmptyOnChurnOrError(t *testin
 		t.Fatal("unbounded retry or guessed empty snapshot", items, captures, err)
 	}
 	injected := errors.New("SQLite read failed")
-	items, err = readConsistentTorrents(func() ([]*models.Torrent, error) { return nil, injected }, func() []*models.Torrent { t.Fatal("read runtime after database failure"); return nil }, func() func() bool { return func() bool { return true } })
+	items, err = readConsistentTorrents(func() (int64, error) { return r.ReadVersion() }, func() ([]*models.Torrent, error) { return nil, injected }, func() []*models.Torrent { t.Fatal("read runtime after database failure"); return nil }, func() func() bool { return func() bool { return true } })
 	if !errors.Is(err, injected) || items != nil {
 		t.Fatal(items, err)
 	}

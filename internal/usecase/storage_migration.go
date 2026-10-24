@@ -54,8 +54,10 @@ func (uc *TorrentUseCase) initializeStorageLocked() error {
 		}
 	}
 	if !uc.storageWorkerStarted {
+		if !uc.engine.RunStorageTask(uc.runStorageMigrations) {
+			return engine.ErrTaskLimit
+		}
 		uc.storageWorkerStarted = true
-		uc.engine.RunStorageTask(uc.runStorageMigrations)
 	}
 	return nil
 }

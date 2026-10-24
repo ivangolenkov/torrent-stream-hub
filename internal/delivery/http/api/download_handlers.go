@@ -26,7 +26,7 @@ import (
 
 func (h *APIHandler) DownloadTorrentFile(w http.ResponseWriter, r *http.Request) {
 	hash := chi.URLParam(r, "hash")
-	release, err := h.uc.AcquireTransfer(hash, r.Context())
+	release, err := h.uc.AcquireHTTPTransfer(hash, r.Context(), r.Method == http.MethodHead)
 	if err != nil {
 		h.handleDownloadError(w, hash, err)
 		return
@@ -38,7 +38,7 @@ func (h *APIHandler) DownloadTorrentFile(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	_, file, err := h.uc.GetDownloadedFile(hash, index)
+	_, file, err := h.uc.GetDownloadedFile(hash, index, r.Context())
 	if err != nil {
 		h.handleDownloadError(w, hash, err)
 		return
@@ -48,13 +48,13 @@ func (h *APIHandler) DownloadTorrentFile(w http.ResponseWriter, r *http.Request)
 
 func (h *APIHandler) DownloadTorrent(w http.ResponseWriter, r *http.Request) {
 	hash := chi.URLParam(r, "hash")
-	release, err := h.uc.AcquireTransfer(hash, r.Context())
+	release, err := h.uc.AcquireHTTPTransfer(hash, r.Context(), r.Method == http.MethodHead)
 	if err != nil {
 		h.handleDownloadError(w, hash, err)
 		return
 	}
 	defer release()
-	t, files, err := h.uc.GetDownloadedTorrentFiles(hash)
+	t, files, err := h.uc.GetDownloadedTorrentFiles(hash, r.Context())
 	if err != nil {
 		h.handleDownloadError(w, hash, err)
 		return
@@ -192,6 +192,14 @@ func (r contextReader) Read(p []byte) (int, error) {
 }
 
 func (h *APIHandler) handleDownloadError(w http.ResponseWriter, hash string, err error) {
+	if errors.Is(err, engine.ErrTransferLimit) || errors.Is(err, engine.ErrTaskLimit) {
+		response.Error(w, http.StatusTooManyRequests, "Transfer limit reached")
+		return
+	}
+	if errors.Is(err, context.Canceled) {
+		response.Error(w, http.StatusServiceUnavailable, "Transfer stopped")
+		return
+	}
 	if errors.Is(err, usecase.ErrTorrentNotFound) || errors.Is(err, os.ErrNotExist) {
 		response.Error(w, http.StatusNotFound, "Torrent not found")
 		return

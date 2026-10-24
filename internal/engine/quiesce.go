@@ -8,6 +8,7 @@ import (
 // admissionMu covers the accepted decision and all effects. Cancellation does
 // not join tasks; library callbacks enqueue work rather than taking engine locks.
 func (e *Engine) applyQuiesceLocked(mt *ManagedTorrent, d stateDecision, reason string) {
+	e.clearBoostLocked(mt)
 	if d.closePayload {
 		mt.t.DisallowDataDownload()
 	}

@@ -111,6 +111,7 @@ func (fs *fileClientImpl) OpenTorrent(
 			return
 		}
 		files[i].safeOsPath = filePath
+		files[i].index = i
 		if fs.opts.RootFS != nil {
 			normalized = append(normalized, strings.ToLower(norm.NFC.String(filePath)), strings.ToLower(norm.NFC.String(filePath+".part")))
 		}
@@ -181,6 +182,8 @@ func (fs *fileClientImpl) OpenTorrent(
 	}
 	if fs.opts.VerifyOnOpen {
 		result.FreshComplete = func(index int) bool { return t.freshCompletion(index).Complete }
+		result.CachedComplete = func(index int) bool { return t.cachedCompletion(index).Complete }
+		result.RefreshFresh = t.refreshRange
 	}
 	return result, nil
 }

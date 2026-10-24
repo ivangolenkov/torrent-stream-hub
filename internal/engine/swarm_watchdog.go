@@ -57,7 +57,7 @@ func (e *Engine) swarmRefreshMonitor(ctx context.Context) {
 }
 
 func (e *Engine) checkSwarms() {
-	now := time.Now()
+	now := e.now()
 
 	e.mu.RLock()
 	torrents := make([]*ManagedTorrent, 0, len(e.managedTorrents))
@@ -105,7 +105,7 @@ func (e *Engine) checkSwarms() {
 		mt.mu.Unlock()
 
 		if refreshTorrent != nil {
-			e.RunStorageTask(func(context.Context) { e.refreshPeerDiscovery(mt, refreshReason, refreshDownloadAll) })
+			e.queueEvent(mt, "discovery", func(context.Context) { e.refreshPeerDiscovery(mt, refreshReason, refreshDownloadAll) })
 		}
 	}
 }
@@ -180,6 +180,9 @@ func (e *Engine) swarmRefreshCooldown() time.Duration {
 }
 
 func (e *Engine) refreshDHTAsync(mt *ManagedTorrent, reason string) {
+	if !mt.t.PublicDiscoveryAllowed() {
+		return
+	}
 	t := mt.t
 	hash := mt.hash
 	e.mu.RLock()
@@ -235,7 +238,7 @@ func (e *Engine) refreshPeerDiscovery(mt *ManagedTorrent, reason string, downloa
 	}
 	t := mt.t
 	hash := t.InfoHash().HexString()
-	t.SetMaxEstablishedConns(e.cfg.BTSwarmBoostConns)
+	e.startBoostLocked(mt)
 	// Discovery must never reopen the payload gate (restore, Pause, DiskFull).
 	if !e.cfg.BTNoUpload {
 		t.AllowDataUpload()
@@ -243,7 +246,10 @@ func (e *Engine) refreshPeerDiscovery(mt *ManagedTorrent, reason string, downloa
 	if downloadAll {
 		e.applyFilePrioritiesAndDownload(mt)
 	}
-	trackers := e.retrackers()
+	var trackers []string
+	if t.PublicDiscoveryAllowed() && t.Info() != nil {
+		trackers = e.retrackers()
+	}
 	if len(trackers) > 0 && !strings.EqualFold(strings.TrimSpace(e.cfg.BTRetrackersMode), "off") {
 		t.AddTrackers([][]string{trackers})
 	}

@@ -25,6 +25,8 @@ func setupTorrentUseCase(t *testing.T) (*TorrentUseCase, *repository.TorrentRepo
 	}
 
 	eng, err := engine.New(&config.Config{
+		DBPath:       filepath.Join(dir, "hub.db"),
+		BTDisableDHT: true, BTDisablePEX: true, BTDisableUPNP: true, BTDisableUTP: true, BTRetrackersMode: "off",
 		DownloadDir:        dir,
 		TorrentPort:        0,
 		MaxActiveDownloads: 1,

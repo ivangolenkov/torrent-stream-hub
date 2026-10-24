@@ -33,13 +33,13 @@ type pexConnState struct {
 }
 
 func (s *pexConnState) IsEnabled() bool {
-	return s.enabled
+	return s.enabled && s.torrent != nil && s.torrent.publicDiscoveryAllowedLocked()
 }
 
 // Init is called from the reader goroutine upon the extended handshake completion
 func (s *pexConnState) Init(c *PeerConn) {
 	xid, ok := c.PeerExtensionIDs[pp.ExtensionNamePex]
-	if !ok || xid == 0 || c.t.cl.config.DisablePEX {
+	if !ok || xid == 0 || c.t.cl.config.DisablePEX || !c.t.publicDiscoveryAllowedLocked() {
 		return
 	}
 	s.xid = xid
@@ -49,7 +49,10 @@ func (s *pexConnState) Init(c *PeerConn) {
 	s.readyfn = c.tickleWriter
 	s.gate = make(chan struct{}, 1)
 	s.timer = time.AfterFunc(0, func() {
-		s.gate <- struct{}{}
+		select {
+		case s.gate <- struct{}{}:
+		default:
+		}
 		s.readyfn() // wake up the writer
 	})
 	s.enabled = true
@@ -80,6 +83,9 @@ func (s *pexConnState) numPending() int {
 // Share is called from the writer goroutine if when it is woken up with the write buffers empty
 // Returns whether there's more room on the send buffer to write to.
 func (s *pexConnState) Share(postfn messageWriter) bool {
+	if !s.IsEnabled() {
+		return true
+	}
 	select {
 	case <-s.gate:
 		if tx := s.genmsg(); tx != nil {
@@ -122,6 +128,9 @@ func (s *pexConnState) updateRemoteLiveConns(rx pp.PexMsg) (errs []error) {
 
 // Recv is called from the reader goroutine
 func (s *pexConnState) Recv(payload []byte) error {
+	if !s.IsEnabled() {
+		return nil
+	}
 	rx, err := pp.LoadPexMsg(payload)
 	if err != nil {
 		return fmt.Errorf("unmarshalling pex message: %w", err)
@@ -160,6 +169,7 @@ func (s *pexConnState) Recv(payload []byte) error {
 }
 
 func (s *pexConnState) Close() {
+	s.enabled = false
 	if s.timer != nil {
 		s.timer.Stop()
 	}

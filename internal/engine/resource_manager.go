@@ -14,8 +14,9 @@ func (e *Engine) resourceMonitor(ctx context.Context) {
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 
-	e.manageResources()
-
+	// Registration performs the initial pass synchronously. Starting another
+	// pass here can outlive New and coalesce that pass (or the next command)
+	// against a health probe that was captured before the command's changes.
 	for {
 		select {
 		case <-ctx.Done():

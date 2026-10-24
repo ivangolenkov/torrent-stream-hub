@@ -557,7 +557,9 @@ func TestStreamSource_ConcurrentDownloadAndDirectStream(t *testing.T) {
 	}
 
 	// Allow downloads on engine
+	e.admissionMu.Lock()
 	e.cfg.MaxActiveDownloads = 5
+	e.admissionMu.Unlock()
 
 	// Add Torrent B to our engine as a downloading torrent
 	torB, err := e.AddTorrentFile(bytes.NewReader(torrentBytesB))

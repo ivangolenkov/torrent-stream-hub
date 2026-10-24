@@ -256,6 +256,10 @@ func (cn *PeerConn) utp() bool {
 }
 
 func (cn *PeerConn) onClose() {
+	// An upload read may still be outside the client lock. Retire its request
+	// before it returns (possibly with a closed-storage error), and release
+	// buffered data that can no longer be written to this peer.
+	cn.deleteAllPeerRequests()
 	if cn.pex.IsEnabled() {
 		cn.pex.Close()
 	}

@@ -1,6 +1,42 @@
 # Фаза 40 — Отчёт об имплементации
 
-Статус: **реализация и локальные исправления выполнены; приёмка CI не завершена**. В запуске `40085220944` упали Windows storage и Linux checks. Ошибка Windows-проверки исправлена локально; точная причина Linux-сбоя требует лога упавшего шага. Основание: [план фазы 40](../phase40-review-fixes-and-architecture-hardening.md). Фаза 41 не начата.
+Статус: **реализация и локальные исправления выполнены; приёмка CI не завершена**. Последний разобранный запуск `40137410282` остановился на Linux `race-root`; исправления теста readiness и ошибок, воспроизведённых в Linux, описаны ниже. Предыдущие Windows-исправления также требуют подтверждённой CI-приёмки. Основание: [план фазы 40](../phase40-review-fixes-and-architecture-hardening.md). Фаза 41 не начата.
+
+## Linux race-root — запуск 40137410282
+
+[Job 121001767404](https://github.com/ivangolenkov/torrent-stream-hub/actions/runs/40137410282/job/121001767404), commit `4649c3334708a8f608f17f144b13d9b024e8601a`. Публичная страница подтверждает падение `Run make check`, exit 2. Полный лог требует входа, а GitHub API вернул rate limit. Пользователь предоставил фрагменты: ошибку `TestProcessShutdownWithOpenSSEAndBodyWait` (`add: 503 ... restoring persisted torrents`) и отдельный `FAIL torrent-stream-hub/internal/engine` в `race-root`. Имя упавшего engine-теста в предоставленных фрагментах отсутствует; точное совпадение с локальными engine-сбоями не утверждается.
+
+Подтверждённые причины и изменения:
+
+- `cmd/hub/shutdown_test.go`: старый process test считал ответ `/echo` готовностью всего API. После раннего запуска HTTP echo отвечает ещё во время восстановления, а добавление корректно получает 503. Тест теперь ждёт 200 от `/api/v1/torrents`, повторяя запрос при 503; неожиданные статусы остаются ошибкой. Проверки открытого SSE, незавершённого body и SIGTERM сохранены.
+- Linux/arm64 повтор с `GOMAXPROCS=2`, Go 1.25.8 и race detector воспроизвёл ошибки состояния/слотов в engine-тестах, ожидания probe и конкретную гонку: запись `e.cfg.MaxActiveDownloads` в `TestStreamSource_ConcurrentDownloadAndDirectStream` против чтения в `manageResources`. В `internal/engine/stream_source_test.go` запись защищена `admissionMu`, как и чтение.
+- `internal/engine/resource_manager.go`: удалён дублирующий начальный фоновый `manageResources`. Первый проход уже синхронно выполняется при регистрации торрента; отложенный старт фоновой горутины мог занять health probe раньше регистрации или следующей команды, заставив их собственный проход пропустить эту запись. Монитор начинает периодические проверки по прежнему пятисекундному таймеру. Admission, проверки диска, coalescing и запрет ожидания чужого syscall сохранены; FIFO/selection/DiskFull assertions не ослаблялись.
+- Последующий полный `make check` на macOS воспроизвёл отдельную production-панику `panic: true` в `PeerConn.servePeerRequest`: чтение upload-запроса возвращалось после закрытия торрента, error path не удалял запрос, а deferred assertion обнаруживал его в `unreadPeerRequests`. В `pkg/anacrolix-torrent/peerconn.go` закрытие peer теперь очищает непрочитанные запросы и готовые буферы. `peerconn_shutdown_test.go` блокирует настоящий upload refresh вне client lock, выполняет `Torrent.Drop`, проверяет освобождение обеих очередей и завершение worker; это детерминированная регрессия найденной паники. Существующий assertion сохранён.
+- Контракт начального прохода и синхронизация тестового изменения конфигурации описаны в `internal/engine/CONCURRENCY.md`.
+
+Проверки:
+
+| Среда / команда | Результат |
+| --- | --- |
+| macOS, исходный `make check` | До правок полностью прошёл, что не воспроизводило ошибку CI. |
+| macOS, `go test -race -count=20 -timeout=120s ./cmd/hub -run 'TestProcessShutdownWithOpenSSEAndBodyWait\|TestHTTPAvailableDuringPersistedRestore'` | 20 повторов исправленного process test и регрессий раннего HTTP прошли. |
+| macOS, `go test -race -count=10 -timeout=180s ./internal/engine` | 10 полных повторов после исправлений прошли. |
+| Linux/arm64, два CPU, `GOMAXPROCS=2`, `go test -race -count=5 -timeout=180s ./internal/engine ./cmd/hub` | Оба пакета прошли по пять раз: engine 47.289 s, cmd/hub 11.464 s. |
+| macOS, fork `go test -race -count=20 -timeout=60s . -run '^TestServePeerRequestDuringTorrentClose$'` | 20 повторов новой регрессии прошли после исправления. |
+| macOS, `go test -race -count=20 -timeout=120s ./internal/engine -run '^TestStreamSource_ConcurrentDownloadAndDirectStream$'` | 20 повторов loopback download/direct-stream сценария прошли после исправления panic. |
+| Linux/arm64, root `go test -race -count=1 -timeout=180s ./...`, затем fork `go test -race -count=1 -timeout=180s . ./storage` | Полные root и core/storage fork suites прошли с окончательным кодом. |
+| macOS, окончательный `make check` | Успешно: root/fork tests и race, оба vet, 27 Vitest-тестов, frontend build и backend build. Лог: `/tmp/tsh-actions-40137410282-acceptance.log`. |
+| `git diff --check` | Успешно. |
+
+Первый Linux stress запуск с `-count=15 -timeout=180s` завершился общим timeout после множества полных проходов, уже выведя самостоятельные ошибки assertions и DATA RACE. Этот общий timeout не объявляется доказательством зависания конкретного теста. Логи до/после: `/tmp/tsh-ci-40085220944-linux/{engine,fixed}-40137410282.log`. Контейнер подключал исходники только для чтения; это Alpine/Linux arm64, а не Ubuntu/amd64 runner GitHub.
+
+- [x] Устранено ошибочное ожидание readiness в process test; повторные startup/shutdown regression tests проходят.
+- [x] Исправлены воспроизведённая test data race и конкурирующий начальный scheduler pass; повторные engine suites проходят на macOS и Linux.
+- [x] Исправлена воспроизведённая panic при закрытии peer во время upload; очереди очищаются, новый regression test и loopback integration прошли по 20 повторов.
+- [x] Итоговый локальный `make check` и полные Linux root/fork race suites прошли. Платформа контейнера и границы сравнения с CI указаны выше.
+- [ ] Подтвердить успешный удалённый `make check`; исходное имя engine-теста в GitHub по имеющимся фрагментам не установлено.
+
+Работа остаётся в рамках lifecycle/concurrency и CI-приёмки фазы 40. Общий DoD не закрыт локальными повторами.
 
 ## Запуск поверх сохранённых данных — 25 октября 2026
 

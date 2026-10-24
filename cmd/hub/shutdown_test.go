@@ -59,15 +59,26 @@ func TestProcessShutdownWithOpenSSEAndBodyWait(t *testing.T) {
 	defer func() { cancel(); <-done }()
 	base := "http://127.0.0.1:" + strconv.Itoa(port)
 	client := &http.Client{Timeout: time.Second}
+	// Echo only proves that HTTP is listening: restore deliberately keeps it
+	// available before torrent commands are admitted. Wait for the API gate.
 	for {
-		response, err := client.Get(base + "/echo")
+		response, err := client.Get(base + "/api/v1/torrents")
 		if err == nil {
+			content, readErr := io.ReadAll(response.Body)
 			response.Body.Close()
-			break
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			if response.StatusCode == http.StatusOK {
+				break
+			}
+			if response.StatusCode != http.StatusServiceUnavailable {
+				t.Fatalf("startup readiness: %s %s", response.Status, content)
+			}
 		}
 		select {
 		case err := <-done:
-			t.Fatalf("child exited before listen: %v", err)
+			t.Fatalf("child exited before torrent API readiness: %v\n%s", err, childOutput.String())
 		case <-ctx.Done():
 			t.Fatal(ctx.Err())
 		case <-time.After(10 * time.Millisecond):

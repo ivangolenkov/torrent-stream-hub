@@ -33,6 +33,13 @@ the current FIFO head and actual reservation count, including pending preparatio
 an earlier sorted list/local count cannot authorize a later grant. Grants issue
 an attachment-local slot token. Failed cleanup can release only its own token.
 
+Registration runs the first scheduler pass; the background resource monitor starts
+with its five-second tick. It does not launch a second startup pass that can race
+registration/initial commands and cause their pass to skip an already-owned health
+probe. Periodic passes still coalesce per attachment and never wait on another
+pass's filesystem work. Tests changing scheduler configuration use admissionMu,
+the same lock as scheduler readers.
+
 `admitPayloadLocked` is entered/returns with admissionMu held, but releases it for
 probe and copied metainfo persistence. It owns a pointer preparation ticket with
 policy epoch, runtime binding and slot token. Concurrent preparation for one raw
@@ -109,6 +116,11 @@ streams, joins owned tasks/commands, then closes library/storage. Synchronous
 registration, unlocked preparation and detach are accounted work. Never join work
 under admissionMu: it may need that lock to validate/retire. Direct closer callbacks
 must not synchronously join the Delete/Close that is closing them.
+
+The fork clears unread upload requests and buffered responses when a peer closes.
+A request reader returning after Torrent.Drop must find its request retired even
+when storage returns a closed error; it cannot publish bytes to the closed peer or
+leave the request-server progress assertion unsatisfied.
 
 SSE sampler ordering is separate from commands. JSON/network writes occur outside
 command/global locks. Subscription publication/close share their own short lock;

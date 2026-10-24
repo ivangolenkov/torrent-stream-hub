@@ -145,6 +145,16 @@ callbacks cannot publish, and async file/piece/list requests retain request guar
 
 ## Phase 40 command and publication boundaries
 
+Startup restores persisted records in FIFO order before temporary cleanup and the
+first SyncWorker publication. HTTP listens during this work, but torrent operations
+return 503/Retry-After until initialization finishes. Echo, static assets, logs and
+SSE subscriptions remain available without accessing runtime state. Pending SSE
+clients receive the first actual snapshot; no synthetic empty list or successful
+mutation is emitted during restore. Per-record failures remain logged and returned
+to main, which preserves the existing policy of serving successfully restored and
+DB-only records. Signal cancellation reaches DB reads and record waits; the startup
+owner joins work before closing engine/storage/SQLite.
+
 `runIntentCommand` / `applyCommittedIntent` own commit/apply/bind failure handling.
 Duplicate Add commits metadata/permanence together, with one revision. A semantic
 no-op does not advance it and cannot acknowledge an earlier failed apply. Full

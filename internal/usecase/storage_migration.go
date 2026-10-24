@@ -35,14 +35,18 @@ type migrationJournal struct {
 	Entries []migrationEntry
 }
 
-func (uc *TorrentUseCase) initializeStorageLocked() error {
+func (uc *TorrentUseCase) initializeStorageLocked(contexts ...context.Context) error {
+	ctx := uc.requestContext(contexts...)
 	uc.storageInitMu.Lock()
 	defer uc.storageInitMu.Unlock()
-	all, err := uc.repo.GetAllTorrents()
+	all, err := uc.repo.GetAllTorrentsContext(ctx)
 	if err != nil {
 		return err
 	}
 	for _, t := range all {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		m, err := uc.repo.StorageMapping(t.Hash)
 		if err != nil {
 			return err

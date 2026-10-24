@@ -654,15 +654,21 @@ func validateRelativeDownloadPath(relPath string) error {
 }
 
 func (uc *TorrentUseCase) RestoreTorrents() error {
-	if err := uc.initializeStorageLocked(); err != nil {
+	return uc.RestoreTorrentsContext(uc.engine.Context())
+}
+
+func (uc *TorrentUseCase) RestoreTorrentsContext(ctx context.Context) error {
+	started := time.Now()
+	logging.Infof("restoring persisted torrents stage=storage-init")
+	if err := uc.initializeStorageLocked(ctx); err != nil {
 		return err
 	}
-	logging.Infof("restoring persisted torrents")
-	torrents, err := uc.repo.GetAllTorrents()
+	torrents, err := uc.repo.GetAllTorrentsContext(ctx)
 	if err != nil {
 		logging.Warnf("failed to load torrents for restore: %v", err)
 		return err
 	}
+	logging.Infof("restore loaded persisted torrents count=%d", len(torrents))
 
 	var restoreErr error
 	sort.Slice(torrents, func(i, j int) bool {
@@ -671,39 +677,54 @@ func (uc *TorrentUseCase) RestoreTorrents() error {
 		}
 		return torrents[i].Hash < torrents[j].Hash
 	})
-	for _, t := range torrents {
-		release, err := uc.lockRecord(t.Hash)
+	restored, skipped, failed := 0, 0, 0
+	for index, t := range torrents {
+		if err := ctx.Err(); err != nil {
+			return errors.Join(restoreErr, err)
+		}
+		recordStarted := time.Now()
+		logging.Infof("restore torrent starting hash=%s record=%d/%d", t.Hash, index+1, len(torrents))
+		ok, err := uc.restorePersistedTorrent(ctx, t.Hash)
 		if err != nil {
-			return err
-		}
-		current, err := uc.repo.GetTorrent(t.Hash)
-		if err != nil {
-			release()
-			return err
-		}
-		if current == nil {
-			release()
-			continue
-		}
-		t = current
-		if err := uc.checkStorageAvailable(t.Hash); err != nil {
-			release()
-			continue
-		}
-		if _, pending, err := uc.repo.CleanupPaths(t.Hash); err != nil {
-			release()
-			return err
-		} else if pending {
-			release()
-			continue
-		}
-		if err := uc.restoreMappedTorrentLocked(t); err != nil && !errors.Is(err, ErrMetadataPending) {
+			failed++
 			restoreErr = errors.Join(restoreErr, fmt.Errorf("restore torrent %s: %w", t.Hash, err))
+			logging.Warnf("restore torrent failed hash=%s duration=%s: %v", t.Hash, time.Since(recordStarted), err)
+		} else if ok {
+			restored++
+			logging.Infof("restore torrent finished hash=%s duration=%s", t.Hash, time.Since(recordStarted))
+		} else {
+			skipped++
+			logging.Infof("restore torrent deferred hash=%s duration=%s", t.Hash, time.Since(recordStarted))
 		}
-		release()
 	}
-
+	logging.Infof("persisted torrent restore finished restored=%d deferred=%d failed=%d duration=%s", restored, skipped, failed, time.Since(started))
 	return restoreErr
+}
+
+func (uc *TorrentUseCase) restorePersistedTorrent(ctx context.Context, hash string) (bool, error) {
+	release, err := uc.lockRecord(hash, ctx)
+	if err != nil {
+		return false, err
+	}
+	defer release()
+	current, err := uc.repo.GetTorrentContext(ctx, hash)
+	if err != nil || current == nil {
+		return false, err
+	}
+	if err := uc.checkStorageAvailable(hash); err != nil {
+		if errors.Is(err, ErrStorageConflict) {
+			return false, nil
+		}
+		return false, err
+	}
+	if _, pending, err := uc.repo.CleanupPaths(hash); err != nil || pending {
+		return false, err
+	}
+	err = uc.restoreMappedTorrentLocked(current)
+	if errors.Is(err, ErrMetadataPending) {
+		return false, nil
+	}
+	return err == nil, err
 }
 
 func (uc *TorrentUseCase) restoreTorrentToEngine(t *models.Torrent) (*models.Torrent, error) {

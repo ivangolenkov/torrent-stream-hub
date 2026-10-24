@@ -20,7 +20,9 @@ type snapshotFrameWriter struct {
 func (w *snapshotFrameWriter) SetWriteDeadline(time.Time) error { return nil }
 func (w *snapshotFrameWriter) Write(p []byte) (int, error) {
 	n, err := w.ResponseRecorder.Write(p)
-	w.cancel()
+	if strings.Contains(string(p), "\ndata: ") {
+		w.cancel()
+	}
 	return n, err
 }
 func (w *snapshotFrameWriter) WriteString(s string) (int, error) { return w.Write([]byte(s)) }
@@ -47,7 +49,12 @@ func TestSnapshotVersionEmptyRESTSSEAndCommandReceipt(t *testing.T) {
 	defer cancel()
 	writer := &snapshotFrameWriter{httptest.NewRecorder(), cancel}
 	h.SSEEvents(writer, httptest.NewRequest("GET", "/events", nil).WithContext(ctx))
-	frame := strings.Split(strings.TrimPrefix(writer.Body.String(), "id: "), "\n")
+	// SSE comments may precede the first versioned data frame.
+	_, dataFrame, found := strings.Cut(writer.Body.String(), "id: ")
+	if !found {
+		t.Fatal("SSE snapshot version missing", writer.Body.String())
+	}
+	frame := strings.Split(dataFrame, "\n")
 	if len(frame) < 2 || frame[1] != "data: []" {
 		t.Fatal("SSE array compatibility changed", writer.Body.String())
 	}

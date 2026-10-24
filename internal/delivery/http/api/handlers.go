@@ -342,6 +342,11 @@ func (h *APIHandler) SSEEvents(w http.ResponseWriter, r *http.Request) {
 		}
 		return controller.Flush() == nil
 	}
+	// Establish the subscription even if startup has not published a snapshot.
+	// Comments keep EventSource connected without implying an empty torrent list.
+	if !write(": connected\n\n") {
+		return
+	}
 
 	for {
 		select {

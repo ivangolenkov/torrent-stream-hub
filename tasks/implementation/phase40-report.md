@@ -2,6 +2,35 @@
 
 Статус: **реализация и локальные исправления выполнены; приёмка CI не завершена**. В запуске `40085220944` упали Windows storage и Linux checks. Ошибка Windows-проверки исправлена локально; точная причина Linux-сбоя требует лога упавшего шага. Основание: [план фазы 40](../phase40-review-fixes-and-architecture-hardening.md). Фаза 41 не начата.
 
+## Запуск поверх сохранённых данных — 25 октября 2026
+
+Пользователь сообщил об остановке на `restoring persisted torrents` и недоступности HTTP. Подтверждена причина недоступности HTTP: `main` синхронно выполнял restore, startup cleanup и первый snapshot до открытия HTTP listener и установки обработчиков сигналов. Поэтому задержка любой записи блокировала весь HTTP, включая диагностику. Конкретная причина задержки на данных пользователя пока не установлена: его ОС, логи дальнейших стадий и набор сохранённых данных не получены.
+
+- `cmd/hub/main.go`: сигналы подключены в начале запуска; HTTP listener открывается перед restore. Startup и периодические workers имеют одного владельца: при сигнале или ошибке Serve отменяются контексты, закрываются SSE, останавливается HTTP и ожидается завершение workers до закрытия engine/storage/SQLite. Порядок restore → temporary cleanup → initial snapshot сохранён.
+- `internal/delivery/http/router.go`: до завершения startup операции с торрентами возвращают 503 с `Retry-After: 1`; заголовок доступен через CORS. Статика, `/echo`, logs и logs/status отвечают во время восстановления. `GET /api/v1/events` принимает ограниченные существующим лимитом SSE subscriptions без обращения к runtime.
+- `internal/delivery/http/api/handlers.go`: SSE сразу отправляет комментарий и flush, затем получает первый реальный snapshot. Пустой список не подставляется вместо восстанавливаемых данных. Открытая во время запуска веб-страница получает данные без перезагрузки; frontend-код не изменён.
+- `internal/usecase/torrent_uc.go`, `storage_migration.go`: добавлен `RestoreTorrentsContext`, контекст передаётся чтению persisted snapshots и ожиданию record handles. Логи показывают storage-init, количество записей, начало/окончание/ошибку/отложенное восстановление каждой записи с hash и длительностью; main логирует cleanup/snapshot и готовность API. Ошибки отдельных записей собираются и логируются; обслуживание восстановленных и DB-only записей сохраняется.
+- `cmd/hub/startup_test.go`: интеграционный тест использует SQLite, сохранённый `.torrent`, настоящий engine и намеренно блокирует storage resolver под library lock. Проверяются доступность HTTP/страницы/логов/CORS, 503 для torrent API, подписка SSE до завершения restore, публикация восстановленного торрента в той же подписке, отмена и ожидание startup при shutdown. Отдельный тест проверяет отмену/ожидание startup при ошибке listener. Тест SSE snapshot version учитывает допустимые комментарии перед data frame.
+- README, `internal/engine/CONCURRENCY.md` и `internal/usecase/STATE.md` описывают новый контракт запуска. Изменение продолжает lifecycle/HTTP работы фазы 40; задачи следующей фазы не выполнялись.
+
+Проверки на macOS arm64 / Go 1.25.8:
+
+| Команда | Результат |
+| --- | --- |
+| `go test -count=1 -timeout=180s ./...` | Полный набор тестов корневого модуля прошёл. |
+| `go test -race -count=1 -timeout=180s ./cmd/hub ./internal/usecase ./internal/delivery/http/...` | Все тесты затронутых lifecycle/restore/HTTP пакетов прошли. Линкер macOS выводит предупреждение LC_DYSYMTAB, итоговый exit code 0. |
+| `go vet ./...` | Успешно. |
+| `GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o /tmp/tsh-phase40-linux-amd64 ./cmd/hub` | Успешно; это сборка, а не выполнение на Linux. |
+| `GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -o /tmp/tsh-phase40-windows-amd64.exe ./cmd/hub` | Успешно; нативное выполнение на Windows не проводилось. |
+| `git diff --check` | Успешно. |
+
+- [x] Медленное восстановление не препятствует доступу к HTTP-диагностике; команды не обходят startup readiness, CORS `*` сохранён.
+- [x] SIGINT/SIGTERM и ошибки HTTP отменяют startup; отменяемые ожидания завершаются до закрытия ресурсов. SSE продолжает работу после восстановления.
+- [x] Регрессии, root tests, целевые race tests, vet, cross-build и документация выполнены.
+- [ ] Подтвердить запуск на исходных данных пользователя и установить причину первоначальной задержки по новым progress logs/диагностике. Данные пользователя не изменялись.
+
+Снята зависимость HTTP от завершения restore, но произвольный зависший filesystem syscall не объявляется исправленным или прерываемым. Правила ownership, миграции payload, hash verification и DiskFull не ослаблены. Общий DoD фазы остаётся открытым до удалённой CI-приёмки, описанной ниже.
+
 ## Исправление Windows CI — закрытие mmap storage
 
 Пользователь предоставил сбой очистки `TempDir` в `TestFileIoImplementationsSeekDataDetection/mmap` и `TestShortFile`: Windows не мог удалить открытые файлы. Кэш `mmapFileIo` удерживал собственную ссылку на mapping после закрытия отдельных reader/writer, а `fileTorrentImpl.Close()` не освобождал ресурсы backend. В `TestShortFile` дополнительно отсутствовал вызов `TorrentImpl.Close()`. На macOS успешное удаление открытого файла скрывало утечку.

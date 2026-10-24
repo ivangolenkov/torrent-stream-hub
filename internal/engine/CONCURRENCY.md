@@ -91,6 +91,17 @@ and failure identity; live byte/peer/speed/activity remain sampled telemetry.
 
 ## Shutdown and publication
 
+Main registers signal cancellation before initialization and binds HTTP before
+starting persisted restore. The server owns and joins the startup/periodic worker
+goroutine on both cancellation and listener failure, before deferred engine and
+database closure. Startup preserves restore -> temporary cleanup -> initial
+snapshot order. HTTP gates torrent operations with 503/Retry-After until this
+sequence finishes; static assets, echo, logs and bounded SSE subscriptions do not
+enter engine operations. SSE initially sends only a comment and receives the first
+published snapshot. It never presents an empty list as a completed startup result.
+Restore passes cancellation through DB snapshot reads and record-handle waits;
+per-torrent storage/filesystem operations retain the engine's lifetime context.
+
 storageTaskMu guards task admission/WaitGroup.Add against cancellation. Application
 coordinator admission closes with Engine context, cancels waiters and joins command
 handles without engine/registry/record locks. Close cancels first, quiesces, detaches

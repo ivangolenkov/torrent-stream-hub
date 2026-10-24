@@ -107,6 +107,17 @@ space before any payload admission. Keep backups and leave free-space headroom.
 
 ## Concurrent Commands, Shutdown And Deletion Recovery
 
+HTTP starts before persisted torrents are restored. During restoration, the web
+page, `GET /echo`, `/api/v1/logs` and `/api/v1/logs/status` remain available.
+Torrent operations return `503 Service Unavailable` with `Retry-After: 1` until
+restoration, startup temporary cleanup and the initial snapshot finish. SSE
+subscriptions can connect immediately and receive that first snapshot when it is
+published; connecting does not publish an empty torrent list. The UI opened during
+startup receives updates without a page reload. Logs include the storage-init
+stage, torrent count, each hash and its duration, cleanup and snapshot stages.
+SIGINT/SIGTERM cancels startup as well as normal workers; engine/storage and SQLite
+stay open until accepted work finishes. A blocked OS syscall can still delay exit.
+
 Pause, Resume, scheduler activation and stream priority reconcile share an engine
 admission lock. A delayed metadata/recheck/discovery/stream callback cannot undo
 a completed Pause or act on a deleted torrent generation. Stream overlays combine

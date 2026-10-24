@@ -30,6 +30,8 @@ func main() {
 }
 
 func run() (runErr error) {
+	ctx, stopSignals := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stopSignals()
 	cfg := config.Load()
 	if err := cfg.ValidateResources(); err != nil {
 		return err
@@ -84,55 +86,83 @@ func run() (runErr error) {
 	if err := uc.SetTemporaryLimit(cfg.MaxTemporaryTorrents); err != nil {
 		return err
 	}
-	if err := uc.RestoreTorrents(); err != nil {
-		logging.Warnf("failed to restore persisted torrents: %v", err)
-	}
-	uc.CleanupTemporary("startup")
 	syncWorker := usecase.NewSyncWorker(uc)
-	syncWorker.Refresh()
-	workerCtx, stopWorker := context.WithCancel(context.Background())
-	workerDone := make(chan struct{})
-	cleanupDone := make(chan struct{})
-	go func() { defer close(cleanupDone); uc.RunTemporaryCleanup(workerCtx) }()
-	go func() { defer close(workerDone); syncWorker.StartContext(workerCtx) }()
-	defer func() { eng.BeginShutdown(); stopWorker(); <-workerDone; <-cleanupDone }()
-
+	defer syncWorker.Close()
+	ready := make(chan struct{})
 	server := &http.Server{
 		Addr:              ":" + cfg.Port,
-		Handler:           deliveryhttp.NewRouterWithLogs(uc, syncWorker, files, web.DistFS()),
+		Handler:           deliveryhttp.NewRouterWithReadiness(uc, syncWorker, files, ready, web.DistFS()),
 		BaseContext:       func(net.Listener) context.Context { return eng.Context() },
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
-	serverErrors := make(chan error, 1)
-	go func() {
-		logging.Infof("Torrent-Stream-Hub listening on :%s", cfg.Port)
-		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			serverErrors <- err
-		}
-	}()
-
-	stop := make(chan os.Signal, 1)
-	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
-	defer signal.Stop(stop)
-	select {
-	case <-stop:
-	case err := <-serverErrors:
+	// Bind before restoring: a busy port must fail before any restore effects,
+	// and slow storage must not prevent HTTP diagnostics from becoming available.
+	listener, err := net.Listen("tcp", server.Addr)
+	if err != nil {
 		return fmt.Errorf("server failed: %w", err)
 	}
+	return serve(ctx, server, listener, func(workerCtx context.Context) {
+		if err := uc.RestoreTorrentsContext(workerCtx); err != nil && workerCtx.Err() == nil {
+			logging.Warnf("failed to restore persisted torrents: %v", err)
+		}
+		if workerCtx.Err() != nil {
+			return
+		}
+		logging.Infof("startup stage=temporary-cleanup")
+		uc.CleanupTemporary("startup")
+		logging.Infof("startup stage=initial-snapshot")
+		syncWorker.Refresh()
+		if workerCtx.Err() != nil {
+			return
+		}
+		close(ready)
+		logging.Infof("startup restore complete; torrent API ready")
+		cleanupDone := make(chan struct{})
+		go func() { defer close(cleanupDone); uc.RunTemporaryCleanup(workerCtx) }()
+		defer func() { <-cleanupDone }()
+		syncWorker.StartContext(workerCtx)
+	}, func() {
+		eng.BeginShutdown()
+		syncWorker.Close()
+	})
+}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+// Startup and workers have one owner. Cancel before joining them, and keep the
+// engine/database alive until they retire even when startup has not completed.
+func serve(ctx context.Context, server *http.Server, listener net.Listener, runWorkers func(context.Context), beginShutdown func()) error {
+	defer listener.Close()
+	workerCtx, stopWorker := context.WithCancel(ctx)
+	workerDone := make(chan struct{})
+	go func() { defer close(workerDone); runWorkers(workerCtx) }()
+	defer func() { <-workerDone }()
+	defer stopWorker()
+	serverErrors := make(chan error, 1)
+	go func() {
+		logging.Infof("Torrent-Stream-Hub listening on %s", listener.Addr())
+		serverErrors <- server.Serve(listener)
+	}()
+
+	var serveErr error
+	select {
+	case <-ctx.Done():
+	case err := <-serverErrors:
+		if !errors.Is(err, http.ErrServerClosed) {
+			serveErr = fmt.Errorf("server failed: %w", err)
+		}
+	}
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	// Close long-lived SSE subscriptions before waiting for HTTP handlers.
-	eng.BeginShutdown()
-	syncWorker.Close()
 	stopWorker()
+	beginShutdown()
 
-	if err := server.Shutdown(ctx); err != nil {
+	if err := server.Shutdown(shutdownCtx); err != nil {
 		logging.Errorf("server shutdown failed: %v", err)
 		_ = server.Close()
 	}
-	return nil
+	return serveErr
 }
 
 func ensureRuntimeDirs(downloadDir, dbPath string) error {

@@ -27,6 +27,13 @@ func NewRouter(uc *usecase.TorrentUseCase, sw *usecase.SyncWorker, staticFS ...h
 }
 
 func NewRouterWithLogs(uc *usecase.TorrentUseCase, sw *usecase.SyncWorker, logs logging.LogReader, staticFS ...http.FileSystem) http.Handler {
+	return NewRouterWithReadiness(uc, sw, logs, nil, staticFS...)
+}
+
+// A nil readiness channel means startup has already completed. While restoring,
+// static assets, echo, logs and snapshot subscriptions stay available without
+// entering engine operations. The first snapshot is published after restore.
+func NewRouterWithReadiness(uc *usecase.TorrentUseCase, sw *usecase.SyncWorker, logs logging.LogReader, ready <-chan struct{}, staticFS ...http.FileSystem) http.Handler {
 	r := chi.NewRouter()
 
 	// Configure CORS to allow all origins as per requirements for Smart TV/Local network
@@ -34,7 +41,7 @@ func NewRouterWithLogs(uc *usecase.TorrentUseCase, sw *usecase.SyncWorker, logs 
 		AllowedOrigins:   []string{"*"},
 		AllowedMethods:   []string{"GET", "HEAD", "POST", "PUT", "DELETE", "OPTIONS"},
 		AllowedHeaders:   []string{"*"},
-		ExposedHeaders:   []string{"Accept-Ranges", "Content-Disposition", "Content-Length", "Content-Range", "Content-Type", "X-Hub-Snapshot", "X-Hub-Details"},
+		ExposedHeaders:   []string{"Accept-Ranges", "Content-Disposition", "Content-Length", "Content-Range", "Content-Type", "Retry-After", "X-Hub-Snapshot", "X-Hub-Details"},
 		AllowCredentials: false,
 		MaxAge:           300,
 	}))
@@ -48,6 +55,7 @@ func NewRouterWithLogs(uc *usecase.TorrentUseCase, sw *usecase.SyncWorker, logs 
 	// TorrServer Layer
 	torrServerHandler := torrserver.NewTorrServerHandler(uc)
 	r.Group(func(r chi.Router) {
+		r.Use(waitForRestore(ready))
 		torrServerHandler.RegisterRoutes(r)
 	})
 
@@ -56,7 +64,10 @@ func NewRouterWithLogs(uc *usecase.TorrentUseCase, sw *usecase.SyncWorker, logs 
 	r.Route("/api/v1", func(r chi.Router) {
 		r.Get("/logs", api.LogsHandler(logs))
 		r.Get("/logs/status", api.LogsStatusHandler(logs))
-		apiHandler.RegisterRoutes(r)
+		r.Group(func(r chi.Router) {
+			r.Use(waitForRestore(ready))
+			apiHandler.RegisterRoutes(r)
+		})
 	})
 
 	if len(staticFS) > 0 && staticFS[0] != nil {
@@ -66,6 +77,24 @@ func NewRouterWithLogs(uc *usecase.TorrentUseCase, sw *usecase.SyncWorker, logs 
 	}
 
 	return r
+}
+
+func waitForRestore(ready <-chan struct{}) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			startupSafe := r.Method == http.MethodGet && (r.URL.Path == "/echo" || r.URL.Path == "/api/v1/events")
+			if ready != nil && !startupSafe {
+				select {
+				case <-ready:
+				default:
+					w.Header().Set("Retry-After", "1")
+					response.Error(w, http.StatusServiceUnavailable, "server is restoring persisted torrents; retry shortly")
+					return
+				}
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
 }
 
 func accessLogger(next http.Handler) http.Handler {

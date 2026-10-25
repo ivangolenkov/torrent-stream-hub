@@ -1,8 +1,12 @@
 # Фаза 41 — отчёт об имплементации
 
-Статус: **реализация блоков 1–6 завершена; полная приёмка ожидает native Windows CI**. Локальный `make check` и полные native Linux suites прошли. Cross-compile Windows не считается исполнением. Фаза 42 не начата.
+Статус: **завершена; DoD закрыт**. Локальный `make check` и полные native Linux suites прошли; успешный Windows CI подтверждён пользователем. Cross-compile Windows отдельно не считается исполнением. Фаза 42 не начата.
 
 Основание: [план фазы](../phase41-storage-recovery-and-migration-observability.md) и команды пользователя начать фазу и продолжать до конца без промежуточных остановок. Пользовательский LAN-инстанс, контейнер и payload не изменялись. Изначальные изменения документов фазы 40 сохранены.
+
+## Закрытие приёмки
+
+Пользователь сообщил: «CI windows прошел». Этим закрыт последний открытый пункт native Windows acceptance. Источник результата — подтверждение пользователя; ссылка на run, commit и отдельные логи не предоставлены, агент самостоятельно CI не проверял. Это подтверждение относится к CI, не к установке на пользовательский HDD или проверке рабочего инстанса.
 
 ## Результат по задачам
 
@@ -63,11 +67,12 @@ Downgrade выполняется восстановлением согласов
 | Native Linux/arm64, два CPU, Go 1.25.8: `go test -race -count=1 -timeout=240s ./...`; fork: `go test -race -count=1 -timeout=240s . ./storage`; оба `go vet` | Успешно на окончательном коде. `phase41-linux-acceptance.log`. |
 | `GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go test -c -o <temp>/phase41-usecase-windows.test.exe ./internal/usecase` | Успешно; **только cross-compile**. |
 | Fork: `GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go test -c -o <temp>/phase41-storage-windows.test.exe ./storage` | Успешно; **только cross-compile**. |
+| Windows CI | Успешно по подтверждению пользователя «CI windows прошел»; run и логи агентом не проверялись. |
 | `git diff --check` | Успешно. |
 
 Linux выполнен локальным Docker, не GitHub runner и не пользовательским NAS. Образ `golang:1.26-alpine` использован с **GOTOOLCHAIN=go1.25.8**, GOMAXPROCS=2, `--cpus 2`, readonly mount исходников; test payload создаётся в ephemeral filesystem контейнера. Установлены gcc/g++/musl-dev для race и go-libutp. Начальный запуск без g++ не собрал go-libutp; после добавления C++ compiler полный прогон прошёл. Зависимости проекта не обновлялись.
 
-Новый GitHub CI run не запускался/не проверялся. `gh` отсутствует; native Windows среды в текущем harness нет. Расширенный `Native storage (windows-latest)` job подготовлен в `.github/workflows/checks.yml`, но его исполнение не объявляется состоявшимся. Предыдущая приёмка CI фазы 40 этого не заменяет.
+Новый GitHub CI run агентом не запускался/не проверялся. `gh` отсутствует; native Windows среды в текущем harness нет. Расширенный `Native storage (windows-latest)` job подготовлен в `.github/workflows/checks.yml`; успешный Windows CI впоследствии подтверждён пользователем, как зафиксировано выше. Предыдущая приёмка CI фазы 40 не использовалась вместо этого подтверждения.
 
 В macOS race linker остаётся `LC_DYSYMTAB` warning при exit 0. Первый новый Vitest fixture использовал преобразованный jsdom `import.meta.url`; путь исправлен. Некорректный тестовый single-file hybrid fixture заменён согласованным v1/v2 multi-file fixture; это не объявляется исправлением библиотечного verifier.
 
@@ -100,16 +105,16 @@ Fixture: 128 файлов по 1 байту + файл 1 MiB; всего 129 ф�
 - [x] Нет GUI full reads/per-chunk persistence; I/O/journal measurements приведены выше.
 - [x] Upgrade/reopen/rollback/retry сохраняют старые records/manifests; root/fork regression suites прошли.
 - [x] F41-06: примеры и список удаления legacy options актуальны.
-- [ ] Все native storage checks Linux/macOS/Windows подтверждены: **Linux/macOS прошли, native Windows ещё не исполнен**. Локальный `make check` прошёл.
+- [x] Все native storage checks Linux/macOS/Windows подтверждены: Linux/macOS — локальными результатами, Windows CI — сообщением пользователя. Локальный `make check` прошёл.
 - [x] README, state/concurrency/wire contracts и этот отчёт обновлены.
 
 ## Ограничения и отклонения
 
-- Внешний блокер полной приёмки — native Windows execution/CI. Cross-build не закрывает его. Нужен запуск подготовленного CI job после публикации этих изменений; push/commit/deploy агентом не выполнялись.
+- Прежний внешний блокер native Windows CI закрыт подтверждением пользователя, не cross-build. Самостоятельной проверки run/логов агентом не было; push/commit/deploy агентом не выполнялись.
 - HDD пользователя не измерялся и не менялся. Вместо обещания ускорения записан воспроизводимый локальный stage/I/O/journal profile. Приёмка на рабочем инстансе должна быть отдельной операцией после rehearsal на копии.
 - Heartbeat реализован существующим независимым двухсекундным sampler, не дополнительным worker на операцию. Это сохраняет ресурсные бюджеты; heartbeat не объявляется продвижением syscall.
 - Анализ всего torrent для каждого whole-file кандидата консервативен и может быть дорогим на HDD, но выполняется только явной ограниченной операцией, не startup/Resume. Скорость/ETA не обещаются.
 - Retained-copy bytes — логическая длина файлов; sparse/compressed allocation может отличаться. Нет автоматического backup deletion. Повтор после OS flush error исследует имена/journal; никакая отмена не выдаётся за мгновенное завершение syscall.
 - Моделируются контролируемые границы сбоя и reopen настоящего storage/SQLite; реальные power-loss guarantees и физическая надёжность диска не заявляются.
 
-Дальнейшая разработка фазы 42 не начиналась. Остался внешний native Windows acceptance gate, а не автоматически перенесённые задачи реализации.
+Дальнейшая разработка фазы 42 не начиналась. Открытых пунктов DoD фазы 41 не осталось; проверка и установка на рабочий инстанс остаются отдельной операцией.

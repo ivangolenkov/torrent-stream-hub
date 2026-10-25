@@ -10,11 +10,21 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"runtime"
 	"syscall"
 	"torrent-stream-hub/internal/engine"
 	"torrent-stream-hub/internal/payload"
 	"torrent-stream-hub/internal/repository"
 )
+
+// isDirectoryNotEmpty recognizes native removal errors, including wrapped ones.
+// Other failures (notably access denied) must still stop cleanup.
+func isDirectoryNotEmpty(err error) bool {
+	if runtime.GOOS == "windows" {
+		return errors.Is(err, syscall.Errno(145)) // ERROR_DIR_NOT_EMPTY
+	}
+	return errors.Is(err, syscall.ENOTEMPTY)
+}
 
 func (uc *TorrentUseCase) executeLocation(ctx context.Context, root *os.Root, m *repository.StorageMapping, v *repository.RecoveryRecord, j *storageLocationJournal) error {
 	claim, err := uc.reserveOwnership(ctx, root, v.Hash, []string{j.Source.Root, j.Target.Root})
@@ -407,7 +417,7 @@ func (uc *TorrentUseCase) cleanupLocation(ctx context.Context, root *os.Root, m 
 	if err := uc.locationTransition(m, v, j, "cleanup"); err != nil {
 		return err
 	}
-	if err := root.Remove(j.CleanupPath); err != nil && !errors.Is(err, syscall.ENOTEMPTY) && !errors.Is(err, os.ErrNotExist) {
+	if err := root.Remove(j.CleanupPath); err != nil && !isDirectoryNotEmpty(err) && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
 	if err := storage.SyncRootDirectory(root, j.Source.Root); err != nil {
@@ -452,11 +462,11 @@ func (uc *TorrentUseCase) cleanupLocation(ctx context.Context, root *os.Root, m 
 			if err := storage.SyncRootDirectory(root, filepath.Dir(path)); err != nil {
 				return err
 			}
-		} else if !errors.Is(err, syscall.ENOTEMPTY) {
+		} else if !isDirectoryNotEmpty(err) {
 			return err
 		}
 	}
-	if err := root.Remove(j.Source.Root); err != nil && !errors.Is(err, syscall.ENOTEMPTY) {
+	if err := root.Remove(j.Source.Root); err != nil && !isDirectoryNotEmpty(err) {
 		return err
 	}
 	return storage.SyncRootDirectory(root, filepath.Dir(j.Source.Root))

@@ -508,6 +508,26 @@ func TestStorageMoveSQLFailureAfterPublication(t *testing.T) {
 	}
 }
 
+func TestIsDirectoryNotEmpty(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "retained.bin"), []byte("keep"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.OpenRoot(filepath.Dir(dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	if err := root.Remove(filepath.Base(dir)); err == nil || !isDirectoryNotEmpty(err) {
+		t.Fatalf("native non-empty directory error not recognized: %v", err)
+	}
+	for _, err := range []error{nil, os.ErrPermission, os.ErrNotExist, errors.New("other failure"), &os.PathError{Op: "remove", Path: dir, Err: os.ErrPermission}} {
+		if isDirectoryNotEmpty(err) {
+			t.Fatalf("unrelated error accepted: %v", err)
+		}
+	}
+}
+
 func TestStorageMoveCleanupPreservesRecreatedSource(t *testing.T) {
 	uc, repo, done := setupTorrentUseCase(t)
 	defer done()

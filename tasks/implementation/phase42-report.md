@@ -178,3 +178,14 @@ Native Windows недоступен в этой среде; вместо нег�
 - [x] Полный `go test ./...`, `go vet ./...`, `go build ./...`, `git diff --check` прошли.
 - [x] Windows amd64 / CGO=0: usecase test binary собран.
 - [ ] Повторный native Windows CI; итоговый Windows DoD остаётся открытым. Production-код и архитектура не менялись, следующая фаза не начиналась.
+
+## Исправление Windows CI: cleanup непустого source (2026-10-25)
+
+Следующий присланный Windows failure — `TestStorageMoveCleanupPreservesRecreatedSource`: после корректного сохранения заново созданного файла cleanup ошибочно завершался с `target_exists`. Причина в production-коде: проверялся только Unix `syscall.ENOTEMPTY`, а Windows `os.Root.Remove` возвращает обёрнутый `ERROR_DIR_NOT_EMPTY` (145).
+
+- `internal/usecase/storage_move.go`: единый platform-aware `isDirectoryNotEmpty` применяется при удалении quarantine, вложенных source directories и source root. Непустые каталоги сохраняются; permission и прочие ошибки по-прежнему останавливают cleanup. Рекурсивное удаление не добавлялось.
+- `internal/usecase/storage_move_test.go`: новый тест проверяет настоящий `os.Root.Remove` непустого каталога на текущей ОС и отклонение посторонних ошибок, включая wrapped permission error. Существующий integration-тест сохраняет проверки новых внешних байтов, перенесённых исходных байтов и retained ownership.
+- [x] `go test ./...`, `go vet ./...`, `go build ./...` прошли на macOS.
+- [x] Оба affected теста прошли с `-race -count=3`.
+- [x] Windows amd64 / CGO=0: usecase test binary собран.
+- [ ] Native Windows CI после исправления; итоговый Windows DoD остаётся открытым. Это исправление текущей фазы, следующая фаза не начиналась.

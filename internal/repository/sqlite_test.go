@@ -3,10 +3,49 @@ package repository
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
+	"errors"
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
 )
+
+func TestSQLiteDriverCanceledQuery(t *testing.T) {
+	db, err := NewSQLiteDB(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	conn, err := db.DB().Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	// Call the real driver after acquiring the connection: database/sql normally
+	// rejects an already canceled context, but cancellation can also happen after
+	// that check. The old driver could return (nil Rows, nil error), which panics
+	// in database/sql.Rows.Next or Close.
+	if err := conn.Raw(func(raw any) error {
+		rows, err := raw.(driver.QueryerContext).QueryContext(ctx, "SELECT 1", nil)
+		if rows != nil {
+			defer rows.Close()
+		}
+		if !errors.Is(err, context.Canceled) || rows != nil {
+			return fmt.Errorf("canceled driver query: rows=%T err=%v", rows, err)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var value int
+	if err := conn.QueryRowContext(context.Background(), "SELECT 1").Scan(&value); err != nil || value != 1 {
+		t.Fatalf("connection unusable after cancellation: value=%d err=%v", value, err)
+	}
+}
 
 func TestSQLitePragmasOnEveryConnection(t *testing.T) {
 	db, err := NewSQLiteDB(filepath.Join(t.TempDir(), "pool space.db") + "?cache=private")

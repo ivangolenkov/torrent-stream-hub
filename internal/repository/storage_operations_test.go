@@ -5,10 +5,73 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"torrent-stream-hub/internal/models"
 	"torrent-stream-hub/internal/payload"
+
+	"modernc.org/sqlite"
+	sqlite3 "modernc.org/sqlite/lib"
 )
+
+func TestPendingStorageOperationsCancellation(t *testing.T) {
+	for _, pending := range []bool{false, true} {
+		t.Run(fmt.Sprintf("pending=%t", pending), func(t *testing.T) {
+			db, err := NewSQLiteDB(filepath.Join(t.TempDir(), "cancel.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			// Reuse the same physical connection to detect leaked statements or
+			// interrupts affecting the next request after worker cancellation.
+			db.DB().SetMaxOpenConns(1)
+			r := NewTorrentRepo(db)
+			if pending {
+				if err := r.SaveTorrent(&models.Torrent{Hash: "pending", State: models.StatePaused}); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := db.DB().Exec(`INSERT INTO storage_recovery(hash,record_id,reason,stage) SELECT hash,record_id,'storage_move','queued' FROM torrent_intents WHERE hash='pending'`); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for i := 0; i < 1000; i++ {
+				ctx, cancel := context.WithCancel(context.Background())
+				cancelled := make(chan struct{})
+				go func() {
+					runtime.Gosched()
+					cancel()
+					close(cancelled)
+				}()
+				_, err := r.PendingStorageOperations(ctx)
+				<-cancelled
+				// Cancellation during Rows.Next can surface SQLite's interrupt
+				// before database/sql observes the canceled context.
+				var sqliteErr *sqlite.Error
+				interrupted := errors.As(err, &sqliteErr) && sqliteErr.Code() == sqlite3.SQLITE_INTERRUPT
+				if err != nil && !errors.Is(err, context.Canceled) && !interrupted {
+					t.Fatalf("query %d: %v", i, err)
+				}
+				if _, err := r.PendingStorageOperations(context.Background()); err != nil {
+					t.Fatalf("query after cancellation %d: %v", i, err)
+				}
+			}
+			hashes, err := r.PendingStorageOperations(context.Background())
+			if err != nil {
+				t.Fatal("query after cancellation:", err)
+			}
+			if pending && (len(hashes) != 1 || hashes[0] != "pending") || !pending && len(hashes) != 0 {
+				t.Fatal("pending operations changed:", hashes)
+			}
+			if _, err := db.DB().Exec(`INSERT INTO torrents(hash,name,size,state) VALUES ('after','after',0,'Paused')`); err != nil {
+				t.Fatal("write after cancellation:", err)
+			}
+			var busy, frames, checkpointed int
+			if err := db.DB().QueryRow(`PRAGMA wal_checkpoint(TRUNCATE)`).Scan(&busy, &frames, &checkpointed); err != nil || busy != 0 {
+				t.Fatalf("canceled query retained a WAL reader: busy=%d frames=%d checkpointed=%d err=%v", busy, frames, checkpointed, err)
+			}
+		})
+	}
+}
 
 func TestStorageOperationClaimsCommitAndRetainedOwnership(t *testing.T) {
 	db, err := NewSQLiteDB(filepath.Join(t.TempDir(), "operations.db"))

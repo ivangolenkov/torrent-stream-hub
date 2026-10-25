@@ -145,3 +145,25 @@ Final logs: `/tmp/tsh-phase42-block3-check.log` (имя переиспользо
 Native Windows недоступен в этой среде; вместо него получена только cross-compilation и подготовлен CI workflow. Это предусмотренный планом незакрытый пункт, а не успешная platform-приёмка. Следующая фаза не начиналась. Рабочий NAS и пользовательские загрузки не использовались.
 
 Прочие границы: измерение synthetic local FS, не HDD/NAS; TotalAlloc не peak RSS. Linux прогон использовал установленный Go 1.26.2/CGO=0, macOS — проектный Go 1.25.8 с race; Windows CI должен отдельно подтвердить свои FS semantics. Manifest ограничен 65 536 entries; durable JSON сохраняется пакетами, но суммарный объём переписывания большого journal не заявляется линейным. Marker не доказывает отсутствие клонирования/внешних правок; corrupted initial enrollment требует offline inspection/backup. Весь accepted storage API отвечает 202, включая идемпотентный повтор и reconcile; контракт уточнён по реализации.
+
+## Исправление Linux CI: отмена SQLite-запроса при shutdown (2026-10-25)
+
+В присланном CI-стеке `runLocationOperations` падает в `PendingStorageOperations` после сообщения `closing torrent engine`. Причина воспроизведена в закреплённом `modernc.org/sqlite v1.21.1`: отмена контекста может остановить цикл `stmt.query` до создания `driver.Rows`, после чего драйвер возвращает `(nil, nil)`. `database/sql` принимает результат как успешный и падает при обращении к внутреннему `rowsi` из `Rows.Next` и затем `Rows.Close`. Проверка `rows == nil` на уровне repository не защищает от этого: внешний `*sql.Rows` уже создан. `Engine.Close` отменяет задачи и ждёт их через `wg`; менять этот порядок или отключать cancellation не требуется.
+
+Что изменено:
+
+- `go.mod`, `go.sum`: SQLite-драйвер обновлён до `v1.40.1`, `modernc.org/libc` — до требуемой им `v1.66.10`; выполнен `go mod tidy`. Версия поддерживает проектный Go 1.25.8. В исходнике драйвера проверены возврат ошибки отмены вместо nil rows и закрытие уже созданных rows при отмене. Последнее предотвращает удержание read transaction и блокировку WAL checkpoint; [upstream MR !81](https://gitlab.com/cznic/sqlite/-/merge_requests/81).
+- `internal/repository/sqlite_test.go`: тест вызывает настоящий `driver.QueryerContext` через `sql.Conn.Raw` с отменённым контекстом, моделируя отмену после проверки контекста в `database/sql`. Проверяет ошибку отмены и последующую работу соединения. На старой зависимости тест падает; отдельный диагностический цикл получил `(nil, nil)` на итерации 3841.
+- `internal/repository/storage_operations_test.go`: по 1000 конкурентных отмен для пустой и непустой очереди; после каждой отмены выполняется обычный запрос. После серии проверяются сохранность очереди, запись и `wal_checkpoint(TRUNCATE)`. Используется один слот пула. Помимо `context.Canceled`, для отменённого запроса допустим `SQLITE_INTERRUPT`: отмена во время `Rows.Next` может проявиться через SQLite раньше, чем через `database/sql`. Ошибка следующего запроса всегда считается сбоем.
+
+Проверки:
+
+- [x] Старый драйвер: воспроизведён недопустимый результат `(nil, nil)`; regression-тест отмены падает.
+- [x] Новый драйвер: начальная проверка SQLite/cancellation с `-race` на macOS проходит.
+- [x] Linux arm64: SQLite/cancellation suite прошёл 20 раз; API suite прошёл полностью три раза. Исполнялись статические тестовые бинарники, собранные **Go 1.25.8**, `CGO_ENABLED=0`, в локальном контейнере `golang:1.26-alpine` без сети, с read-only mount только тестовых бинарников. Версия Go в имени контейнера не является версией сборки тестов.
+- [x] Windows amd64: API test binary собран с Go 1.25.8 и `CGO_ENABLED=0`.
+- [x] Финальный `make check` на macOS arm64 / Go 1.25.8: exit 0; root/fork tests и race, vet, 40 frontend tests, frontend/backend build. Root API race — 16.484 s, repository — 73.182 s, usecase — 183.816 s. Окончательная версия SQLite/cancellation-тестов дополнительно прошла с `-race -count=1 -timeout=90s` за 45.871 s.
+
+В первом Linux stress-прогоне тест ошибочно ожидал только `context.Canceled` и получил `SQLITE_INTERRUPT`. Проверка уточнена по [контракту SQLite](https://www.sqlite.org/rescode.html#interrupt) и усилена обычным запросом после каждой отмены; повторные 20 прогонов прошли. Production workaround, `recover`, отключение отмены и изменение миграций не добавлялись.
+
+Это исправление регрессии текущей фазы, следующая фаза не начиналась. Локальный Linux прогон без race и Windows cross-compile не заменяют native CI; прежний gate native Windows остаётся открытым. Логи полного check/API: `/tmp/tsh-sqlite-cancel-check.log`, `/tmp/tsh-sqlite-cancel-linux-api.log`.

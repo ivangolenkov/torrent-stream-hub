@@ -7,6 +7,7 @@ import (
 	"github.com/anacrolix/torrent/storage"
 	"os"
 	"path/filepath"
+	"runtime"
 	"syscall"
 	"testing"
 	"time"
@@ -421,7 +422,11 @@ func TestStorageMoveEXDEVAndPostRenameFlushRetry(t *testing.T) {
 			tor, m := moveFixture(t, uc, false, []byte("exact bytes"))
 			uc.locationMove = func(root *os.Root, from, to string) error {
 				if failure == "exdev" && from == m.Root {
-					return syscall.EXDEV
+					cause := syscall.EXDEV
+					if runtime.GOOS == "windows" {
+						cause = syscall.Errno(17) // ERROR_NOT_SAME_DEVICE
+					}
+					return &os.LinkError{Op: "rename", Old: from, New: to, Err: cause}
 				}
 				err := storage.MoveRootDirectoryNoReplace(root, from, to)
 				if err == nil && failure == "flush" {
@@ -477,7 +482,7 @@ func TestStorageMoveSQLFailureAfterPublication(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	if _, err := db.DB().Exec(`CREATE TRIGGER fail_move_mapping BEFORE UPDATE OF root ON torrent_storage WHEN NEW.root='payload/Moved' BEGIN SELECT RAISE(ABORT,'injected mapping commit');END`); err != nil {
+	if _, err := db.DB().Exec(`CREATE TRIGGER fail_move_mapping BEFORE UPDATE OF root ON torrent_storage WHEN NEW.root='` + filepath.FromSlash("payload/Moved") + `' BEGIN SELECT RAISE(ABORT,'injected mapping commit');END`); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := uc.StorageCommand(context.Background(), tor.Hash, cmd); err != nil {

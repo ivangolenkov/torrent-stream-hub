@@ -167,3 +167,14 @@ Native Windows недоступен в этой среде; вместо нег�
 В первом Linux stress-прогоне тест ошибочно ожидал только `context.Canceled` и получил `SQLITE_INTERRUPT`. Проверка уточнена по [контракту SQLite](https://www.sqlite.org/rescode.html#interrupt) и усилена обычным запросом после каждой отмены; повторные 20 прогонов прошли. Production workaround, `recover`, отключение отмены и изменение миграций не добавлялись.
 
 Это исправление регрессии текущей фазы, следующая фаза не начиналась. Локальный Linux прогон без race и Windows cross-compile не заменяют native CI; прежний gate native Windows остаётся открытым. Логи полного check/API: `/tmp/tsh-sqlite-cancel-check.log`, `/tmp/tsh-sqlite-cancel-linux-api.log`.
+
+## Исправление Windows CI: storage move fixtures (2026-10-25)
+
+Пользователь прислал падение `TestStorageMoveEXDEVAndPostRenameFlushRetry/exdev`: fixture возвращала `syscall.EXDEV`, но Windows rename возвращает `ERROR_NOT_SAME_DEVICE` (17). Production classifier корректно различает платформы; ошибка была в инъекции теста.
+
+- `internal/usecase/storage_move_test.go`: инъекция использует native errno для текущей ОС и оборачивает его в `os.LinkError`, дополнительно проверяя распознавание вложенной ошибки реального rename. Проверки завершения операции, fallback в copy и сохранности байтов оставлены без ослабления.
+- В соседнем `TestStorageMoveSQLFailureAfterPublication` исправлен путь SQL-триггера: `filepath.FromSlash` вместо Unix-only литерала, чтобы fault injection срабатывала и на Windows.
+- [x] Оба affected теста прошли на macOS с `-count=3`.
+- [x] Полный `go test ./...`, `go vet ./...`, `go build ./...`, `git diff --check` прошли.
+- [x] Windows amd64 / CGO=0: usecase test binary собран.
+- [ ] Повторный native Windows CI; итоговый Windows DoD остаётся открытым. Production-код и архитектура не менялись, следующая фаза не начиналась.

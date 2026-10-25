@@ -2,13 +2,14 @@ package engine
 
 import (
 	"context"
-	"fmt"
+	"errors"
 	"os"
 	"path/filepath"
 
 	"torrent-stream-hub/internal/models"
 	"torrent-stream-hub/internal/payload"
 
+	g "github.com/anacrolix/generics"
 	"github.com/anacrolix/torrent"
 	"github.com/anacrolix/torrent/metainfo"
 	"github.com/anacrolix/torrent/storage"
@@ -19,15 +20,48 @@ import (
 // This read-only migration pass understands the old .part layout without
 // renaming journal-owned copies. The runtime imports these names after cleanup.
 func VerifyStorage(ctx context.Context, dir, hash string, mi *metainfo.MetaInfo) error {
+	_, err := verifyStorage(ctx, dir, payload.Root(hash), mi, nil, nil, false)
+	return err
+}
+
+type FileVerification struct {
+	ValidPieces int `json:"valid_pieces"`
+	TotalPieces int `json:"total_pieces"`
+}
+type StorageVerification struct{ Files []FileVerification }
+
+// VerifyReadOnlyStorage uses the library's v1/v2/hybrid verifier, including v1
+// shared boundary pieces and v2 alignment. Overrides select whole files only;
+// no synthesis/merging of pieces and no persistent completion authority.
+func VerifyReadOnlyStorage(ctx context.Context, dir, rootPath string, mi *metainfo.MetaInfo, overrides map[string]string, onRead func(string, int64)) (*StorageVerification, error) {
+	return verifyStorage(ctx, dir, rootPath, mi, overrides, onRead, true)
+}
+func VerifyStorageProgress(ctx context.Context, dir, hash string, mi *metainfo.MetaInfo, onRead func(string, int64)) error {
+	_, err := verifyStorage(ctx, dir, payload.Root(hash), mi, nil, onRead, false)
+	return err
+}
+
+func verifyStorage(ctx context.Context, dir, rootPath string, mi *metainfo.MetaInfo, overrides map[string]string, onRead func(string, int64), readOnly bool) (*StorageVerification, error) {
 	root, err := os.OpenRoot(dir)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	backend := storage.NewFileOpts(storage.NewFileClientOpts{ClientBaseDir: dir, RootFS: root, VerifyOnOpen: true, NoCompletionRename: true, IOContext: ctx,
+	opts := storage.NewFileClientOpts{ClientBaseDir: dir, RootFS: root, VerifyOnOpen: true, NoCompletionRename: true, IOContext: ctx, ReadOnly: readOnly, IORead: onRead, PieceCompletion: storage.NewMapPieceCompletion(),
 		TorrentDirMaker: func(base string, _ *metainfo.Info, _ metainfo.Hash) string {
-			return filepath.Join(base, payload.Root(hash))
+			return filepath.Join(base, rootPath)
 		},
-	})
+	}
+	if readOnly {
+		opts.UsePartFiles = g.Some(false)
+		opts.FilePathMaker = func(o storage.FilePathMakerOpts) string {
+			path := storage.DefaultFilePathMaker(o)
+			if replacement, ok := overrides[path]; ok {
+				return replacement
+			}
+			return path
+		}
+	}
+	backend := storage.NewFileOpts(opts)
 	defer backend.Close()
 	cfg := torrent.NewDefaultClientConfig()
 	cfg.DefaultStorage = backend
@@ -45,14 +79,15 @@ func VerifyStorage(ctx context.Context, dir, hash string, mi *metainfo.MetaInfo)
 	cfg.MaxActivePieceHashers = 1
 	client, err := torrent.NewClient(cfg)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer client.Close()
 	spec, err := torrent.TorrentSpecFromMetaInfoErr(mi)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	spec.DisallowDataDownload = true
+	spec.DisableNetworking = true
 	spec.DisallowDataUpload = true
 	spec.Trackers = nil
 	spec.Webseeds = nil
@@ -61,14 +96,34 @@ func VerifyStorage(ctx context.Context, dir, hash string, mi *metainfo.MetaInfo)
 	spec.DhtNodes = nil
 	t, _, err := client.AddTorrentSpec(spec)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	return t.VerifyDataContext(ctx)
+	if err := t.VerifyDataContext(ctx); err != nil {
+		return nil, err
+	}
+	result := &StorageVerification{}
+	for _, f := range t.Files() {
+		state := FileVerification{}
+		if f.Length() > 0 {
+			begin := int(f.Offset() / t.Info().PieceLength)
+			end := int((f.Offset() + f.Length() + t.Info().PieceLength - 1) / t.Info().PieceLength)
+			for i := begin; i < end; i++ {
+				state.TotalPieces++
+				if t.PieceState(i).Complete {
+					state.ValidPieces++
+				}
+			}
+		}
+		result.Files = append(result.Files, state)
+	}
+	return result, nil
 }
 
 func (e *Engine) RunStorageTask(fn func(context.Context)) bool {
 	return e.StartTask(fn)
 }
+
+var ErrMigrationDiskFull = errors.New("insufficient free space for safe storage operation")
 
 func (e *Engine) CheckMigrationSpace(path string, bytes uint64) error {
 	free, err := GetFreeSpace(path)
@@ -77,7 +132,7 @@ func (e *Engine) CheckMigrationSpace(path string, bytes uint64) error {
 	}
 	reserve := e.minimumDiskBytes()
 	if free < reserve || bytes > free-reserve {
-		return fmt.Errorf("insufficient free space for safe migration copy")
+		return ErrMigrationDiskFull
 	}
 	return nil
 }

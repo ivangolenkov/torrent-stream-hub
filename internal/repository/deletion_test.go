@@ -21,7 +21,7 @@ func TestDeletionUpgradeImportsExistingManifest(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Later-version triggers cannot exist in a pre-upgrade fixture.
-	if _, err := db.DB().Exec(`DROP TRIGGER version_torrents_update; DROP TRIGGER version_files_update`); err != nil {
+	if _, err := db.DB().Exec(`DROP TRIGGER version_torrents_update; DROP TRIGGER version_files_update; DROP TRIGGER recovery_deletion_intent`); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.DB().Exec(`ALTER TABLE torrents DROP COLUMN deletion_mode; ALTER TABLE torrents DROP COLUMN deletion_error; DELETE FROM migrations WHERE name='0007_deletion_intent.sql'`); err != nil {

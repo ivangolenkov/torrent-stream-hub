@@ -15,6 +15,7 @@ import (
 )
 
 var ErrNotRegular = errors.New("payload is not a regular file")
+var ErrUnsafePath = errors.New("unsafe payload path")
 
 func Path(info *metainfo.Info, file *metainfo.FileInfo) string {
 	return storage.DefaultFilePathMaker(storage.FilePathMakerOpts{Info: info, File: file})
@@ -66,7 +67,7 @@ func Validate(root *os.Root, name string) error {
 			return err
 		}
 		if st.Mode()&os.ModeSymlink != 0 {
-			return fmt.Errorf("payload symlink rejected")
+			return fmt.Errorf("%w: payload symlink rejected", ErrUnsafePath)
 		}
 		if i == len(parts)-1 && !st.Mode().IsRegular() {
 			return ErrNotRegular

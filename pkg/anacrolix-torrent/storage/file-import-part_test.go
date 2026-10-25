@@ -25,6 +25,36 @@ func plainNameBackend(t *testing.T, dir string) ClientImplCloser {
 	return backend
 }
 
+// Recovery fixtures: neither equal bytes nor equal size authorize the normal
+// importer to select or remove a candidate. Analysis is a separate operation.
+func TestImportConflictRecoveryFixtures(t *testing.T) {
+	for _, sidecar := range []string{"original", "damaged!"} {
+		t.Run(sidecar, func(t *testing.T) {
+			dir := t.TempDir()
+			backend := plainNameBackend(t, dir)
+			info := &metainfo.Info{Name: "movie.mkv", Length: 8, PieceLength: 4, Pieces: make([]byte, 40)}
+			for path, data := range map[string]string{info.Name: "original", info.Name + ".part": sidecar} {
+				if err := os.WriteFile(filepath.Join(dir, path), []byte(data), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for attempt := 0; attempt < 2; attempt++ {
+				opened, err := backend.OpenTorrent(context.Background(), info, metainfo.Hash{})
+				if err == nil {
+					opened.Close()
+					t.Fatal("normal open selected a conflict candidate")
+				}
+				for path, want := range map[string]string{info.Name: "original", info.Name + ".part": sidecar} {
+					got, err := os.ReadFile(filepath.Join(dir, path))
+					if err != nil || string(got) != want {
+						t.Fatalf("candidate changed: %s %q %v", path, got, err)
+					}
+				}
+			}
+		})
+	}
+}
+
 func TestPlainNamesDuringWriteVerificationAndReopen(t *testing.T) {
 	dir := t.TempDir()
 	backend := plainNameBackend(t, dir)

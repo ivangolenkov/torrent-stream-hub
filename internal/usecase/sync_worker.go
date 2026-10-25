@@ -173,6 +173,7 @@ func (sw *SyncWorker) captureSnapshotContext(ctx context.Context) ([]*models.Tor
 		t.SnapshotAt = time.Now().UnixNano()
 		t.SnapshotFreshness = "sampled"
 	}
+	sw.uc.decorateStorageList(stateToSend)
 	return stateToSend, nil
 }
 

@@ -34,6 +34,7 @@ func NewAPIHandler(uc *usecase.TorrentUseCase, sw *usecase.SyncWorker) *APIHandl
 
 func (h *APIHandler) RegisterRoutes(r chi.Router) {
 	r.Get("/torrents", h.GetAllTorrents)
+	r.Get("/torrent/{hash}", h.GetTorrent)
 	r.Post("/torrent/add", h.AddTorrent)
 	r.Post("/torrent/{hash}/action", h.TorrentAction)
 	r.Put("/torrent/{hash}/priority", h.SetTorrentPriority)
@@ -108,6 +109,9 @@ func (h *APIHandler) AddTorrent(w http.ResponseWriter, r *http.Request) {
 type ActionReq struct {
 	Action      string `json:"action"`
 	DeleteFiles bool   `json:"delete_files"`
+	RecordID    string `json:"record_id"`
+	Version     int64  `json:"version,string"`
+	Choice      string `json:"choice"`
 }
 
 func (h *APIHandler) TorrentAction(w http.ResponseWriter, r *http.Request) {
@@ -121,7 +125,20 @@ func (h *APIHandler) TorrentAction(w http.ResponseWriter, r *http.Request) {
 
 	logging.Infof("api torrent action hash=%s action=%s delete_files=%t", hash, req.Action, req.DeleteFiles)
 	var err error
+	accepted := false
 	switch req.Action {
+	case "retry_deletion":
+		err = h.uc.RetryDeletion(r.Context(), hash, req.RecordID, req.Version)
+	case "cancel_deletion":
+		err = h.uc.CancelDeletion(r.Context(), hash, req.RecordID, req.Version)
+	case "forget_record":
+		err = h.uc.ForgetRecovered(r.Context(), hash, req.RecordID, req.Version)
+	case "retry_ownership":
+		err = h.uc.RetryOwnership(hash, req.RecordID, req.Version)
+		accepted = true
+	case "analyze_legacy", "apply_legacy", "resume_verify":
+		err = h.uc.StartRecovery(r.Context(), hash, req.RecordID, req.Version, req.Action, req.Choice)
+		accepted = true
 	case "make_permanent":
 		err = h.uc.MakePermanent(hash, r.Context())
 	case "pause":
@@ -145,6 +162,33 @@ func (h *APIHandler) TorrentAction(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err != nil {
+		var storageErr *usecase.StorageOperationError
+		if errors.As(err, &storageErr) || errors.Is(err, usecase.ErrOwnershipCatalogChanged) || errors.Is(err, usecase.ErrStorageConflict) || errors.Is(err, usecase.ErrDeletionCancellation) {
+			code := models.StorageCatalogChanged
+			if storageErr != nil {
+				code = storageErr.Code
+			}
+			t, readErr := h.uc.GetTorrent(hash)
+			if readErr == nil && t != nil && t.StorageRecovery != nil {
+				if storageErr == nil {
+					code = t.StorageRecovery.Reason
+				}
+				response.JSON(w, http.StatusConflict, models.StorageActionError{Error: "Storage operation requires recovery or a fresh operation version", Code: code, StorageRecovery: t.StorageRecovery})
+				return
+			}
+			if errors.Is(err, usecase.ErrOwnershipCatalogChanged) {
+				response.JSON(w, http.StatusConflict, models.StorageActionError{Error: "Storage catalog changed; retry shortly", Code: code})
+				return
+			}
+			if storageErr != nil {
+				response.JSON(w, http.StatusConflict, models.StorageActionError{Error: "Storage operation requires recovery", Code: storageErr.Code})
+				return
+			}
+			if errors.Is(err, usecase.ErrDeletionCancellation) {
+				response.JSON(w, http.StatusConflict, models.StorageActionError{Error: "Deletion cancellation requested", Code: models.StorageDeletionCancelled})
+				return
+			}
+		}
 		if errors.Is(err, engine.ErrOperationConflict) || errors.Is(err, usecase.ErrMetadataPending) {
 			response.Error(w, http.StatusConflict, err.Error())
 			return
@@ -167,7 +211,25 @@ func (h *APIHandler) TorrentAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if accepted {
+		w.Header().Set("X-Hub-Snapshot", h.uc.NextSnapshotVersion())
+		response.JSON(w, http.StatusAccepted, map[string]any{"status": "accepted", "command_at_ns": time.Now().UnixNano()})
+		return
+	}
 	h.commandStatus(w)
+}
+
+func (h *APIHandler) GetTorrent(w http.ResponseWriter, r *http.Request) {
+	t, err := h.uc.GetTorrent(chi.URLParam(r, "hash"))
+	if err != nil {
+		response.Error(w, http.StatusInternalServerError, "Cannot read torrent")
+		return
+	}
+	if t == nil {
+		response.Error(w, http.StatusNotFound, "Torrent not found")
+		return
+	}
+	response.JSON(w, http.StatusOK, t)
 }
 
 type PriorityReq struct {

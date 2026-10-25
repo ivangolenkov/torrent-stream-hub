@@ -47,7 +47,6 @@ func loadControls(tx sqlReader, torrents map[string]*models.Torrent) error {
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
 	for rows.Next() {
 		var hash string
 		var b models.ActivationBlock
@@ -58,5 +57,10 @@ func loadControls(tx sqlReader, torrents map[string]*models.Torrent) error {
 			t.Control.ActivationBlocks = append(t.Control.ActivationBlocks, b)
 		}
 	}
-	return rows.Err()
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return err
+	}
+	return loadStorageRecovery(tx, torrents)
 }

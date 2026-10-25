@@ -55,10 +55,21 @@ type TorrentUseCase struct {
 	transferRecords      map[string]string
 	storageWorkerStarted bool
 	// Optional rooted filesystem operation for deterministic failure injection.
-	payloadRemove  func(*os.Root, string) error
-	beforeDetach   func(string)
-	inactiveVerify func(context.Context, string) error
-	migrationCopy  func(context.Context, *os.Root, *migrationEntry) error
+	payloadRemove           func(*os.Root, string) error
+	beforeDetach            func(string)
+	inactiveVerify          func(context.Context, string) error
+	migrationCopy           func(context.Context, *os.Root, *migrationEntry) error
+	ownershipMu             sync.Mutex // short admission/SQL publication only; never filesystem I/O
+	ownershipClaims         map[*ownershipClaim]bool
+	beforeOwnershipValidate func() // deterministic catalog mutation barrier
+	storageLiveMu           sync.Mutex
+	storageLive             map[string]*storageObservation
+	recoveryMove            func(*os.Root, string, string) error
+	recoveryStep            func(string) error
+	storageWake             chan struct{}
+	storageByteHook         func(string, int64)
+	storageStageHook        func(string, models.StorageProgress, time.Duration)
+	migrationFailures       map[string]migrationFailure
 }
 
 func (uc *TorrentUseCase) NextSnapshotVersion() string { return uc.engine.NextSnapshotVersion() }
@@ -97,6 +108,11 @@ func NewTorrentUseCase(e *engine.Engine, r *repository.TorrentRepo) *TorrentUseC
 		}
 		return r.ClearActivationBlock(f, models.BlockVerification)
 	})
+	uc := &TorrentUseCase{
+		engine: e, repo: r, maxTemporary: 3, transfers: make(map[string]int),
+		protectedUntil: make(map[string]time.Time), transferRecords: make(map[string]string),
+		coordinator: newApplicationCoordinator(e.Context()), storageWake: make(chan struct{}, 1),
+	}
 	e.SetStorageRootResolver(func(hash string) (string, error) {
 		m, err := r.StorageMapping(hash)
 		if err != nil {
@@ -106,16 +122,7 @@ func NewTorrentUseCase(e *engine.Engine, r *repository.TorrentRepo) *TorrentUseC
 			return "", ErrStorageConflict
 		}
 		return m.Root, nil
-	}, r.ClaimStorageAlias)
-	uc := &TorrentUseCase{
-		engine:          e,
-		repo:            r,
-		maxTemporary:    3,
-		transfers:       make(map[string]int),
-		protectedUntil:  make(map[string]time.Time),
-		transferRecords: make(map[string]string),
-		coordinator:     newApplicationCoordinator(e.Context()),
-	}
+	}, uc.claimStorageAlias)
 	e.StartTask(func(ctx context.Context) { <-ctx.Done(); _ = uc.coordinator.close(context.Background()) })
 	return uc
 }
@@ -314,6 +321,7 @@ func (uc *TorrentUseCase) GetAllTorrents() ([]*models.Torrent, error) {
 	for _, t := range merged {
 		t.SnapshotAt = started
 	}
+	uc.decorateStorageList(merged)
 	return merged, nil
 }
 
@@ -352,6 +360,7 @@ func (uc *TorrentUseCase) GetTorrent(hash string) (*models.Torrent, error) {
 		t = items[0]
 	}
 	if t != nil {
+		uc.decorateStorageList([]*models.Torrent{t})
 		t.SnapshotAt = started
 	}
 	return t, nil
@@ -438,6 +447,10 @@ func (uc *TorrentUseCase) Resume(hash string, contexts ...context.Context) error
 		return err
 	}
 	defer release()
+	return uc.resumeLocked(hash)
+}
+
+func (uc *TorrentUseCase) resumeLocked(hash string) error {
 	logging.Infof("usecase resume hash=%s", hash)
 	t, err := uc.repo.GetTorrent(hash)
 	if err != nil {
@@ -610,16 +623,21 @@ func (uc *TorrentUseCase) Delete(hash string, deleteFiles bool, contexts ...cont
 		logging.Debugf("delete requested for missing torrent hash=%s", hash)
 		return TorrentNotFoundError{Hash: hash}
 	}
+	if (t.DeletionMode == "keep" && deleteFiles) || (t.DeletionMode == "payload" && !deleteFiles) {
+		return &StorageOperationError{Code: models.StorageDeletionMode, Cause: ErrStorageConflict, Hash: hash}
+	}
 	defer func() {
 		if retErr != nil && !deleteFiles {
 			retErr = errors.Join(retErr, uc.repo.SaveDeletionError(hash, retErr))
 		}
 	}()
-	if (t.DeletionMode == "keep" && deleteFiles) || (t.DeletionMode == "payload" && !deleteFiles) {
-		return ErrStorageConflict
-	}
 
 	if uc.transferProtected(hash) {
+		return ErrStorageConflict
+	}
+	if rec, err := uc.repo.Recovery(hash); err != nil {
+		return err
+	} else if recoveryBlocks(rec) && !(rec.Reason == models.StorageDeletionCancelled && rec.Stage == "cancelled") && rec.Reason != models.StorageDeletionPending {
 		return ErrStorageConflict
 	}
 	if m, err := uc.repo.StorageMapping(hash); err != nil {
@@ -637,6 +655,12 @@ func (uc *TorrentUseCase) Delete(hash string, deleteFiles bool, contexts ...cont
 		uc.beforeDetach(hash)
 	}
 	if err := uc.engine.Delete(hash); err != nil {
+		return err
+	}
+	if err := uc.repo.AdvanceDeletion(hash, t.Control.RecordID, "removing_record", ""); err != nil {
+		return err
+	}
+	if err := uc.repo.DeletionGate(hash, t.Control.RecordID); err != nil {
 		return err
 	}
 
@@ -711,6 +735,19 @@ func (uc *TorrentUseCase) restorePersistedTorrent(ctx context.Context, hash stri
 	if err != nil || current == nil {
 		return false, err
 	}
+	if recovery, err := uc.repo.Recovery(hash); err != nil {
+		return false, err
+	} else if recovery != nil {
+		if recovery.Stage == "cancel_requested" {
+			if err := uc.engine.Delete(hash); err != nil {
+				return false, err
+			}
+			return false, uc.repo.CompleteDeletionCancel(hash, recovery.RecordID, recovery.Version)
+		}
+		if recoveryBlocks(recovery) {
+			return false, nil
+		}
+	}
 	if err := uc.checkStorageAvailable(hash); err != nil {
 		if errors.Is(err, ErrStorageConflict) {
 			return false, nil
@@ -727,7 +764,12 @@ func (uc *TorrentUseCase) restorePersistedTorrent(ctx context.Context, hash stri
 	return err == nil, err
 }
 
-func (uc *TorrentUseCase) restoreTorrentToEngine(t *models.Torrent) (*models.Torrent, error) {
+func (uc *TorrentUseCase) restoreTorrentToEngine(t *models.Torrent) (result *models.Torrent, retErr error) {
+	defer func() {
+		if retErr != nil {
+			retErr = uc.attachmentFailure(t, retErr)
+		}
+	}()
 	var restoreErr error
 	path := filepath.Join(uc.engine.ConfigDir(), "metainfo", strings.ToLower(t.Hash)+".torrent")
 	f, err := os.Open(path)
@@ -979,6 +1021,7 @@ func mergePersistedMetadata(runtime, persisted *models.Torrent) {
 		runtime.State = models.StatePaused
 	}
 	runtime.StorageState, runtime.StorageError = persisted.StorageState, persisted.StorageError
+	runtime.StorageRecovery = persisted.StorageRecovery
 	runtime.Title = persisted.Title
 	runtime.Data = persisted.Data
 	runtime.Poster = persisted.Poster

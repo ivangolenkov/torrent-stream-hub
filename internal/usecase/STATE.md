@@ -1,5 +1,45 @@
 # Application state and coordination contract
 
+## Phase 41 storage recovery
+
+`storage_catalog_version` orders identity/mapping/cleanup/catalog changes without
+including byte telemetry. Ownership reads use one short WAL snapshot; metainfo and
+filesystem work happens after commit. Publication validates its version and installs
+a path reservation under short application admission, never a global engine lock.
+Add/alias publication checks active reservations. Migration and deletion retain them
+through the final filesystem effect; disappear/re-add never means blindly ignoring
+`ErrNoRows`. Retry is bounded (16 cancelable, backed-off attempts); churn is a
+temporary diagnostic, not a metainfo corruption diagnosis.
+
+`storage_recovery` is durable per-record workflow state. Record ID and a distinct
+operation version fence commands/callbacks. Analysis and explicit verification advance
+that version; journal retry retains its chosen operation. Layout, runtime attachment,
+metadata-known and current-open readiness remain separate authorities. REST/SSE use
+the same diagnostic projection, with optional observational progress layered only
+onto the matching record/version. Heartbeat is sampling activity, not I/O completion.
+
+Deletion intent and its initial recovery row commit together. Stages are intent,
+runtime stopped, manifest ready, removing, removing record; cancellation commits
+`cancel_requested` before joining the record owner. The next unlink checks that
+marker; the final SQL delete also rejects it. `cancelled` is committed only after
+the worker is gone. It clears admission markers but leaves paused intent and a
+partial/unknown-data diagnosis. A disconnected waiter leaves durable cancellation;
+startup completes it before attachment. Temporary and manual deletion share this
+lifecycle. Completed cancellation cannot be revived by retry or an old version.
+
+Legacy analysis is explicit, bounded and offline. Journal transitions are analyzed,
+prepared (choice durable), preserved (alternative moved/flushed), published, verified.
+Identity/fingerprints and metainfo membership are revalidated; journal paths never
+authorize arbitrary paths. Native rooted no-replace moves preserve the alternative
+in `.tsh-recovery`, which is protected independently of torrent record lifetime.
+The selected payload stays paused; offline verifier completion never grants a new
+runtime readiness. Backup retention survives successful Resume and ordinary cleanup.
+Incomplete migration manifests own their paths and exclude recovery admission.
+
+See README and `tasks/phase41-recovery-contract.md` for commands, codes, upgrade
+rehearsal and downgrade restrictions. Old cleanup manifests import `removed_data=unknown`;
+old storage journals stay unchanged. Recovery progress never causes per-chunk SQL.
+
 ## Authorities
 
 | Concern | Authority / permitted writer |

@@ -10,6 +10,7 @@ import (
 
 	"torrent-stream-hub/internal/models"
 	"torrent-stream-hub/internal/payload"
+	"torrent-stream-hub/internal/repository"
 
 	"github.com/anacrolix/torrent"
 	"github.com/anacrolix/torrent/metainfo"
@@ -131,6 +132,11 @@ func (uc *TorrentUseCase) deletePayloadLocked(t *models.Torrent) (retErr error) 
 		return ErrStorageConflict
 	}
 	hash := t.Hash
+	if recovery, err := uc.repo.Recovery(hash); err != nil {
+		return err
+	} else if recoveryBlocks(recovery) {
+		return ErrStorageConflict
+	}
 	if m, err := uc.repo.StorageMapping(hash); err != nil {
 		return err
 	} else if m != nil && (m.State == "moving" || m.Manifest != "") {
@@ -167,6 +173,9 @@ func (uc *TorrentUseCase) deletePayloadLocked(t *models.Torrent) (retErr error) 
 		if err := uc.engine.Delete(hash); err != nil {
 			return err
 		}
+		if err := uc.repo.AdvanceDeletion(hash, t.Control.RecordID, "runtime_stopped", ""); err != nil {
+			return err
+		}
 		if info, infoErr := raw.Info(); infoErr != nil {
 			return infoErr
 		} else if info != nil {
@@ -194,9 +203,11 @@ func (uc *TorrentUseCase) deletePayloadLocked(t *models.Torrent) (retErr error) 
 		if err := uc.engine.Delete(hash); err != nil {
 			return err
 		}
+		if err := uc.repo.AdvanceDeletion(hash, t.Control.RecordID, "runtime_stopped", ""); err != nil {
+			return err
+		}
 	}
-	all, err := uc.repo.GetAllTorrents()
-	if err != nil {
+	if err := uc.repo.AdvanceDeletion(hash, t.Control.RecordID, "manifest_ready", ""); err != nil {
 		return err
 	}
 	var owned []string
@@ -208,9 +219,11 @@ func (uc *TorrentUseCase) deletePayloadLocked(t *models.Torrent) (retErr error) 
 		return err
 	}
 	defer root.Close()
-	if err := uc.validateOwnership(root, hash, owned, all); err != nil {
+	ownershipRelease, err := uc.reserveOwnership(uc.engine.Context(), root, hash, owned)
+	if err != nil {
 		return err
 	}
+	defer ownershipRelease()
 	// Validate the entire manifest before removing any entry.
 	for _, path := range owned {
 		if err := validateCleanupPath(root, path); err != nil {
@@ -221,15 +234,35 @@ func (uc *TorrentUseCase) deletePayloadLocked(t *models.Torrent) (retErr error) 
 	if remove == nil {
 		remove = func(root *os.Root, path string) error { return root.Remove(path) }
 	}
+	if err := uc.repo.AdvanceDeletion(hash, t.Control.RecordID, "removing", "unknown"); err != nil {
+		return err
+	}
+	removedAny := false
 	for _, path := range owned {
-		if err := remove(root, path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		if err := uc.engine.Context().Err(); err != nil {
 			return err
+		}
+		if err := uc.repo.DeletionGate(hash, t.Control.RecordID); err != nil {
+			return err
+		}
+		removeErr := remove(root, path)
+		if removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+			return removeErr
+		}
+		if removeErr == nil && !removedAny {
+			removedAny = true
+			if err := uc.repo.MarkDeletionPartial(hash, t.Control.RecordID); err != nil {
+				return err
+			}
 		}
 		for dir := filepath.Dir(path); dir != "."; dir = filepath.Dir(dir) {
 			if err := root.Remove(dir); err != nil {
 				break
 			} // Empty directories only.
 		}
+	}
+	if err := uc.repo.AdvanceDeletion(hash, t.Control.RecordID, "removing_record", ""); err != nil {
+		return err
 	}
 	return uc.repo.DeleteTorrent(hash)
 }
@@ -258,6 +291,14 @@ func cachedStorageStat(stat func(string) (os.FileInfo, error)) func(string) (os.
 }
 
 func (uc *TorrentUseCase) validateOwnershipContext(ctx context.Context, root *os.Root, hash string, owned []string, all []*models.Torrent) error {
+	release, err := uc.reserveOwnership(ctx, root, hash, owned)
+	if err == nil {
+		release()
+	}
+	return err
+}
+
+func (uc *TorrentUseCase) validateOwnershipSnapshot(ctx context.Context, root *os.Root, hash string, owned []string, snapshot *repository.OwnershipSnapshot) error {
 	stat := cachedStorageStat(root.Stat)
 	protectedStat := cachedStorageStat(os.Stat)
 	var protectedPaths []string
@@ -294,11 +335,12 @@ func (uc *TorrentUseCase) validateOwnershipContext(ctx context.Context, root *os
 			}
 		}
 	}
-	for _, other := range all {
+	for _, rec := range snapshot.Records {
+		other := rec.Torrent
 		if other.Hash == hash {
 			continue
 		}
-		others, err := uc.knownStoragePaths(other)
+		others, err := uc.snapshotStoragePaths(rec)
 		if err != nil {
 			return fmt.Errorf("cannot verify other torrent %s: %w", other.Hash, err)
 		}
@@ -322,6 +364,61 @@ func (uc *TorrentUseCase) validateOwnershipContext(ctx context.Context, root *os
 						return fmt.Errorf("%w: aliased storage path with torrent %s", ErrStorageConflict, other.Hash)
 					}
 				}
+			}
+		}
+	}
+	// Orphan mappings are intentional keep-data namespace reservations, and
+	// aliases can exist before the canonical torrent record is committed.
+	for alias, m := range snapshot.Mappings {
+		if alias == hash {
+			continue
+		}
+		if m.Root == "" {
+			represented := false
+			for _, rec := range snapshot.Records {
+				if rec.Torrent.Hash == alias {
+					represented = true
+					break
+				}
+			}
+			if represented {
+				continue
+			}
+			info, err := uc.metadataStorageInfo(&models.Torrent{Hash: alias})
+			if err != nil {
+				return err
+			}
+			if info == nil {
+				return fmt.Errorf("%w: kept legacy namespace requires metainfo", ErrStorageConflict)
+			}
+			paths, err := storagePaths(info)
+			if err != nil {
+				return err
+			}
+			for _, p := range paths {
+				for _, q := range []string{p, p + ".part"} {
+					for _, own := range owned {
+						if ownershipOverlap(own, q) {
+							return fmt.Errorf("%w: kept legacy payload reservation", ErrStorageConflict)
+						}
+						same, err := storagePathsAlias(stat, own, q)
+						if err != nil {
+							return err
+						}
+						if same {
+							return fmt.Errorf("%w: kept legacy payload alias", ErrStorageConflict)
+						}
+					}
+				}
+			}
+			continue
+		}
+		if own := snapshot.Mappings[hash]; own != nil && own.Root == m.Root {
+			continue
+		}
+		for _, p := range owned {
+			if ownershipOverlap(p, m.Root) {
+				return fmt.Errorf("%w: reserved storage namespace", ErrStorageConflict)
 			}
 		}
 	}
@@ -370,17 +467,13 @@ func (uc *TorrentUseCase) openPayloadLocked(hash string, index int, path string,
 	} else if pending {
 		return nil, ErrStorageConflict
 	}
-	all, err := uc.repo.GetAllTorrents()
-	if err != nil {
-		return nil, err
-	}
 	root, err := os.OpenRoot(uc.engine.DownloadDir())
 	if err != nil {
 		// A missing/unmounted storage root is a server failure, not a missing file.
 		return nil, fmt.Errorf("payload root unavailable: %v", err)
 	}
 	defer root.Close()
-	if err := uc.validateOwnership(root, hash, []string{path, path + ".part"}, all); err != nil {
+	if err := uc.validateOwnership(root, hash, []string{path, path + ".part"}, nil); err != nil {
 		return nil, err
 	}
 	if err := payload.Validate(root, path); err != nil {

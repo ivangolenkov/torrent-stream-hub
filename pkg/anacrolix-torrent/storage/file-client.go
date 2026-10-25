@@ -48,6 +48,12 @@ type NewFileClientOpts struct {
 	VerifyOnOpen       bool
 	NoCompletionRename bool
 	IOContext          context.Context
+	// ReadOnly is for offline recovery analysis: no zero-file creation, writes,
+	// imports or completion renames. Completion must be in-memory.
+	ReadOnly bool
+	// IORead is an observational callback invoked after actual reads, outside
+	// the torrent client lock. It must not perform filesystem/SQL I/O.
+	IORead func(path string, n int64)
 }
 
 // The specific part-files option or the default.
@@ -93,6 +99,9 @@ func (fs *fileClientImpl) OpenTorrent(
 	info *metainfo.Info,
 	infoHash metainfo.Hash,
 ) (_ TorrentImpl, err error) {
+	if fs.opts.ReadOnly && (fs.opts.RootFS == nil || fs.opts.ImportPartFiles || fs.opts.partFiles() || !fs.opts.NoCompletionRename || pieceCompletionIsPersistent(fs.opts.PieceCompletion)) {
+		return TorrentImpl{}, fmt.Errorf("read-only analysis requires rooted plain-name nonpersistent storage")
+	}
 	if fs.opts.ImportPartFiles && (fs.opts.RootFS == nil || !fs.opts.VerifyOnOpen || fs.opts.partFiles()) {
 		return TorrentImpl{}, fmt.Errorf("importing part files requires rooted verified storage without part files")
 	}
@@ -147,12 +156,20 @@ func (fs *fileClientImpl) OpenTorrent(
 	}
 	if fs.opts.ImportPartFiles {
 		if err := fs.importPartFiles(ctx, files); err != nil {
+			var conflict *LegacyPartConflictError
+			if errors.As(err, &conflict) {
+				relative, e := filepath.Rel(dir, conflict.Path)
+				if e != nil {
+					return TorrentImpl{}, e
+				}
+				return TorrentImpl{}, &LegacyPartConflictError{Path: relative}
+			}
 			return TorrentImpl{}, err
 		}
 	}
 	for i := range metainfoFileInfos {
 		filePath := files[i].safeOsPath
-		if metainfoFileInfos[i].Length == 0 {
+		if metainfoFileInfos[i].Length == 0 && !fs.opts.ReadOnly {
 			if fs.opts.RootFS != nil {
 				var f fileWriter
 				f, err = (rootFileIo{root: fs.opts.RootFS, ctx: fs.opts.IOContext}).openForWrite(filePath, 0)
@@ -178,7 +195,7 @@ func (fs *fileClientImpl) OpenTorrent(
 		client:            fs,
 	}
 	if fs.opts.RootFS != nil {
-		t.io = rootFileIo{root: fs.opts.RootFS, ctx: fs.opts.IOContext}
+		t.io = rootFileIo{root: fs.opts.RootFS, ctx: fs.opts.IOContext, readOnly: fs.opts.ReadOnly, onRead: fs.opts.IORead}
 	}
 	if fs.opts.VerifyOnOpen {
 		t.fresh = make(map[int][]os.FileInfo)

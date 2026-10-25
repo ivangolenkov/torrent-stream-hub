@@ -188,6 +188,14 @@ func (r *TorrentRepo) GetAllTorrentsContext(ctx context.Context) ([]*models.Torr
 	}
 	tx := contextReadTx{Tx: raw, ctx: ctx}
 	defer tx.Rollback()
+	torrents, err := r.allTorrents(tx)
+	if err != nil {
+		return nil, err
+	}
+	return torrents, tx.Commit()
+}
+
+func (r *TorrentRepo) allTorrents(tx sqlReader) ([]*models.Torrent, error) {
 	rows, err := tx.Query(`SELECT hash, name, title, data, poster, category, size, downloaded, state, error, source_uri, is_temporary, COALESCE((SELECT state FROM torrent_storage WHERE hash=torrents.hash),'legacy'), COALESCE((SELECT error FROM torrent_storage WHERE hash=torrents.hash),'') FROM torrents ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, err
@@ -226,7 +234,7 @@ func (r *TorrentRepo) GetAllTorrentsContext(ctx context.Context) ([]*models.Torr
 	if err := loadControls(tx, byHash); err != nil {
 		return nil, err
 	}
-	return torrents, tx.Commit()
+	return torrents, nil
 }
 
 func (r *TorrentRepo) loadFiles(tx sqlReader, t *models.Torrent) error {
@@ -286,6 +294,15 @@ func (r *TorrentRepo) DeleteTorrent(hash string) error {
 	err = tx.QueryRow(`SELECT deletion_mode,COALESCE((SELECT root FROM torrent_storage WHERE hash=torrents.hash),'') FROM torrents WHERE hash=?`, hash).Scan(&mode, &root)
 	if err != nil && err != sql.ErrNoRows {
 		return err
+	}
+	if mode != "" {
+		var cancelled int
+		if err := tx.QueryRow(`SELECT COUNT(*) FROM storage_recovery WHERE hash=? AND stage='cancel_requested'`, hash).Scan(&cancelled); err != nil {
+			return err
+		}
+		if cancelled != 0 {
+			return ErrDeletionCancelled
+		}
 	}
 	// Explicit deletes also cover legacy history without a foreign key and
 	// connections created by older SQLite pool configurations.

@@ -4,6 +4,7 @@ import { apiClient, setupSSE } from '../api/client';
 import type { CommandResult } from '../api/client';
 import { SnapshotOrder } from './snapshotOrder';
 import type { Torrent, File } from '../types';
+import type { StorageRecoveryAction } from '../types/storageRecovery';
 
 export const useTorrentStore = defineStore('torrents', () => {
   const torrents = ref<Torrent[]>([]);
@@ -14,6 +15,7 @@ export const useTorrentStore = defineStore('torrents', () => {
   const pinErrors = ref<Record<string, string>>({});
   const actionErrors = ref<Record<string, string>>({});
   const actionPending = ref<Record<string, boolean>>({});
+  const recoveryPending = ref<Record<string, boolean>>({});
   let dataVersion = 0;
   let listRequest = 0;
   const detailVersions = new Map<string, string>();
@@ -219,6 +221,27 @@ export const useTorrentStore = defineStore('torrents', () => {
     await loadTorrents();
   });
 
+  const recoverStorage = async (hash: string, action: StorageRecoveryAction, choice?: 'final' | 'part') => {
+    if (recoveryPending.value[hash]) return false;
+    recoveryPending.value[hash] = true;
+    const issuedID = recordID(hash);
+    delete actionErrors.value[hash];
+    try {
+    const recovery = torrents.value.find(t => t.hash === hash)?.storage_recovery;
+    if (!recovery || !recovery.actions.includes(action)) throw new Error('Refresh the current recovery operation before retrying');
+    const issuedEpoch = snapshotOrder.epoch;
+    const result = await apiClient.recoveryAction(hash, recovery, action, choice);
+    if (!sameRecord(hash, recovery.record_id)) { await loadTorrents(); return false; }
+    receipt(result, issuedEpoch);
+    await loadTorrents();
+    return true;
+    } catch (e) {
+      if (sameRecord(hash, issuedID)) actionErrors.value[hash] = e instanceof Error ? e.message : 'Storage recovery failed';
+      await loadTorrents();
+      return false;
+    } finally { delete recoveryPending.value[hash]; }
+  };
+
   const setTorrentPriority = async (hash: string, priority: number) => runCommand(hash, async () => {
     const issuedEpoch = snapshotOrder.epoch;
     const issuedID = recordID(hash);
@@ -274,6 +297,8 @@ export const useTorrentStore = defineStore('torrents', () => {
     fetchPieces,
     closeInspector,
     performAction,
+    recoverStorage,
+    recoveryPending,
     setTorrentPriority,
     setFilePriority,
   };

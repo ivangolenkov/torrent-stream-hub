@@ -8,6 +8,7 @@ import { apiClient } from '../api/client';
 import type { Torrent } from '../types';
 import ConfirmDialog from './ConfirmDialog.vue';
 import TemporaryTorrentControl from './TemporaryTorrentControl.vue';
+import StorageRecoveryPanel from './StorageRecoveryPanel.vue';
 
 const store = useTorrentStore();
 const emit = defineEmits(['add-torrent']);
@@ -121,6 +122,7 @@ const formatPeerTitle = (torrent: Torrent) => {
 
 const torrentLabel = (torrent: Torrent) => torrent.name || torrent.title || torrent.hash;
 const canDownloadTorrent = (torrent: Torrent) => torrent.progress_source === 'verified' && torrent.size > 0 && torrent.downloaded >= torrent.size;
+const normalActions = (torrent: Torrent) => !torrent.deletion_mode && (!torrent.storage_recovery || torrent.storage_recovery.reason === 'recovery_complete');
 
 const downloadTorrent = (torrent: Torrent) => {
   window.location.href = apiClient.torrentDownloadUrl(torrent.hash);
@@ -217,12 +219,13 @@ const confirmDelete = async () => {
                 </div>
               </div>
               <TemporaryTorrentControl :torrent="t" />
+              <StorageRecoveryPanel :torrent="t" />
               <div v-if="store.actionErrors[t.hash]" role="alert" class="text-xs text-red-700">{{ store.actionErrors[t.hash] }}</div>
               <div v-if="t.recheck" class="text-xs text-amber-700">Recheck: {{ t.recheck.status }} {{ t.recheck.error }}</div>
 							<div v-if="t.activity?.streaming" class="text-xs text-blue-700">Streaming</div>
 							<div v-if="t.activity?.preloads" class="text-xs text-blue-700">Preload: {{ t.activity.preloads }}</div>
 							<div v-if="t.activity?.verifying && !t.recheck" class="text-xs text-amber-700">Verifying</div>
-              <div v-if="t.control?.reconcile_pending" class="text-xs text-amber-700" :title="t.control.reconcile_reason">Saved: {{ t.control.desired_run }} · {{ storagePending(t) ? 'waiting for storage migration' : 'apply pending' }}</div>
+              <div v-if="t.control?.reconcile_pending && !t.storage_recovery" class="text-xs text-amber-700" :title="t.control.reconcile_reason">Saved: {{ t.control.desired_run }} · {{ storagePending(t) ? 'waiting for storage migration' : 'apply pending' }}</div>
               <div v-if="t.control?.apply_failure" class="text-xs text-red-600" :title="t.control.apply_failure.code">Apply failed · retry with Pause or Resume</div>
               <div v-if="t.selection_complete && t.state !== 'Seeding'" class="text-xs text-gray-500">Selected files complete (no background slot)</div>
               <div v-if="t.deletion_mode" class="text-xs text-orange-700">Deletion pending ({{ t.deletion_mode }}). {{ t.deletion_error }}</div>
@@ -265,7 +268,7 @@ const confirmDelete = async () => {
               <div class="text-xs text-gray-500">
                 seeds {{ getPeerSummary(t).seeds }}
               </div>
-              <div v-if="!getPeerSummary(t).metadata_ready && !storagePending(t)" class="text-xs text-amber-600">
+              <div v-if="!t.metadata_known && !getPeerSummary(t).metadata_ready && !storagePending(t)" class="text-xs text-amber-600">
                 metadata pending
               </div>
             </td>
@@ -326,12 +329,13 @@ const confirmDelete = async () => {
           
           <!-- Status tag + Size + Priority -->
           <TemporaryTorrentControl :torrent="t" />
+          <StorageRecoveryPanel :torrent="t" />
           <div v-if="store.actionErrors[t.hash]" role="alert" class="text-xs text-red-700">{{ store.actionErrors[t.hash] }}</div>
           <div v-if="t.recheck" class="text-xs text-amber-700">Recheck: {{ t.recheck.status }} {{ t.recheck.error }}</div>
 					<div v-if="t.activity?.streaming" class="text-xs text-blue-700">Streaming</div>
 					<div v-if="t.activity?.preloads" class="text-xs text-blue-700">Preload: {{ t.activity.preloads }}</div>
 					<div v-if="t.activity?.verifying && !t.recheck" class="text-xs text-amber-700">Verifying</div>
-          <div v-if="t.control?.reconcile_pending" class="text-xs text-amber-700" :title="t.control.reconcile_reason">Saved: {{ t.control.desired_run }} · {{ storagePending(t) ? 'waiting for storage migration' : 'apply pending' }}</div>
+          <div v-if="t.control?.reconcile_pending && !t.storage_recovery" class="text-xs text-amber-700" :title="t.control.reconcile_reason">Saved: {{ t.control.desired_run }} · {{ storagePending(t) ? 'waiting for storage migration' : 'apply pending' }}</div>
           <div v-if="t.control?.apply_failure" class="text-xs text-red-600" :title="t.control.apply_failure.code">Apply failed · retry with Pause or Resume</div>
           <div v-if="t.selection_complete && t.state !== 'Seeding'" class="text-xs text-gray-500">Selected files complete (no background slot)</div>
           <div v-if="t.deletion_mode" class="text-xs text-orange-700">Deletion pending ({{ t.deletion_mode }}). {{ t.deletion_error }}</div>
@@ -394,20 +398,20 @@ const confirmDelete = async () => {
       >
         <div class="py-1" role="menu">
           <button 
-            v-if="['Paused', 'Error', 'DiskFull'].includes(activeTorrent.state)"
+            v-if="normalActions(activeTorrent) && ['Paused', 'Error', 'DiskFull'].includes(activeTorrent.state)"
             @click="store.performAction(activeTorrent.hash, 'resume'); activeMenu = null"
             class="flex items-center w-full px-4 py-2 text-sm text-gray-700 hover:bg-gray-100"
           >
             <PlayIcon class="w-4 h-4 mr-2" /> Resume
           </button>
           <button 
-            v-else
+            v-else-if="normalActions(activeTorrent)"
             @click="store.performAction(activeTorrent.hash, 'pause'); activeMenu = null"
             class="flex items-center w-full px-4 py-2 text-sm text-gray-700 hover:bg-gray-100"
           >
             <PauseIcon class="w-4 h-4 mr-2" /> Pause
           </button>
-          <button @click="store.performAction(activeTorrent.hash, 'recheck'); activeMenu = null" class="flex items-center w-full px-4 py-2 text-sm text-gray-700 hover:bg-gray-100">Recheck</button>
+          <button v-if="normalActions(activeTorrent)" @click="store.performAction(activeTorrent.hash, 'recheck'); activeMenu = null" class="flex items-center w-full px-4 py-2 text-sm text-gray-700 hover:bg-gray-100">Recheck</button>
           <button 
             v-if="canDownloadTorrent(activeTorrent)"
             @click="downloadTorrent(activeTorrent); activeMenu = null"
@@ -416,12 +420,14 @@ const confirmDelete = async () => {
             <ArrowDownTrayIcon class="w-4 h-4 mr-2" /> Download
           </button>
           <button 
+            v-if="normalActions(activeTorrent)"
             @click="openDeleteDialog(activeTorrent, false); activeMenu = null"
             class="flex items-center w-full px-4 py-2 text-sm text-red-600 hover:bg-red-50"
           >
             <TrashIcon class="w-4 h-4 mr-2" /> Remove
           </button>
           <button 
+            v-if="normalActions(activeTorrent)"
             @click="openDeleteDialog(activeTorrent, true); activeMenu = null"
             class="flex items-center w-full px-4 py-2 text-sm text-red-600 hover:bg-red-50"
           >

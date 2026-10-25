@@ -13,8 +13,10 @@ import (
 
 // rootFileIo never falls back to absolute filesystem operations.
 type rootFileIo struct {
-	root *os.Root
-	ctx  context.Context
+	root     *os.Root
+	ctx      context.Context
+	readOnly bool
+	onRead   func(string, int64)
 }
 
 var ErrUnsafeFile = errors.New("unsafe storage file")
@@ -85,6 +87,9 @@ func (r rootFileIo) relative(name string) (string, error) {
 }
 
 func (r rootFileIo) open(name string, flags int) (*os.File, error) {
+	if r.readOnly && flags != os.O_RDONLY {
+		return nil, os.ErrPermission
+	}
 	if r.ctx != nil && r.ctx.Err() != nil {
 		return nil, r.ctx.Err()
 	}
@@ -97,26 +102,38 @@ func (r rootFileIo) open(name string, flags int) (*os.File, error) {
 
 type rootSharedReader struct {
 	*os.File
-	ctx context.Context
+	ctx    context.Context
+	onRead func(string, int64)
+	path   string
 }
 
 func (r rootSharedReader) ReadAt(p []byte, off int64) (int, error) {
 	if r.ctx != nil && r.ctx.Err() != nil {
 		return 0, r.ctx.Err()
 	}
-	return r.File.ReadAt(p, off)
+	n, err := r.File.ReadAt(p, off)
+	if r.onRead != nil && n > 0 {
+		r.onRead(r.path, int64(n))
+	}
+	return n, err
 }
 
 type rootReader struct {
 	classicFileReader
-	ctx context.Context
+	ctx    context.Context
+	onRead func(string, int64)
+	path   string
 }
 
 func (r rootReader) Read(p []byte) (int, error) {
 	if r.ctx != nil && r.ctx.Err() != nil {
 		return 0, r.ctx.Err()
 	}
-	return r.File.Read(p)
+	n, err := r.File.Read(p)
+	if r.onRead != nil && n > 0 {
+		r.onRead(r.path, int64(n))
+	}
+	return n, err
 }
 func (r rootReader) writeToN(w io.Writer, n int64) (int64, error) {
 	return io.CopyBuffer(w, io.LimitReader(struct{ io.Reader }{r}, n), make([]byte, 128<<10))
@@ -126,11 +143,11 @@ func (r rootFileIo) openForSharedRead(name string) (sharedFileIf, error) {
 	if err != nil {
 		return nil, err
 	}
-	return rootSharedReader{f, r.ctx}, nil
+	return rootSharedReader{File: f, ctx: r.ctx, onRead: r.onRead, path: name}, nil
 }
 func (r rootFileIo) openForRead(name string) (fileReader, error) {
 	f, err := r.open(name, os.O_RDONLY)
-	return rootReader{classicFileReader{f}, r.ctx}, err
+	return rootReader{classicFileReader: classicFileReader{f}, ctx: r.ctx, onRead: r.onRead, path: name}, err
 }
 func (r rootFileIo) openForWrite(name string, _ int64) (fileWriter, error) {
 	return r.open(name, os.O_WRONLY|os.O_CREATE)

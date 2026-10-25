@@ -5,7 +5,7 @@ import (
 	"sort"
 )
 
-// Keep legacy inputs parseable through phase 40. Remove only in a versioned
+// Keep legacy inputs parseable for upgrade compatibility. Remove only in a versioned
 // configuration change, with migration notes; never silently reactivate them.
 var deprecatedSettings = map[string]string{
 	"bt-benchmark-mode":                      "HUB_BT_BENCHMARK_MODE",

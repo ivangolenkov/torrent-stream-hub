@@ -9,6 +9,9 @@ import (
 // Native handle-relative rename, ReplaceIfExists=false. The fixed buffer is
 // bounded by a single Windows filename, not an untrusted absolute path.
 func renameNoReplace(dir *os.File, from, to string) error {
+	return renameBetweenNoReplace(dir, dir, from, to)
+}
+func renameBetweenNoReplace(dir, toDir *os.File, from, to string) error {
 	name, err := windows.NewNTUnicodeString(from)
 	if err != nil {
 		return err
@@ -37,7 +40,7 @@ func renameNoReplace(dir *os.File, from, to string) error {
 	if len(encoded) > len(info.Name) {
 		return windows.ERROR_FILENAME_EXCED_RANGE
 	}
-	info.Root = windows.Handle(dir.Fd())
+	info.Root = windows.Handle(toDir.Fd())
 	info.Length = uint32((len(encoded) - 1) * 2)
 	copy(info.Name[:], encoded)
 	err = windows.NtSetInformationFile(h, &status, (*byte)(unsafe.Pointer(&info)), uint32(unsafe.Sizeof(info)), 10)

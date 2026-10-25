@@ -2,6 +2,7 @@ package usecase
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 
 	"github.com/anacrolix/torrent"
@@ -11,7 +12,12 @@ import (
 
 // Caller owns record/root handles. Only cached, hash-matching metainfo may open an
 // inactive runtime: never fall back to network metadata acquisition here.
-func (uc *TorrentUseCase) restoreInactiveLocked(saved *models.Torrent) error {
+func (uc *TorrentUseCase) restoreInactiveLocked(saved *models.Torrent) (retErr error) {
+	defer func() {
+		if retErr != nil && !errors.Is(retErr, ErrMetadataPending) {
+			retErr = uc.attachmentFailure(saved, retErr)
+		}
+	}()
 	mi, err := metainfo.LoadFromFile(filepath.Join(uc.engine.ConfigDir(), "metainfo", saved.Hash+".torrent"))
 	if err != nil {
 		return ErrMetadataPending

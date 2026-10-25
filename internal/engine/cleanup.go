@@ -6,6 +6,7 @@ import "path/filepath"
 // treated as torrent payload, even if untrusted metainfo claims those names.
 func (e *Engine) CleanupProtectedPaths() []string {
 	paths := []string{
+		filepath.Join(e.cfg.DownloadDir, ".tsh-recovery"),
 		filepath.Join(e.cfg.DownloadDir, ".torrent.bolt.db"),
 		filepath.Join(e.ConfigDir(), "metainfo"),
 		e.cfg.MetainfoTempDir,

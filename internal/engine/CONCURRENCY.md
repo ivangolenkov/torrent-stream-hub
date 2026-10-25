@@ -1,5 +1,29 @@
 # Engine concurrency contract
 
+## Phase 41 storage worker contract
+
+The normal migration worker remains sequential. Ownership retries wake that worker,
+not a second migration executor. Heavy explicit recovery uses one global work ticket
+and the existing bounded engine task owner; saturation returns conflict instead of
+creating a worker per update/request. Shutdown cancels admission/waits but joins the
+resource-owning task before closing storage/SQLite. A stuck syscall is not released
+just because its HTTP waiter was cancelled.
+
+Application path reservations protect preflight-to-publication while releasing
+record handles for long hashes/copies. Their registry mutex owns admission only;
+filesystem and metainfo reads are outside it, and publication SQL is short. The
+storage alias callback may consult that registry/SQLite under the library callback,
+but never waits for record handles or performs filesystem I/O there.
+
+Offline candidate verification uses a separate network-disabled client, one hasher,
+rooted read-only plain-name storage and in-memory completion. It neither creates
+zero-length payload nor imports/renames candidates. Read callbacks only increment
+in-memory counters outside the library lock. They never query SQLite, log chunks,
+or perform more filesystem I/O. The normal two-second latest-only snapshot sampler
+stamps heartbeat independently from last-progress; only actual reads/file completion
+advance progress. Physical safety re-reads count within their stage, not a fictitious
+global percent.
+
 ## Ownership and lock order
 
 Application command handles (sorted hash/root keys; see `usecase/STATE.md`) ->

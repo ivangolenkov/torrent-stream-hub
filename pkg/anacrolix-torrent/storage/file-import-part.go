@@ -11,6 +11,14 @@ import (
 	"golang.org/x/text/unicode/norm"
 )
 
+// LegacyPartConflictError is non-destructive. Path is relative to the torrent
+// metadata root; callers must not infer a preferred candidate from this error.
+type LegacyPartConflictError struct{ Path string }
+
+func (e *LegacyPartConflictError) Error() string {
+	return "legacy partial file conflicts with existing payload; both files preserved"
+}
+
 // Import is idempotent: an atomic no-replace rename either leaves the old name
 // or the metadata name. Verification never trusts either name or persisted hints.
 // Preflight the entire catalog before renaming, so a known conflict leaves every
@@ -56,7 +64,7 @@ func (fs *fileClientImpl) importPartFiles(ctx context.Context, files []fileExtra
 			return fmt.Errorf("checking legacy partial file %q: %w", f.partFilePath(), err)
 		}
 		if _, err := r.stat(f.safeOsPath); err == nil {
-			return fmt.Errorf("legacy partial file conflicts with existing payload %q; both files preserved", f.safeOsPath)
+			return &LegacyPartConflictError{Path: f.safeOsPath}
 		} else if !errors.Is(err, os.ErrNotExist) {
 			return err
 		}

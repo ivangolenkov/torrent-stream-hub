@@ -1,4 +1,5 @@
 import type { Torrent, File, BTHealth } from '../types';
+import type { StorageRecovery, StorageRecoveryAction } from '../types/storageRecovery';
 
 const API_BASE = '/api/v1';
 
@@ -11,6 +12,14 @@ async function commandReceipt(response: Response): Promise<CommandReceipt> {
 }
 
 export const apiClient = {
+  async recoveryAction(hash: string, recovery: StorageRecovery, action: StorageRecoveryAction, choice?: 'final' | 'part'): Promise<CommandResult> {
+    const response = await fetch(`${API_BASE}/torrent/${encodeURIComponent(hash)}/action`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action, record_id: recovery.record_id, version: recovery.version, choice }),
+    });
+    if (!response.ok) throw new Error(await readError(response, 'Storage recovery failed'));
+    return commandReceipt(response);
+  },
   async getTorrents(): Promise<TorrentSnapshot> {
     const response = await fetch(`${API_BASE}/torrents?view=compact`);
     if (!response.ok) throw new Error(await readError(response, 'Failed to fetch torrents'));

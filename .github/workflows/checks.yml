@@ -55,3 +55,5 @@ jobs:
       - name: Storage vet
         working-directory: pkg/anacrolix-torrent
         run: go vet ./storage
+      - name: Native recovery journals, ownership and deletion lifecycle
+        run: go test -race -count=1 ./internal/repository ./internal/usecase -run 'TestLegacyRecovery|TestDeletionCancel|TestOwnership|TestStorageOwnership|TestStorageRecovery|TestStorageMigration|TestStorageBlockedIO|TestRecovery'

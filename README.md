@@ -421,10 +421,135 @@ Hard refresh/client recycle operations are not supported. Legacy
 `HUB_BT_SWARM_HARD_REFRESH_*`, `HUB_BT_SWARM_AUTO_HARD_REFRESH_ENABLED`,
 `HUB_BT_CLIENT_RECYCLE_*`, `HUB_BT_SWARM_DEGRADATION_EPISODE_TTL_SEC`,
 `HUB_BT_SWARM_RECOVERY_GRACE_SEC`, `HUB_BT_BENCHMARK_MODE` and corresponding CLI flags
-remain parseable for phase-40 compatibility, but explicit use logs **deprecated,
+remain parseable for upgrade compatibility, but explicit use logs **deprecated,
 has no effect**. Remove them from deployments. Their parsers will only be removed
 in a separate versioned configuration change with migration notes. Use the
 supported Pause/Resume/Recheck/priority actions and diagnostic Reload.
+
+The following environment variables can be **deleted without replacement** (also
+remove their corresponding `--bt-*` flags). Setting them to `false` still counts
+as explicit use and produces the warning:
+
+```text
+HUB_BT_BENCHMARK_MODE
+HUB_BT_SWARM_HARD_REFRESH_ENABLED
+HUB_BT_SWARM_AUTO_HARD_REFRESH_ENABLED
+HUB_BT_SWARM_HARD_REFRESH_COOLDOWN_SEC
+HUB_BT_SWARM_HARD_REFRESH_AFTER_SOFT_FAILS
+HUB_BT_SWARM_HARD_REFRESH_MIN_TORRENT_AGE_SEC
+HUB_BT_SWARM_DEGRADATION_EPISODE_TTL_SEC
+HUB_BT_SWARM_RECOVERY_GRACE_SEC
+HUB_BT_CLIENT_RECYCLE_ENABLED
+HUB_BT_CLIENT_RECYCLE_COOLDOWN_SEC
+HUB_BT_CLIENT_RECYCLE_AFTER_HARD_FAILS
+HUB_BT_CLIENT_RECYCLE_AFTER_SOFT_FAILS
+HUB_BT_CLIENT_RECYCLE_MIN_TORRENT_AGE_SEC
+HUB_BT_CLIENT_RECYCLE_MIN_TORRENTS
+HUB_BT_CLIENT_RECYCLE_MAX_PER_HOUR
+```
+
+These settings are not responsible for legacy filename conflicts or pending
+deletion. Current Compose and `make run-local` examples do not need them. Removing
+them from this repository does not edit an existing container's environment.
+
+## Storage recovery and migration diagnostics
+
+`storage_state` describes **layout**, not successful runtime attachment or verified
+data. The optional `storage_recovery` object is shared by full/compact list, torrent
+details, SSE and storage action errors. It has stable `reason`/`actions` codes,
+`record_id`, decimal-string operation `version`, separate `runtime` and
+`data_readiness`, deletion status, candidate analysis and stage/byte progress.
+The legacy `error` field remains supported; clients must not parse Go error text.
+Details: `GET /api/v1/torrent/{hash}`. [Wire contract](tasks/phase41-recovery-contract.md).
+
+Recovery commands use the existing `POST /api/v1/torrent/{hash}/action` endpoint:
+
+```json
+{"action":"cancel_deletion","record_id":"<current record_id>","version":"<current version>"}
+```
+
+| Action | Meaning |
+| --- | --- |
+| `retry_deletion` | Continue the saved mode and manifest; never switch keep/payload implicitly. |
+| `cancel_deletion` | Commit cancellation, wait for the current worker/syscall, then stop further deletion. |
+| `forget_record` | After completed cancellation, remove only the record and keep remaining files. |
+| `retry_ownership` | Wake the normal sequential migration worker for a fresh ownership check. |
+| `analyze_legacy` | Run bounded, local-only analysis of the next final/`.part` conflict. |
+| `apply_legacy` | Include `"choice":"final"` or `"choice":"part"`; retain the other whole file and verify. |
+| `resume_verify` | Explicitly verify remaining payload locally, then attempt Resume through normal safety gates. |
+
+Heavy analysis/apply/verification and scheduled ownership retries return **202**;
+watch REST/SSE for the result, not HTTP completion. Deletion retry/cancel/forget
+return 200 only after completion. Requests must use current identity/version;
+re-add invalidates previous recovery capabilities. Actions are advertised only
+when applicable. A mismatched `delete_files` on an existing deletion returns **409**
+with `code=deletion_mode_conflict`, its current mode and recovery actions; it never
+silently changes the intent. Other stable reasons include `legacy_file_conflict`,
+`deletion_pending`, `deletion_cancelled`, `ownership_catalog_changed`,
+`migration_queued`, `migration_active`, `attachment_failed`, `disk_full` and
+`recovery_complete`. Unexpected database/I/O errors remain server failures.
+
+**Cancellation cannot restore removed files.** `removed_data` is `none`, `partial`
+or `unknown`; old manifests import as `unknown`. Cancellation is durable before
+waiting for the worker. Disconnecting the HTTP request or shutting down does not
+erase the intent; restart finishes a requested cancellation before runtime restore.
+The torrent remains paused, and explicit verification/resume is needed. A blocked
+OS syscall still owns its resources until it returns; cancellation is not a claim
+that the syscall has been interrupted.
+
+Normal startup/Resume never merges or chooses conflicting files. Explicit analysis
+streams candidates and uses the library verifier, including v1 pieces spanning
+files and v2/hybrid alignment. Missing neighboring data can make both candidates
+inconclusive. Identical files and fully verified candidates can be suggested, but
+the GUI still requires an explicit whole-file choice; differing partial pieces are
+not merged. Analysis and copied filenames do **not** grant current-open readiness.
+
+Apply records a durable journal before mutation, checks identity/fingerprints and
+ownership, moves the alternative with native rooted no-replace publication, then
+publishes the selection and verifies. The protected directory is
+`<downloads>/.tsh-recovery/<record_id>/<operation-version>/`. It must stay on the
+same filesystem as downloads. Unsupported publication, changed/linked candidates,
+DiskFull and flush failures stop safely; retry the journal rather than deleting
+names by hand. `failure_code` distinguishes candidate changes/missing candidates,
+unsafe files, existing targets, unsupported operations, flush, disk-space and I/O
+failures. A flush error can follow a successful rename; restart inspects both names.
+
+Protected alternatives and their logical file bytes are shown in the GUI (sparse
+or compressed allocation can differ). They are
+**never removed by Resume, torrent deletion or temporary cleanup**, and can remain
+after removing the torrent record. There is no automatic recovery-backup garbage
+collection. Keep them until you have independently verified and backed up the chosen
+payload; manage archival/deletion separately while the service is stopped.
+
+Migration remains sequential for HDDs. Progress reports `preflight`, `checksum`,
+`copy`, `verification`, `cleanup`, plus recovery stages. Byte counts measure actual
+stage reads, including safety re-reads; they are not cumulative download progress.
+Unknown totals are omitted, not zero. Copy may include both source reads and
+destination validation, so no whole-operation percentage/ETA is promised. Current
+file bytes, file counts, queue position, stage start, last byte/file progress and a
+separate heartbeat are exposed. The regular two-second snapshot sampler produces
+the heartbeat even while the storage worker is blocked; heartbeat never advances
+last-progress, reads payload or writes a journal. Publications remain latest-only.
+Repeated identical migration failures retain a count and are log-rate-limited.
+
+### Upgrade rehearsal (always on a copy)
+
+1. Stop the old service; save **downloads, config/metainfo and SQLite together**.
+   Use a consistent SQLite backup or copy the DB and its WAL/SHM while stopped.
+2. Make a separate rehearsal copy, including existing migration/cleanup data and
+   `.tsh-recovery` if present. Do not mount the production payload writable in tests.
+3. Start the new version against the copy. Migration 0014 imports pending deletion
+   without clearing its mode/manifest, and labels its prior unlink progress unknown.
+4. Inspect REST/SSE: layout, runtime, metadata-known, pending actions and queue.
+   Rehearse retry/cancel and candidate analysis/apply; interrupt/restart if needed.
+5. Compare candidate/backup bytes, metainfo and records with the saved baseline.
+   Recheck payload before streaming/upload. Only then separately plan production
+   deployment; this procedure does not authorize modifying the live instance.
+
+**Downgrade:** do not run an older binary on this updated working set. Older
+versions do not understand cancellation/fencing or the recovery journal. Restore
+the coordinated pre-upgrade payload/metainfo/SQLite backup instead. Do not merely
+delete migration records or downgrade SQLite while keeping mutated filenames.
 
 ## Ports
 

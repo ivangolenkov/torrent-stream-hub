@@ -1,3 +1,5 @@
+import type { StorageRecovery } from './storageRecovery';
+
 export type TorrentState = 
   | 'Queued'
   | 'Downloading'
@@ -68,6 +70,7 @@ export interface Torrent {
 	deletion_error?: string;
 	storage_state?: string;
 	storage_error?: string;
+	storage_recovery?: StorageRecovery;
   is_temporary: boolean;
   hash: string;
   name: string;

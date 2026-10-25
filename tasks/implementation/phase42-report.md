@@ -1,6 +1,6 @@
 # Фаза 42 — отчёт об имплементации
 
-Статус: **реализация выполнена; приёмка ожидает native Windows**. Полный `make check` на macOS и native Linux suites прошли. Пользователь разрешил реализацию 25 октября 2026 года. Основание: [план](../phase42-readable-storage-and-file-recovery.md), [контракт](../phase42-storage-contract.md). Фаза не объявлена полностью закрытой: обязательный Windows filesystem DoD ещё не проверен.
+Статус: **фаза завершена; native Windows CI подтверждён пользователем**. Полный `make check` на macOS и native Linux suites прошли; после исправлений Windows fixtures и cleanup пользователь подтвердил успешный Windows CI. Пользователь разрешил реализацию 25 октября 2026 года. Основание: [план](../phase42-readable-storage-and-file-recovery.md), [контракт](../phase42-storage-contract.md). Ниже сохранена история проверок и ранее открытых gates.
 
 ## Baseline и блок 1
 
@@ -126,7 +126,7 @@ Final logs: `/tmp/tsh-phase42-block3-check.log` (имя переиспользо
 
 ## Definition of Done
 
-Блоки 1–7 реализованы; macOS `make check` и native Linux проверки завершены. В блоке 4 исправлено копирование mutex, в блоке 6 — lock cycles и starvation, найденные тестами; limits/assertions не ослаблялись. Проверки вне песочницы необходимы для Go cache и локальных sockets. Единственный открытый gate итоговой приёмки — native Windows.
+Блоки 1–7 реализованы; macOS `make check` и native Linux проверки завершены. В блоке 4 исправлено копирование mutex, в блоке 6 — lock cycles и starvation, найденные тестами; limits/assertions не ослаблялись. Проверки вне песочницы необходимы для Go cache и локальных sockets. Последний gate итоговой приёмки — native Windows — закрыт подтверждением пользователя после исправлений CI (см. итог ниже).
 
 - [x] F42-01: versioned mapping, один resolver и owner для aliases.
 - [x] F42-02: понятные имена новых загрузок и metadata admission magnets.
@@ -137,7 +137,7 @@ Final logs: `/tmp/tsh-phase42-block3-check.log` (имя переиспользо
 - [x] F42-07: ограниченная очередь проверки, приоритет стриминга, измерения.
 - [x] F42-08: upgrade/journal compatibility, retained ownership и документация.
 - [x] Regression гарантий предыдущих фаз.
-- [ ] Финальный make check и native Linux/macOS/Windows suites.
+- [x] Финальный make check и native Linux/macOS/Windows suites (Windows CI подтверждён пользователем).
 - [x] README/wire/state/concurrency contracts и итоговый отчёт.
 
 ## Ограничения и отклонения
@@ -189,3 +189,7 @@ Native Windows недоступен в этой среде; вместо нег�
 - [x] Оба affected теста прошли с `-race -count=3`.
 - [x] Windows amd64 / CGO=0: usecase test binary собран.
 - [ ] Native Windows CI после исправления; итоговый Windows DoD остаётся открытым. Это исправление текущей фазы, следующая фаза не начиналась.
+
+## Итоговая приёмка: Windows CI прошёл (2026-10-25)
+
+После исправлений пользователь сообщил: «Windows CI прошел». Это подтверждение успешного native Windows CI закрывает последний platform gate и итоговый DoD фазы 42. Источник результата — сообщение пользователя; агент самостоятельно не просматривал CI run, ссылка и ID запуска не предоставлены. Ранее открытые Windows пункты выше сохранены как история, а не текущие блокеры. Фаза 42 завершена; следующая фаза не начиналась.

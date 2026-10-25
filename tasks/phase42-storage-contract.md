@@ -1,6 +1,6 @@
 # Фаза 42 — контракт хранения
 
-Статус: блоки 1–7 реализованы; macOS и native Linux проверки прошли, native Windows gate остаётся открытым. Совместимость и platform evidence — в [отчёте](implementation/phase42-report.md).
+Статус: блоки 1–7 реализованы; macOS и native Linux проверки прошли, успешный native Windows CI подтверждён пользователем. Фаза 42 завершена. Совместимость и platform evidence — в [отчёте](implementation/phase42-report.md).
 
 ## Mapping и identity
 

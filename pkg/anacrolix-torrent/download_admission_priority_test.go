@@ -1,10 +1,36 @@
 package torrent
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/anacrolix/torrent/metainfo"
 )
+
+func TestV2MissingHashesDoNotAdmitPayloadRequests(t *testing.T) {
+	cl := newTestingClient(t)
+	tor := cl.newTorrentForTesting()
+	tor.DisallowDataDownload()
+	info := &metainfo.Info{Name: "v2", MetaVersion: 2, PieceLength: 16384, FileTree: metainfo.FileTree{Dir: map[string]metainfo.FileTree{"file": {File: metainfo.FileTreeFile{Length: 32768, PiecesRoot: strings.Repeat("x", 32)}}}}}
+	if err := tor.setInfoUnlocked(info); err != nil {
+		t.Fatal(err)
+	}
+	tor.DownloadAll()
+	cl.lock()
+	if !tor._pendingPieces.IsEmpty() || tor.needData() {
+		t.Fatal("disabled torrent requested hash or payload data")
+	}
+	cl.unlock()
+	tor.AllowDataDownload()
+	cl.lock()
+	if !tor._pendingPieces.IsEmpty() {
+		t.Fatal("unknown hashes admitted payload requests")
+	}
+	if !tor.needData() {
+		t.Fatal("enabled selected files lost hash discovery")
+	}
+	cl.unlock()
+}
 
 func TestDownloadAdmissionRefreshesPendingPieces(t *testing.T) {
 	cl := newTestingClient(t)

@@ -101,6 +101,10 @@ func TestFileReadyForDirectRead_V2AlignedFiles(t *testing.T) {
 	markPieceComplete(tor, 1)
 	assert.True(t, files[1].ReadyForDirectRead())
 	assert.True(t, files[2].ReadyForDirectRead(), "empty trailing file also has an aligned offset")
+	observed := tor.FileObservations()
+	assert.EqualValues(t, 1000, observed[0].VerifiedBytes)
+	assert.EqualValues(t, 1000, observed[1].VerifiedBytes, "v2 alignment padding is not file payload")
+	assert.Zero(t, observed[2].VerifiedBytes)
 
 	tor.cl.lock()
 	tor.pieces[1].hashing = true

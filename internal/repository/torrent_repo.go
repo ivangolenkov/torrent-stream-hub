@@ -238,7 +238,7 @@ func (r *TorrentRepo) allTorrents(tx sqlReader) ([]*models.Torrent, error) {
 }
 
 func (r *TorrentRepo) loadFiles(tx sqlReader, t *models.Torrent) error {
-	rows, err := tx.Query(`SELECT "index", path, size, downloaded, priority, is_media, file_offset, offset_known, legacy_downloaded FROM files WHERE hash = ? ORDER BY "index" ASC`, t.Hash)
+	rows, err := tx.Query(`SELECT "index", path, size, downloaded, priority, is_media, file_offset, offset_known, legacy_downloaded, metadata_path FROM files WHERE hash = ? ORDER BY "index" ASC`, t.Hash)
 	if err != nil {
 		return err
 	}
@@ -247,7 +247,7 @@ func (r *TorrentRepo) loadFiles(tx sqlReader, t *models.Torrent) error {
 	t.Files = nil
 	for rows.Next() {
 		f := &models.File{}
-		if err := rows.Scan(&f.Index, &f.Path, &f.Size, &f.Downloaded, &f.Priority, &f.IsMedia, &f.Offset, &f.OffsetKnown, &f.LegacyDownloaded); err != nil {
+		if err := rows.Scan(&f.Index, &f.Path, &f.Size, &f.Downloaded, &f.Priority, &f.IsMedia, &f.Offset, &f.OffsetKnown, &f.LegacyDownloaded, &f.MetadataPath); err != nil {
 			return err
 		}
 		t.Files = append(t.Files, f)
@@ -261,7 +261,7 @@ func (r *TorrentRepo) loadFilesForTorrents(tx sqlReader, torrents map[string]*mo
 	}
 
 	rows, err := tx.Query(`
-		SELECT f.hash, f."index", f.path, f.size, f.downloaded, f.priority, f.is_media, f.file_offset, f.offset_known, f.legacy_downloaded
+		SELECT f.hash, f."index", f.path, f.size, f.downloaded, f.priority, f.is_media, f.file_offset, f.offset_known, f.legacy_downloaded, f.metadata_path
 		FROM files f
 		JOIN torrents t ON t.hash = f.hash
 		ORDER BY f.hash ASC, f."index" ASC
@@ -274,7 +274,7 @@ func (r *TorrentRepo) loadFilesForTorrents(tx sqlReader, torrents map[string]*mo
 	for rows.Next() {
 		var hash string
 		f := &models.File{}
-		if err := rows.Scan(&hash, &f.Index, &f.Path, &f.Size, &f.Downloaded, &f.Priority, &f.IsMedia, &f.Offset, &f.OffsetKnown, &f.LegacyDownloaded); err != nil {
+		if err := rows.Scan(&hash, &f.Index, &f.Path, &f.Size, &f.Downloaded, &f.Priority, &f.IsMedia, &f.Offset, &f.OffsetKnown, &f.LegacyDownloaded, &f.MetadataPath); err != nil {
 			return err
 		}
 		if t := torrents[hash]; t != nil {
@@ -306,6 +306,9 @@ func (r *TorrentRepo) DeleteTorrent(hash string) error {
 	}
 	// Explicit deletes also cover legacy history without a foreign key and
 	// connections created by older SQLite pool configurations.
+	if _, err := tx.Exec(`DELETE FROM storage_claims WHERE kind!='retained' AND record_id IN (SELECT record_id FROM torrent_intents WHERE hash=?)`, hash); err != nil {
+		return err
+	}
 	for _, query := range []string{
 		`DELETE FROM torrent_download_blocks WHERE hash = ?`,
 		`DELETE FROM viewed_history WHERE hash = ?`,

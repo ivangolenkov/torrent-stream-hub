@@ -26,17 +26,22 @@ func (r *TorrentRepo) NextRecoveryVersion(v *RecoveryRecord) error {
 var ErrDeletionCancelled = errors.New("deletion cancellation requested")
 
 type RecoveryRecord struct {
-	Hash, RecordID                     string
-	Version                            int64
-	Reason                             models.StorageRecoveryReason
-	Stage, RemovedData, Error, Journal string
-	FailureCode                        string
-	Mode                               string
+	LocationSource, LocationTarget, LocationMethod string
+	LocationExtraBytes, LocationAlternativeBytes   int64
+	LocationAlternatives                           int
+	LocationAnalysis                               string
+	LocationFreeBytes                              *uint64
+	Hash, RecordID                                 string
+	Version                                        int64
+	Reason                                         models.StorageRecoveryReason
+	Stage, RemovedData, Error, Journal             string
+	FailureCode                                    string
+	Mode                                           string
 }
 
 func (r *TorrentRepo) Recovery(hash string) (*RecoveryRecord, error) {
 	v := &RecoveryRecord{Hash: hash}
-	err := r.db.DB().QueryRow(`SELECT record_id,version,reason,stage,removed_data,error,journal,failure_code,mode FROM storage_recovery WHERE hash=?`, hash).Scan(&v.RecordID, &v.Version, &v.Reason, &v.Stage, &v.RemovedData, &v.Error, &v.Journal, &v.FailureCode, &v.Mode)
+	err := r.db.DB().QueryRow(`SELECT record_id,version,reason,stage,removed_data,error,journal,failure_code,mode,location_source,location_target,location_method,location_extra_bytes,location_alternatives,location_alternative_bytes,location_analysis,location_free_bytes FROM storage_recovery WHERE hash=?`, hash).Scan(&v.RecordID, &v.Version, &v.Reason, &v.Stage, &v.RemovedData, &v.Error, &v.Journal, &v.FailureCode, &v.Mode, &v.LocationSource, &v.LocationTarget, &v.LocationMethod, &v.LocationExtraBytes, &v.LocationAlternatives, &v.LocationAlternativeBytes, &v.LocationAnalysis, &v.LocationFreeBytes)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -148,7 +153,7 @@ func (r *TorrentRepo) MarkDeletionPartial(hash, id string) error {
 }
 
 func loadStorageRecovery(tx sqlReader, torrents map[string]*models.Torrent) error {
-	rows, err := tx.Query(`SELECT hash,record_id,version,reason,stage,removed_data,error,journal,failure_code,mode FROM storage_recovery`)
+	rows, err := tx.Query(`SELECT hash,record_id,version,reason,stage,removed_data,error,CASE WHEN reason IN ('storage_move','storage_locate') THEN '' ELSE journal END,failure_code,mode,location_alternatives,location_alternative_bytes FROM storage_recovery`)
 	if err != nil {
 		return err
 	}
@@ -156,7 +161,7 @@ func loadStorageRecovery(tx sqlReader, torrents map[string]*models.Torrent) erro
 	for rows.Next() {
 		var hash, stage, removed, message, journal, mode string
 		s := &models.StorageRecovery{Runtime: "absent", DataReadiness: "unknown", Actions: []models.StorageRecoveryAction{}}
-		if err := rows.Scan(&hash, &s.RecordID, &s.Version, &s.Reason, &stage, &removed, &message, &journal, &s.FailureCode, &mode); err != nil {
+		if err := rows.Scan(&hash, &s.RecordID, &s.Version, &s.Reason, &stage, &removed, &message, &journal, &s.FailureCode, &mode, &s.AlternativeCopies, &s.AlternativeBytes); err != nil {
 			return err
 		}
 		t := torrents[hash]
@@ -212,6 +217,7 @@ func loadStorageRecovery(tx sqlReader, torrents map[string]*models.Torrent) erro
 				s.Analysis = detail.Analysis
 			}
 			s.AlternativeCopies = len(detail.Alternatives)
+			s.AlternativeBytes = 0
 			for _, a := range detail.Alternatives {
 				s.AlternativeBytes += a.Size
 			}

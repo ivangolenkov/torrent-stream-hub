@@ -2,6 +2,8 @@
 
 Wire-контракт фазы 41. Первоначально зафиксирован в блоке 1; затем подключён к production workflows, REST/SSE и GUI. Текущий статус приёмки и результаты платформенных проверок приведены в [отчёте](implementation/phase41-report.md).
 
+Совместимость с фазой 42: [контракт хранения](phase42-storage-contract.md) добавляет layout 2, storage identity/revision, move/locate claims и inventory без переписывания manifests/journals фазы 41. Старые isolated hash roots продолжают работать. Pending deletion/cancel, сохранённые alternatives и их ownership не очищаются SQL upgrade. Первичное enrollment старого тома разрешено даже для единственной blocked записи; оно сохраняет journal и не является retry/Resume. Для downgrade нужна согласованная offline-копия БД/metainfo/payload/retained data/volume markers; старый бинарник не должен запускаться на новой раскладке.
+
 ## Независимые оси состояния
 
 - `storage_state` остаётся состоянием layout (`legacy`, `blocked`, `moving`, `ready`). `ready` не подтверждает attachment или целостность payload.

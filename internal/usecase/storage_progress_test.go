@@ -117,7 +117,8 @@ func TestMigrationObservedIOProfile(t *testing.T) {
 	if err := db.DB().QueryRow(`SELECT n FROM profile_writes`).Scan(&writes); err != nil {
 		t.Fatal(err)
 	}
-	if writes > 2*((len(info.Files)+63)/64)+3 {
+	// Layout revision and read-model triggers add two constant writes.
+	if writes > 2*((len(info.Files)+63)/64)+5 {
 		t.Fatalf("journal writes scale with chunks/files: %d", writes)
 	}
 	size := int64(len(data))

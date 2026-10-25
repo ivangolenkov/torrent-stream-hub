@@ -40,7 +40,7 @@ func readConsistentTorrents(readVersion func() (int64, error), readDB func() ([]
 }
 
 func (uc *TorrentUseCase) readAllConsistently() ([]*models.Torrent, error) {
-	return readConsistentTorrents(func() (int64, error) { return uc.repo.ReadVersion() }, uc.repo.GetAllTorrents, uc.engine.GetAllTorrents, func() func() bool {
+	return readConsistentTorrents(func() (int64, error) { return uc.repo.ReadVersion() }, uc.repo.GetAllTorrents, uc.engine.GetAllTorrentsCached, func() func() bool {
 		stamp := uc.engine.CaptureReadStamp("")
 		return func() bool { return uc.engine.ValidateReadStamp(stamp) }
 	})

@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"golang.org/x/text/unicode/norm"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 	"torrent-stream-hub/internal/payload"
@@ -27,6 +26,11 @@ func ownershipOverlap(a, b string) bool {
 // Reservations outlive preflight and protect through the last filesystem effect.
 // Only the registry mutation and short mapping publication use ownershipMu.
 func (uc *TorrentUseCase) reserveOwnership(ctx context.Context, root *os.Root, hash string, paths []string) (func(), error) {
+	for _, path := range paths {
+		if err := uc.checkVolume(path); err != nil {
+			return nil, err
+		}
+	}
 	for attempt := 0; attempt < 16; attempt++ {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -94,7 +98,7 @@ func (uc *TorrentUseCase) publishStorage(m *repository.StorageMapping, alias, en
 	if len(actors) > 0 {
 		actor = actors[0]
 	}
-	if err := uc.claimsConflictLocked(actor, []string{m.Root}); err != nil {
+	if err := uc.claimsConflictLocked(actor, nonemptyPaths(m.Root)); err != nil {
 		return err
 	}
 	if alias {
@@ -115,13 +119,16 @@ func (uc *TorrentUseCase) claimStorageAlias(alias, owner string) error {
 	if m == nil {
 		return ErrStorageConflict
 	}
-	if err := uc.claimsConflictLocked(owner, []string{m.Root}); err != nil {
+	if err := uc.claimsConflictLocked(owner, nonemptyPaths(m.Root)); err != nil {
 		return err
 	}
 	return uc.repo.ClaimStorageAlias(alias, owner)
 }
 
 func (uc *TorrentUseCase) snapshotStoragePaths(rec repository.OwnershipRecord) ([]string, error) {
+	if err := checkMappingVersion(rec.Mapping); err != nil {
+		return nil, err
+	}
 	if rec.Pending && rec.CleanupReady {
 		return rec.Cleanup, nil
 	}
@@ -131,7 +138,10 @@ func (uc *TorrentUseCase) snapshotStoragePaths(rec repository.OwnershipRecord) (
 	}
 	m := rec.Mapping
 	if info == nil {
-		if m != nil && m.Version == payload.LayoutVersion {
+		if m != nil && payload.Supported(m.Version) {
+			if m.Root == "" {
+				return nil, nil
+			}
 			return []string{m.Root}, nil
 		}
 		return nil, nil
@@ -140,10 +150,20 @@ func (uc *TorrentUseCase) snapshotStoragePaths(rec repository.OwnershipRecord) (
 	if err != nil {
 		return nil, err
 	}
-	if m != nil && m.Version == payload.LayoutVersion {
+	if m != nil && payload.Supported(m.Version) {
 		for i, p := range paths {
-			paths[i] = filepath.Join(m.Root, p)
+			paths[i], err = m.Layout().Path(p)
+			if err != nil {
+				return nil, err
+			}
 		}
 	}
 	return paths, nil
+}
+
+func nonemptyPaths(path string) []string {
+	if path == "" {
+		return nil
+	}
+	return []string{path}
 }

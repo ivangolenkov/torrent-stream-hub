@@ -77,13 +77,15 @@ type Client struct {
 	logger  log.Logger
 	slogger *slog.Logger
 
-	peerID         PeerID
-	defaultStorage *storage.Client
-	onClose        []func()
-	dialers        []Dialer
-	listeners      []Listener
-	dhtServers     []DhtServer
-	ipBlockList    iplist.Ranger
+	peerID            PeerID
+	defaultStorage    *storage.Client
+	onClose           []func()
+	onCloseAfterTasks []func()
+	storageTasks      sync.WaitGroup // Includes opens/closures removed from torrents by concurrent Drop.
+	dialers           []Dialer
+	listeners         []Listener
+	dhtServers        []DhtServer
+	ipBlockList       iplist.Ranger
 
 	// Set of addresses that have our client ID. This intentionally will
 	// include ourselves if we end up trying to connect to our own address
@@ -122,6 +124,8 @@ type Client struct {
 	clientWebseedState
 
 	activePieceHashers int
+	hashSequence       uint64
+	hashPriorityBurst  int
 }
 
 type clientWebseedState struct {
@@ -304,7 +308,7 @@ func (cl *Client) init(cfg *ClientConfig) {
 	if storageImpl == nil {
 		// We'd use mmap by default but HFS+ doesn't support sparse files.
 		storageImplCloser := storage.NewFile(cfg.DataDir)
-		cl.onClose = append(cl.onClose, func() {
+		cl.onCloseAfterTasks = append(cl.onCloseAfterTasks, func() {
 			if err := storageImplCloser.Close(); err != nil {
 				cl.logger.Printf("error closing default storage: %s", err)
 			}
@@ -553,6 +557,10 @@ func (cl *Client) Close() (errs []error) {
 	cl.unlock()
 	cl.event.Broadcast()
 	closeGroup.Wait() // defer is LIFO. We want to Wait() after cl.unlock()
+	cl.storageTasks.Wait()
+	for i := len(cl.onCloseAfterTasks) - 1; i >= 0; i-- {
+		cl.onCloseAfterTasks[i]()
+	}
 	return
 }
 
@@ -1556,12 +1564,15 @@ func (cl *Client) AddTorrentOpt(opts AddTorrentOpts) (t *Torrent, new bool) {
 		}
 	})
 	cl.torrentsByShortHash[infoHash] = t
-	t.setInfoBytesLocked(opts.InfoBytes)
 	// Both aliases must be registered before tracker/discovery initialization
 	// in MergeSpec. A hybrid's v2 alias is already present in opts, so setInfo
 	// does not discover and register it as a newly learned hash.
 	if opts.InfoHashV2.Ok {
 		cl.torrentsByShortHash[*opts.InfoHashV2.Value.ToShort()] = t
+	}
+	t.setInfoBytesLocked(opts.InfoBytes)
+	if t.closed.IsSet() {
+		return
 	}
 	cl.clearAcceptLimits()
 	t.updateWantPeersEvent()
@@ -2041,24 +2052,49 @@ func (cl *Client) canStartPieceHashers() bool {
 }
 
 func (cl *Client) startPieceHashers() {
-	if !cl.canStartPieceHashers() {
-		return
-	}
-	ts := make([]*Torrent, 0, len(cl.torrents))
-	for t := range cl.torrents {
-		if !t.considerStartingHashers() {
-			continue
+	for cl.canStartPieceHashers() {
+		type candidate struct {
+			t        *Torrent
+			piece    pieceIndex
+			priority int
+			fair     bool
 		}
-		ts = append(ts, t)
-	}
-	// Sort largest torrents first, as those are preferred by webseeds, and will cause less thrashing.
-	slices.SortFunc(ts, func(a, b *Torrent) int {
-		return -cmp.Compare(a.length(), b.length())
-	})
-	for _, t := range ts {
-		t.startPieceHashers()
-		if !cl.canStartPieceHashers() {
-			break
+		var next candidate
+		for t := range cl.torrents {
+			if !t.considerStartingHashers() || t.closed.IsSet() {
+				continue
+			}
+			fair := cl.hashPriorityBurst >= 8 || t.hashPriorityBurst >= 8
+			piece := t.hashCandidate(fair)
+			if !piece.Ok {
+				continue
+			}
+			priority := t.verificationPriority(piece.Value)
+			if fair {
+				priority = 0
+			}
+			// Select in one pass, without allocating/sorting the entire library
+			// for every completed piece.
+			if next.t == nil || priority > next.priority || priority == next.priority &&
+				(t.lastHashStarted < next.t.lastHashStarted || t.lastHashStarted == next.t.lastHashStarted &&
+					t.canonicalShortInfohash().AsString() < next.t.canonicalShortInfohash().AsString()) {
+				next = candidate{t, piece.Value, priority, fair}
+			}
 		}
+		if next.t == nil {
+			return
+		}
+		if next.fair || next.priority == 0 {
+			cl.hashPriorityBurst = 0
+			next.t.hashPriorityBurst = 0
+			next.t.hashBackgroundCursor = next.piece + 1
+		} else {
+			cl.hashPriorityBurst++
+			next.t.hashPriorityBurst++
+		}
+		cl.hashSequence++
+		next.t.lastHashStarted = cl.hashSequence
+		next.t.startHash(next.piece)
+		go next.t.pieceHasher(next.piece)
 	}
 }

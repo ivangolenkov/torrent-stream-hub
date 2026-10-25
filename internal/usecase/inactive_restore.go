@@ -43,6 +43,9 @@ func (uc *TorrentUseCase) prepareReadLocked(ctx context.Context, hash string, in
 	if saved == nil {
 		return TorrentNotFoundError{Hash: hash}
 	}
+	if err := uc.checkStorageAvailable(hash); err != nil {
+		return err
+	}
 	if err := uc.priorityAvailable(hash); err != nil {
 		return err
 	}

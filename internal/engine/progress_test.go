@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"torrent-stream-hub/internal/models"
 
 	"github.com/anacrolix/torrent"
 	"github.com/anacrolix/torrent/storage"
@@ -14,6 +15,12 @@ func TestVerifiedProgressRevokesReplacedPayload(t *testing.T) {
 	model := e.GetTorrent(tor.Hash)
 	if model.ProgressSource != "verified" || model.Progress != 100 || model.Downloaded != model.Size || !model.MetadataKnown || !model.Files[0].OffsetKnown {
 		t.Fatalf("verified model incorrect: %+v", model)
+	}
+	if model.Files[0].Status == nil || !model.Files[0].Status.DirectReadReady || model.Files[0].Status.VerifiedBytes != model.Size || model.Files[0].Status.CheckedBytes != model.Size || model.Verification.Status != "completed" {
+		t.Fatal("current-open observations missing", model.Files[0].Status, model.Verification)
+	}
+	if next := e.GetTorrentCached(tor.Hash); next.Verification.ProgressAtMS != model.Verification.ProgressAtMS {
+		t.Fatal("polling invented verification progress")
 	}
 	root, err := e.StorageRoot(tor.Hash)
 	if err != nil {
@@ -29,6 +36,26 @@ func TestVerifiedProgressRevokesReplacedPayload(t *testing.T) {
 	model = e.GetTorrent(tor.Hash)
 	if model.Downloaded != 0 || model.Progress != 0 || model.Files[0].Downloaded != 0 {
 		t.Fatalf("replacement retained verified progress: %+v", model)
+	}
+}
+
+func TestCompletedEmptySelectionDoesNotClaimSeeding(t *testing.T) {
+	e, tor := setupCompletedLifecycleTorrent(t)
+	if err := e.Resume(tor.Hash); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.SetTorrentFilesPriority(tor.Hash, models.PriorityNone); err != nil {
+		t.Fatal(err)
+	}
+	model := e.GetTorrent(tor.Hash)
+	if model.State == models.StateSeeding || model.State == models.StateDownloading || !model.Files[0].Status.DirectReadReady {
+		t.Fatal("empty selection claimed download/seeding or lost checked local bytes", model)
+	}
+	if err := e.SetFilePriority(tor.Hash, 0, models.PriorityNormal); err != nil {
+		t.Fatal(err)
+	}
+	if model := e.GetTorrent(tor.Hash); model.State != models.StateSeeding {
+		t.Fatal("selected complete payload did not return to seeding", model)
 	}
 }
 

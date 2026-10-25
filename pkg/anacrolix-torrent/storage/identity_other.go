@@ -4,4 +4,5 @@ package storage
 
 import "os"
 
-func FileIdentity(*os.File) (string, error) { return "", os.ErrInvalid }
+func FileIdentity(*os.File) (string, error)       { return "", os.ErrInvalid }
+func FilesystemIdentity(*os.File) (string, error) { return "", os.ErrInvalid }

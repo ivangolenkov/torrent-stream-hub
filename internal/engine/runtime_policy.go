@@ -6,6 +6,7 @@ import "torrent-stream-hub/internal/models"
 // inputs. The durable desired revision remains owned by SQLite; staging closes
 // readiness without pretending an uncommitted command has been applied.
 type runtimePolicy struct {
+	selectionEmpty                                           bool
 	registered, terminal                                     bool
 	run                                                      models.RunIntent
 	slot                                                     bool
@@ -55,7 +56,7 @@ func (p runtimePolicy) projection() (models.TorrentState, models.ErrorReason) {
 		return models.StateError, models.ErrVerificationFailed
 	}
 	if !p.terminal && !p.initializing && !p.checking && !p.uncertain {
-		if p.payloadComplete {
+		if p.payloadComplete && !p.selectionEmpty {
 			return models.StateSeeding, models.ErrNone
 		}
 		if p.slot {
@@ -197,6 +198,7 @@ func runtimeTransition(p runtimePolicy, event stateEvent) (stateDecision, error)
 			return reject("runtime_veto")
 		}
 		n.selectedComplete, n.payloadComplete = event.selectedComplete, event.payloadComplete
+		n.selectionEmpty = event.selectionEmpty
 		if n.selectedComplete || !n.payloadEligible() {
 			n.slot = false
 			d.resetDownload = p.slot

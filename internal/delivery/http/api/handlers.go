@@ -37,6 +37,7 @@ func (h *APIHandler) RegisterRoutes(r chi.Router) {
 	r.Get("/torrent/{hash}", h.GetTorrent)
 	r.Post("/torrent/add", h.AddTorrent)
 	r.Post("/torrent/{hash}/action", h.TorrentAction)
+	r.Post("/torrent/{hash}/storage", h.StorageCommand)
 	r.Put("/torrent/{hash}/priority", h.SetTorrentPriority)
 	r.Put("/torrent/{hash}/file/{index}/priority", h.SetFilePriority)
 	r.Get("/torrent/{hash}/files", h.GetTorrentFiles)
@@ -70,6 +71,7 @@ func (h *APIHandler) GetAllTorrents(w http.ResponseWriter, r *http.Request) {
 }
 
 type AddTorrentReq struct {
+	FolderName  string `json:"folder_name"`
 	PrivateSafe bool   `json:"private_safe"`
 	Link        string `json:"link"`
 	SavePath    string `json:"save_path"`
@@ -92,7 +94,7 @@ func (h *APIHandler) AddTorrent(w http.ResponseWriter, r *http.Request) {
 	}
 
 	logging.Infof("api add torrent %s", logging.SafeMagnetSummary(req.Link))
-	t, err := h.uc.AddMagnetWithMetadata(req.Link, usecase.TorrentMetadata{Poster: req.Poster, PrivateSafe: req.PrivateSafe})
+	t, err := h.uc.AddMagnetWithMetadata(req.Link, usecase.TorrentMetadata{Poster: req.Poster, PrivateSafe: req.PrivateSafe, FolderName: req.FolderName})
 	if err != nil {
 		if errors.Is(err, engine.ErrDownloadBlocked) || errors.Is(err, usecase.ErrStorageConflict) {
 			response.Error(w, http.StatusConflict, err.Error())
@@ -340,7 +342,11 @@ func (h *APIHandler) GetTorrentFiles(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if t.Control != nil {
-		w.Header().Set("X-Hub-Details", fmt.Sprintf("%s/%s/%d", t.Control.RecordID, t.CatalogVersion, t.Control.DesiredRevision))
+		revision := ""
+		if t.Storage != nil {
+			revision = strconv.FormatInt(t.Storage.Revision, 10)
+		}
+		w.Header().Set("X-Hub-Details", fmt.Sprintf("%s/%s/%d/%s/%s", t.Control.RecordID, t.CatalogVersion, t.Control.DesiredRevision, revision, t.Control.RuntimeAttachment))
 	}
 	logging.Debugf("api get torrent files hash=%s files=%d", hash, len(t.Files))
 	response.JSON(w, http.StatusOK, t.Files)

@@ -4,22 +4,19 @@ import (
 	"errors"
 	"io/fs"
 	"os"
-	"path/filepath"
 
 	"github.com/anacrolix/torrent"
-	"torrent-stream-hub/internal/payload"
 )
 
 // Called only for a file with current-open verified readiness observed before
 // the storage/read check. Ordinary incomplete files, missing metadata and hash
 // mismatch are not evidence of physical disappearance. No background scan.
 func (e *Engine) detectMissingExpectedPayload(mt *ManagedTorrent, file *torrent.File) error {
-	rootName, err := e.StorageRoot(mt.hash)
+	fi := file.FileInfo()
+	rel, err := e.PayloadPath(mt.hash, mt.t.Info(), &fi)
 	if err != nil {
 		return err
 	}
-	fi := file.FileInfo()
-	rel := filepath.Join(rootName, payload.Path(mt.t.Info(), &fi))
 	if !isSafeRelativePath(rel) {
 		return nil
 	}

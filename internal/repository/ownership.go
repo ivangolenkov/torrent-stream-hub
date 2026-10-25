@@ -17,6 +17,7 @@ type OwnershipSnapshot struct {
 	Version  int64
 	Records  []OwnershipRecord
 	Mappings map[string]*StorageMapping
+	Claims   []StorageClaim
 }
 
 func (r *TorrentRepo) OwnershipVersion(ctx context.Context) (int64, error) {
@@ -42,17 +43,34 @@ func (r *TorrentRepo) ReadOwnership(ctx context.Context) (*OwnershipSnapshot, er
 	if err != nil {
 		return nil, err
 	}
-	rows, err := tx.Query(`SELECT hash,version,root,state,manifest,error FROM torrent_storage`)
+	rows, err := tx.Query(`SELECT hash,version,root,state,manifest,error,storage_id,revision,prefix,name_hint FROM torrent_storage`)
 	if err != nil {
 		return nil, err
 	}
 	for rows.Next() {
 		m := new(StorageMapping)
-		if err := rows.Scan(&m.Hash, &m.Version, &m.Root, &m.State, &m.Manifest, &m.Error); err != nil {
+		if err := rows.Scan(&m.Hash, &m.Version, &m.Root, &m.State, &m.Manifest, &m.Error, &m.StorageID, &m.Revision, &m.Prefix, &m.NameHint); err != nil {
 			rows.Close()
 			return nil, err
 		}
 		s.Mappings[m.Hash] = m
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return nil, err
+	}
+	rows, err = tx.Query(`SELECT storage_id,record_id,operation_version,path,kind FROM storage_claims`)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var c StorageClaim
+		if err := rows.Scan(&c.StorageID, &c.RecordID, &c.Version, &c.Path, &c.Kind); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		s.Claims = append(s.Claims, c)
 	}
 	err = rows.Err()
 	rows.Close()

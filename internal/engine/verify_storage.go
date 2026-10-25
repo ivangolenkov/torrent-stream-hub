@@ -28,7 +28,10 @@ type FileVerification struct {
 	ValidPieces int `json:"valid_pieces"`
 	TotalPieces int `json:"total_pieces"`
 }
-type StorageVerification struct{ Files []FileVerification }
+type StorageVerification struct {
+	Files                    []FileVerification
+	ValidPieces, TotalPieces int
+}
 
 // VerifyReadOnlyStorage uses the library's v1/v2/hybrid verifier, including v1
 // shared boundary pieces and v2 alignment. Overrides select whole files only;
@@ -42,24 +45,42 @@ func VerifyStorageProgress(ctx context.Context, dir, hash string, mi *metainfo.M
 }
 
 func verifyStorage(ctx context.Context, dir, rootPath string, mi *metainfo.MetaInfo, overrides map[string]string, onRead func(string, int64), readOnly bool) (*StorageVerification, error) {
+	return verifyStorageLayout(ctx, dir, payload.Layout{Version: payload.NamedLayoutVersion, Root: rootPath}, mi, overrides, onRead, readOnly)
+}
+
+func VerifyReadOnlyLayout(ctx context.Context, dir string, layout payload.Layout, mi *metainfo.MetaInfo, overrides map[string]string, onRead func(string, int64)) (*StorageVerification, error) {
+	if err := layout.Validate(); err != nil {
+		return nil, err
+	}
+	return verifyStorageLayout(ctx, dir, layout, mi, overrides, onRead, true)
+}
+
+func verifyStorageLayout(ctx context.Context, dir string, layout payload.Layout, mi *metainfo.MetaInfo, overrides map[string]string, onRead func(string, int64), readOnly bool) (*StorageVerification, error) {
 	root, err := os.OpenRoot(dir)
 	if err != nil {
 		return nil, err
 	}
 	opts := storage.NewFileClientOpts{ClientBaseDir: dir, RootFS: root, VerifyOnOpen: true, NoCompletionRename: true, IOContext: ctx, ReadOnly: readOnly, IORead: onRead, PieceCompletion: storage.NewMapPieceCompletion(),
 		TorrentDirMaker: func(base string, _ *metainfo.Info, _ metainfo.Hash) string {
-			return filepath.Join(base, rootPath)
+			return filepath.Join(base, layout.Root)
+		},
+		TorrentPathResolver: func(base string, info *metainfo.Info, _ metainfo.Hash) (string, []string, error) {
+			var paths []string
+			for _, f := range info.UpvertedFiles() {
+				path, err := layout.Relative(payload.Path(info, &f))
+				if err != nil {
+					return "", nil, err
+				}
+				if replacement, ok := overrides[path]; ok {
+					path = replacement
+				}
+				paths = append(paths, path)
+			}
+			return filepath.Join(base, layout.Root), paths, nil
 		},
 	}
 	if readOnly {
 		opts.UsePartFiles = g.Some(false)
-		opts.FilePathMaker = func(o storage.FilePathMakerOpts) string {
-			path := storage.DefaultFilePathMaker(o)
-			if replacement, ok := overrides[path]; ok {
-				return replacement
-			}
-			return path
-		}
 	}
 	backend := storage.NewFileOpts(opts)
 	defer backend.Close()
@@ -77,6 +98,8 @@ func verifyStorage(ctx context.Context, dir, rootPath string, mi *metainfo.MetaI
 	cfg.AcceptPeerConnections = false
 	cfg.PieceHashersPerTorrent = 1
 	cfg.MaxActivePieceHashers = 1
+	cfg.HashBudget = sharedVerificationBudget
+	cfg.VerificationBackground = true
 	client, err := torrent.NewClient(cfg)
 	if err != nil {
 		return nil, err
@@ -102,6 +125,12 @@ func verifyStorage(ctx context.Context, dir, rootPath string, mi *metainfo.MetaI
 		return nil, err
 	}
 	result := &StorageVerification{}
+	result.TotalPieces = t.Info().NumPieces()
+	for index := 0; index < result.TotalPieces; index++ {
+		if t.PieceState(index).Complete {
+			result.ValidPieces++
+		}
+	}
 	for _, f := range t.Files() {
 		state := FileVerification{}
 		if f.Length() > 0 {

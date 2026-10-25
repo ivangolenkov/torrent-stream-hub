@@ -1,0 +1,7 @@
+{
+  "storage": {"id":"storage-a","revision":"9007199254740993","layout_version":2,"root":"payload/Series","prefix":"Series","status":"ready","operation":{"kind":"move","stage":"planned","version":"4","source":"payload/old","target":"payload/Series","actions":["apply_move","cancel_storage"]}},
+  "file": {"storage_path":"payload/Series/episode.mkv","presence":"present","verified_bytes":0,"last_known_bytes":16,"last_known_at_ms":1234,"last_known_source":"last_known","read_reason":"verification_required","verification_total":16,"observed_at_ms":1234,"verification":"queued","direct_read_ready":false,"effective_priority":"normal"},
+  "selection": {"catalog_version":"catalog-a","revision":"9007199254740993","complete":true,"size":16,"verified_bytes":16,"progress":100,"files":1},
+  "empty_selection": {"size":0,"verified_bytes":0,"files":0},
+  "command": {"action":"apply_move","record_id":"record-a","storage_id":"storage-a","mapping_revision":"9007199254740993","version":"4"}
+}

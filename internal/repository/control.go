@@ -62,5 +62,11 @@ func loadControls(tx sqlReader, torrents map[string]*models.Torrent) error {
 	if err != nil {
 		return err
 	}
+	if err := loadStorageLocations(tx, torrents); err != nil {
+		return err
+	}
+	if err := loadFileObservations(tx, torrents); err != nil {
+		return err
+	}
 	return loadStorageRecovery(tx, torrents)
 }

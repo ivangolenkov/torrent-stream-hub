@@ -34,14 +34,16 @@ func (e *Engine) reconcileSelectionLocked(mt *ManagedTorrent) {
 		return
 	}
 	selectionComplete, allComplete := true, true
+	selectedFiles := 0
 	for i, file := range mt.t.Files() {
 		complete := prefix(file.Offset()+file.Length())-prefix(file.Offset()) == file.Length()
 		allComplete = allComplete && complete
 		if mt.filePriorities[i] != models.PriorityNone {
+			selectedFiles++
 			selectionComplete = selectionComplete && complete
 		}
 	}
-	d, err := mt.applyStateEventLocked(stateEvent{kind: stateSelectionObserved, metadataKnown: true, selectedComplete: selectionComplete, payloadComplete: allComplete})
+	d, err := mt.applyStateEventLocked(stateEvent{kind: stateSelectionObserved, metadataKnown: true, selectedComplete: selectionComplete, payloadComplete: allComplete, selectionEmpty: selectedFiles == 0})
 	mt.mu.Unlock()
 	if err != nil {
 		return

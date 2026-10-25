@@ -99,7 +99,7 @@ func capturePersistableRuntime(e *engine.Engine, r *repository.TorrentRepo, hash
 func runtimeCatalog(t *models.Torrent) models.TorrentCatalog {
 	c := models.TorrentCatalog{Format: t.MetadataFormat, Name: t.Name, Size: t.Size, PieceLength: t.PieceLength, NumPieces: t.NumPieces}
 	for _, f := range t.Files {
-		c.Files = append(c.Files, models.FileCatalog{Index: f.Index, Path: f.Path, Size: f.Size, Offset: f.Offset, IsMedia: f.IsMedia})
+		c.Files = append(c.Files, models.FileCatalog{Index: f.Index, Path: f.Path, MetadataPath: f.MetadataPath, Size: f.Size, Offset: f.Offset, IsMedia: f.IsMedia})
 	}
 	return c
 }

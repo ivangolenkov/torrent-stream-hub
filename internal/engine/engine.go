@@ -14,6 +14,7 @@ import (
 	"torrent-stream-hub/internal/config"
 	"torrent-stream-hub/internal/logging"
 	"torrent-stream-hub/internal/models"
+	"torrent-stream-hub/internal/payload"
 
 	"github.com/anacrolix/torrent"
 	"github.com/anacrolix/torrent/metainfo"
@@ -35,9 +36,10 @@ func (e TorrentNotFoundError) Is(target error) bool {
 }
 
 type Engine struct {
-	client  *torrent.Client
-	storage storage.ClientImplCloser
-	cfg     *config.Config
+	storageIOObserver func(operation, path string, bytes int64)
+	client            *torrent.Client
+	storage           storage.ClientImplCloser
+	cfg               *config.Config
 
 	ctx                   context.Context
 	cancel                context.CancelFunc
@@ -51,6 +53,8 @@ type Engine struct {
 	eventWake             chan struct{}
 	storageRootMu         sync.RWMutex
 	storageRootResolver   func(string) (string, error)
+	storageLayoutResolver func(string, *metainfo.Info) (payload.Layout, error)
+	storageIOGuard        func(string) error
 	storageAliasRegistrar func(string, string) error
 
 	mu                      sync.RWMutex
@@ -83,43 +87,46 @@ type Engine struct {
 }
 
 type ManagedTorrent struct {
-	hash                      string
-	mu                        sync.Mutex
-	t                         *torrent.Torrent
-	state                     models.TorrentState
-	err                       models.ErrorReason
-	metadataLogged            bool
-	metadataWaitLogged        bool
-	downloadAllStarted        bool
-	lastStatsAt               time.Time
-	lastRawReadBytes          int64
-	lastDataReadBytes         int64
-	lastReadBytes             int64
-	lastWrittenBytes          int64
-	rawDownloadSpeed          int64
-	dataDownloadSpeed         int64
-	downloadSpeed             int64
-	uploadSpeed               int64
-	lastPeerSummary           models.PeerSummary
-	lastPeerLog               time.Time
-	trackerStatus             string
-	trackerError              string
-	sourceURI                 string
-	metainfo                  *metainfo.MetaInfo
-	addedAt                   time.Time
-	degraded                  bool
-	lastSwarmCheckAt          time.Time
-	lastSwarmRefreshAt        time.Time
-	lastSwarmRefreshReason    string
-	lastPeerRefreshAt         time.Time
-	lastPeerRefreshReason     string
-	lastHealthyAt             time.Time
-	stallStartedAt            time.Time
-	peakDownloadSpeed         int64
-	peakUpdatedAt             time.Time
-	boostUntil                time.Time
-	normalMaxEstablishedConns int
-	filePriorities            map[int]models.FilePriority
+	verificationSampleOperation uint64
+	verificationSampleBytes     int64
+	verificationProgressAtMS    int64
+	hash                        string
+	mu                          sync.Mutex
+	t                           *torrent.Torrent
+	state                       models.TorrentState
+	err                         models.ErrorReason
+	metadataLogged              bool
+	metadataWaitLogged          bool
+	downloadAllStarted          bool
+	lastStatsAt                 time.Time
+	lastRawReadBytes            int64
+	lastDataReadBytes           int64
+	lastReadBytes               int64
+	lastWrittenBytes            int64
+	rawDownloadSpeed            int64
+	dataDownloadSpeed           int64
+	downloadSpeed               int64
+	uploadSpeed                 int64
+	lastPeerSummary             models.PeerSummary
+	lastPeerLog                 time.Time
+	trackerStatus               string
+	trackerError                string
+	sourceURI                   string
+	metainfo                    *metainfo.MetaInfo
+	addedAt                     time.Time
+	degraded                    bool
+	lastSwarmCheckAt            time.Time
+	lastSwarmRefreshAt          time.Time
+	lastSwarmRefreshReason      string
+	lastPeerRefreshAt           time.Time
+	lastPeerRefreshReason       string
+	lastHealthyAt               time.Time
+	stallStartedAt              time.Time
+	peakDownloadSpeed           int64
+	peakUpdatedAt               time.Time
+	boostUntil                  time.Time
+	normalMaxEstablishedConns   int
+	filePriorities              map[int]models.FilePriority
 	// Restored torrents remain download-disabled until settings and persistence
 	// have been installed. Readers cannot override the library-level prohibition.
 	initializing           bool
@@ -151,6 +158,12 @@ type ManagedTorrent struct {
 }
 
 type Option func(*Engine)
+
+// WithStorageIOObserver instruments payload storage without polling or an extra
+// hash pass. The callback may run concurrently and must not call the engine.
+func WithStorageIOObserver(observe func(operation, path string, bytes int64)) Option {
+	return func(e *Engine) { e.storageIOObserver = observe }
+}
 
 // WithPieceCompletion transfers backend ownership to the engine's storage.
 // The application owns the database and closes it after Engine.Close.
@@ -339,6 +352,18 @@ func (e *Engine) GetTorrent(hash string) *models.Torrent {
 		return nil
 	}
 	mt.t.RefreshStorageCompletion()
+	return e.mapManagedTorrent(mt)
+}
+
+// GetTorrentCached is an observational API read. Admission/open paths refresh
+// evidence separately; API polling must not stat a complete catalog.
+func (e *Engine) GetTorrentCached(hash string) *models.Torrent {
+	e.mu.RLock()
+	mt := e.managedTorrents[hash]
+	e.mu.RUnlock()
+	if mt == nil {
+		return nil
+	}
 	return e.mapManagedTorrent(mt)
 }
 

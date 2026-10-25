@@ -13,10 +13,12 @@ import (
 
 // rootFileIo never falls back to absolute filesystem operations.
 type rootFileIo struct {
+	onEvent  func(string, string)
 	root     *os.Root
 	ctx      context.Context
 	readOnly bool
 	onRead   func(string, int64)
+	guard    func(string) error
 }
 
 var ErrUnsafeFile = errors.New("unsafe storage file")
@@ -25,14 +27,19 @@ var ErrUnsafeFile = errors.New("unsafe storage file")
 // symlinks and hardlinks are rejected, and existing file identity is revalidated
 // after the rooted open. Callers own the returned descriptor, never the root.
 func OpenRootFile(root *os.Root, name string, flags int) (*os.File, error) {
+	return openRootFileObserved(root, name, flags, nil)
+}
+
+func openRootFileObserved(root *os.Root, name string, flags int, observe func(string, string)) (*os.File, error) {
 	if !filepath.IsLocal(name) || filepath.Clean(name) == "." {
 		return nil, ErrUnsafeFile
 	}
-	r := rootFileIo{root: root}
+	r := rootFileIo{root: root, onEvent: observe}
 	rel, err := r.relative(filepath.Join(root.Name(), name))
 	if err != nil {
 		return nil, err
 	}
+	r.event("lstat", rel)
 	expected, err := root.Lstat(rel)
 	if err != nil && !(flags&os.O_CREATE != 0 && errors.Is(err, os.ErrNotExist)) {
 		return nil, err
@@ -42,10 +49,12 @@ func OpenRootFile(root *os.Root, name string, flags int) (*os.File, error) {
 			return nil, err
 		}
 	}
+	r.event("open", rel)
 	f, err := root.OpenFile(rel, flags, filePerm)
 	if err != nil {
 		return nil, err
 	}
+	r.event("fstat", rel)
 	st, err := f.Stat()
 	if err != nil || !st.Mode().IsRegular() || FileHasMultipleLinks(f, st) || expected != nil && !os.SameFile(expected, st) {
 		f.Close()
@@ -69,6 +78,7 @@ func (r rootFileIo) relative(name string) (string, error) {
 	}
 	parts := strings.Split(rel, string(os.PathSeparator))
 	for i := range parts {
+		r.event("lstat", filepath.Join(parts[:i+1]...))
 		st, err := r.root.Lstat(filepath.Join(parts[:i+1]...))
 		if errors.Is(err, os.ErrNotExist) {
 			break
@@ -97,7 +107,18 @@ func (r rootFileIo) open(name string, flags int) (*os.File, error) {
 	if err != nil {
 		return nil, err
 	}
-	return OpenRootFile(r.root, rel, flags)
+	if r.guard != nil {
+		if err := r.guard(rel); err != nil {
+			return nil, err
+		}
+	}
+	return openRootFileObserved(r.root, rel, flags, r.onEvent)
+}
+
+func (r rootFileIo) event(operation, path string) {
+	if r.onEvent != nil {
+		r.onEvent(operation, path)
+	}
 }
 
 type rootSharedReader struct {
@@ -209,6 +230,7 @@ func (r rootFileIo) stat(name string) (os.FileInfo, error) {
 		if err != nil {
 			return nil, err
 		}
+		r.event("stat", rel)
 		st, err := r.root.Stat(rel)
 		if err != nil {
 			return nil, err
@@ -223,5 +245,6 @@ func (r rootFileIo) stat(name string) (os.FileInfo, error) {
 		return nil, err
 	}
 	defer f.Close()
+	r.event("fstat", name)
 	return f.Stat()
 }

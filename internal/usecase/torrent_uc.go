@@ -21,6 +21,7 @@ import (
 
 	"github.com/anacrolix/torrent"
 	"github.com/anacrolix/torrent/metainfo"
+	"github.com/anacrolix/torrent/storage"
 )
 
 var ErrTorrentNotFound = repository.ErrTorrentNotFound
@@ -43,6 +44,11 @@ func (e TorrentNotFoundError) Is(target error) bool {
 }
 
 type TorrentUseCase struct {
+	volumeMu             sync.RWMutex
+	volumes              []payload.VolumeRegistration
+	inventorySession     string
+	inventoryInitError   error
+	inventoryWake        chan struct{}
 	engine               *engine.Engine
 	repo                 *repository.TorrentRepo
 	coordinator          *applicationCoordinator
@@ -67,6 +73,11 @@ type TorrentUseCase struct {
 	recoveryMove            func(*os.Root, string, string) error
 	recoveryStep            func(string) error
 	storageWake             chan struct{}
+	layoutWake              chan string
+	locationWake            chan struct{}
+	locationWorkMu          sync.Mutex
+	locationWork            *activeLocationWork
+	locationMove            func(*os.Root, string, string) error
 	storageByteHook         func(string, int64)
 	storageStageHook        func(string, models.StorageProgress, time.Duration)
 	migrationFailures       map[string]migrationFailure
@@ -82,6 +93,7 @@ type TorrentMetadata struct {
 	Data        string
 	Poster      string
 	Category    string
+	FolderName  string
 }
 
 type DownloadedDiskFile struct {
@@ -112,17 +124,37 @@ func NewTorrentUseCase(e *engine.Engine, r *repository.TorrentRepo) *TorrentUseC
 		engine: e, repo: r, maxTemporary: 3, transfers: make(map[string]int),
 		protectedUntil: make(map[string]time.Time), transferRecords: make(map[string]string),
 		coordinator: newApplicationCoordinator(e.Context()), storageWake: make(chan struct{}, 1),
+		layoutWake:    make(chan string, 64),
+		locationWake:  make(chan struct{}, 1),
+		inventoryWake: make(chan struct{}, 1),
 	}
-	e.SetStorageRootResolver(func(hash string) (string, error) {
+	uc.initializeInventory()
+	e.SetStorageIOGuard(uc.guardPayloadIO)
+	e.SetStorageLayoutResolver(func(hash string, info *metainfo.Info) (payload.Layout, error) {
 		m, err := r.StorageMapping(hash)
 		if err != nil {
-			return "", err
+			return payload.Layout{}, err
 		}
-		if m == nil || m.State != "ready" || m.Manifest != "" || m.Version != payload.LayoutVersion {
-			return "", ErrStorageConflict
+		if m != nil && m.State == "reserved" && m.Version == payload.NamedLayoutVersion {
+			if info != nil {
+				select {
+				case uc.layoutWake <- hash:
+				default:
+				}
+			}
+			return payload.Layout{}, storage.ErrStoragePending
 		}
-		return m.Root, nil
+		if !m.Ready() {
+			return payload.Layout{}, ErrStorageConflict
+		}
+		if err := uc.inventoryAdmitted(m); err != nil {
+			return payload.Layout{}, storage.ErrStoragePending
+		}
+		return m.Layout(), nil
 	}, uc.claimStorageAlias)
+	e.StartTask(uc.runLayoutReservations)
+	e.StartTask(uc.runLocationOperations)
+	e.StartTask(uc.runInventory)
 	e.StartTask(func(ctx context.Context) { <-ctx.Done(); _ = uc.coordinator.close(context.Background()) })
 	return uc
 }
@@ -157,7 +189,7 @@ func (uc *TorrentUseCase) AddMagnetWithPolicy(magnet string, metadata TorrentMet
 		return nil, err
 	}
 	defer release()
-	if err := uc.checkSpecAddAllowed(parsed); err != nil {
+	if err := uc.checkSpecAddAllowed(parsed, metadata.FolderName); err != nil {
 		return nil, err
 	}
 	// Mapping/alias reservation is now durable and insert-only. Reacquire the
@@ -169,7 +201,7 @@ func (uc *TorrentUseCase) AddMagnetWithPolicy(magnet string, metadata TorrentMet
 		return nil, err
 	}
 	defer release()
-	if err := uc.checkSpecAddAllowed(parsed); err != nil {
+	if err := uc.checkSpecAddAllowed(parsed, metadata.FolderName); err != nil {
 		return nil, err
 	}
 	t, err := uc.engine.AddStagedMagnet(magnet)
@@ -208,7 +240,7 @@ func (uc *TorrentUseCase) AddTorrentFileWithPolicy(r io.Reader, metadata Torrent
 		return nil, err
 	}
 	defer release()
-	if err := uc.checkSpecAddAllowed(spec); err != nil {
+	if err := uc.checkSpecAddAllowed(spec, metadata.FolderName); err != nil {
 		return nil, err
 	}
 	release()
@@ -217,7 +249,7 @@ func (uc *TorrentUseCase) AddTorrentFileWithPolicy(r io.Reader, metadata Torrent
 		return nil, err
 	}
 	defer release()
-	if err := uc.checkSpecAddAllowed(spec); err != nil {
+	if err := uc.checkSpecAddAllowed(spec, metadata.FolderName); err != nil {
 		return nil, err
 	}
 	t, err := uc.engine.AddStagedTorrentFile(&encoded, metadata.PrivateSafe)
@@ -230,7 +262,7 @@ func (uc *TorrentUseCase) AddTorrentFileWithPolicy(r io.Reader, metadata Torrent
 }
 
 // Caller owns hash/root keys; reject re-add before engine mutation/admission.
-func (uc *TorrentUseCase) checkSpecAddAllowed(spec *torrent.TorrentSpec) error {
+func (uc *TorrentUseCase) checkSpecAddAllowed(spec *torrent.TorrentSpec, names ...string) error {
 	if err := uc.initializeStorageLocked(); err != nil {
 		return err
 	}
@@ -278,7 +310,18 @@ func (uc *TorrentUseCase) checkSpecAddAllowed(spec *torrent.TorrentSpec) error {
 		v2 := spec.InfoHashV2.Value
 		alias = v2.ToShort().HexString()
 	}
-	return uc.reserveStorageLocked(hash, alias)
+	if err := uc.reserveStorageLocked(hash, alias, names...); err != nil {
+		return err
+	}
+	if len(spec.InfoBytes) > 0 {
+		mi := &metainfo.MetaInfo{InfoBytes: spec.InfoBytes}
+		info, err := mi.UnmarshalInfo()
+		if err != nil {
+			return err
+		}
+		return uc.prepareNamedStorage(uc.engine.Context(), hash, &info)
+	}
+	return nil
 }
 
 func (uc *TorrentUseCase) checkAddAllowed(hash string) error {
@@ -342,7 +385,7 @@ func (uc *TorrentUseCase) GetTorrent(hash string) (*models.Torrent, error) {
 		return []*models.Torrent{v}, nil
 	}
 	readRuntime := func() []*models.Torrent {
-		v := uc.engine.GetTorrent(hash)
+		v := uc.engine.GetTorrentCached(hash)
 		if v == nil {
 			return nil
 		}
@@ -370,7 +413,7 @@ func (uc *TorrentUseCase) GetTorrent(hash string) (*models.Torrent, error) {
 // "2" = downloaded, "1" = partial/downloading, "0" = missing.
 // Returns an empty string if torrent or metadata is not available.
 func (uc *TorrentUseCase) GetTorrentPieces(hash string) (string, error) {
-	if model := uc.engine.GetTorrent(hash); model != nil && model.ProgressSource == "checking" {
+	if model := uc.engine.GetTorrentCached(hash); model != nil && model.ProgressSource == "checking" {
 		return "", nil
 	}
 	result, err := uc.engine.PieceStatus(hash)
@@ -452,6 +495,9 @@ func (uc *TorrentUseCase) Resume(hash string, contexts ...context.Context) error
 
 func (uc *TorrentUseCase) resumeLocked(hash string) error {
 	logging.Infof("usecase resume hash=%s", hash)
+	if err := uc.repairMissingInventory(hash); err != nil {
+		return err
+	}
 	t, err := uc.repo.GetTorrent(hash)
 	if err != nil {
 		logging.Warnf("resume failed to load torrent hash=%s: %v", hash, err)
@@ -461,7 +507,7 @@ func (uc *TorrentUseCase) resumeLocked(hash string) error {
 		logging.Debugf("resume requested for missing torrent hash=%s", hash)
 		return TorrentNotFoundError{Hash: hash}
 	}
-	if err := uc.checkStorageAvailable(hash); err != nil {
+	if err := uc.checkStorageAvailable(hash); err != nil && !uc.canFetchOnlyMetadata(t) {
 		return err
 	}
 	if _, pending, err := uc.repo.CleanupPaths(hash); err != nil {
@@ -596,7 +642,7 @@ func (uc *TorrentUseCase) SetTorrentFilesPriority(hash string, priority models.F
 }
 
 func (uc *TorrentUseCase) priorityAvailable(hash string) error {
-	if err := uc.checkStorageAvailable(hash); err != nil {
+	if err := uc.checkStorageWorkflow(hash); err != nil {
 		return err
 	}
 	if _, pending, err := uc.repo.CleanupPaths(hash); err != nil {
@@ -682,6 +728,12 @@ func (uc *TorrentUseCase) RestoreTorrents() error {
 }
 
 func (uc *TorrentUseCase) RestoreTorrentsContext(ctx context.Context) error {
+	defer func() {
+		select {
+		case uc.inventoryWake <- struct{}{}:
+		default:
+		}
+	}()
 	started := time.Now()
 	logging.Infof("restoring persisted torrents stage=storage-init")
 	if err := uc.initializeStorageLocked(ctx); err != nil {
@@ -738,7 +790,7 @@ func (uc *TorrentUseCase) restorePersistedTorrent(ctx context.Context, hash stri
 	if recovery, err := uc.repo.Recovery(hash); err != nil {
 		return false, err
 	} else if recovery != nil {
-		if recovery.Stage == "cancel_requested" {
+		if recovery.Stage == "cancel_requested" && recovery.Reason != models.StorageMove && recovery.Reason != models.StorageLocate {
 			if err := uc.engine.Delete(hash); err != nil {
 				return false, err
 			}
@@ -748,7 +800,10 @@ func (uc *TorrentUseCase) restorePersistedTorrent(ctx context.Context, hash stri
 			return false, nil
 		}
 	}
-	if err := uc.checkStorageAvailable(hash); err != nil {
+	if ready, err := uc.inspectInventory(ctx, hash, false); err != nil || !ready {
+		return false, err
+	}
+	if err := uc.checkStorageAvailable(hash); err != nil && !uc.canFetchOnlyMetadata(current) {
 		if errors.Is(err, ErrStorageConflict) {
 			return false, nil
 		}
@@ -781,6 +836,13 @@ func (uc *TorrentUseCase) restoreTorrentToEngine(t *models.Torrent) (result *mod
 			spec, specErr := torrent.TorrentSpecFromMetaInfoErr(mi)
 			if specErr != nil {
 				return nil, specErr
+			}
+			info, infoErr := mi.UnmarshalInfo()
+			if infoErr != nil {
+				return nil, infoErr
+			}
+			if err := uc.prepareNamedStorage(uc.engine.Context(), t.Hash, &info); err != nil {
+				return nil, err
 			}
 			return uc.engine.RestoreTorrent(spec, t)
 		}
@@ -1022,6 +1084,7 @@ func mergePersistedMetadata(runtime, persisted *models.Torrent) {
 	}
 	runtime.StorageState, runtime.StorageError = persisted.StorageState, persisted.StorageError
 	runtime.StorageRecovery = persisted.StorageRecovery
+	runtime.Storage = persisted.Storage
 	runtime.Title = persisted.Title
 	runtime.Data = persisted.Data
 	runtime.Poster = persisted.Poster

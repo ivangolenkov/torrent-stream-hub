@@ -34,7 +34,7 @@ func TestPriorityHTTPValidation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	known := "abcdef0123456789abcdef0123456789abcdef0123"
+	known := "abababababababababababababababababababab"
 	if err := repo.SaveTorrent(&models.Torrent{Hash: known, State: models.StatePaused, Files: []*models.File{{Index: 0, Path: "video"}}}); err != nil {
 		t.Fatal(err)
 	}

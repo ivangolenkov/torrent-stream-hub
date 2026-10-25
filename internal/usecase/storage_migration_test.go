@@ -4,9 +4,9 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha1"
-	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"github.com/anacrolix/torrent/merkle"
 	"os"
 	"path/filepath"
 	"testing"
@@ -26,6 +26,7 @@ import (
 func migrationMetainfo(t *testing.T, name string, data []byte, multi bool, version string) *metainfo.MetaInfo {
 	t.Helper()
 	info := metainfo.Info{Name: name, PieceLength: 16384, Length: int64(len(data))}
+	var layers map[string]string
 	if multi {
 		info.Length = 0
 		info.Files = []metainfo.FileInfo{{Length: int64(len(data)), Path: []string{"video.bin"}}}
@@ -42,14 +43,25 @@ func migrationMetainfo(t *testing.T, name string, data []byte, multi bool, versi
 		if version == "v2" {
 			info.Files = nil
 		}
-		h := sha256.Sum256(data)
-		info.FileTree = metainfo.FileTree{Dir: map[string]metainfo.FileTree{"video.bin": {File: metainfo.FileTreeFile{Length: int64(len(data)), PiecesRoot: string(h[:])}}}}
+		hasher := merkle.NewHash()
+		hasher.Write(data)
+		root := string(hasher.Sum(nil))
+		if len(data) > 16384 {
+			var layer []byte
+			for off := 0; off < len(data); off += 16384 {
+				h := merkle.NewHash()
+				h.Write(data[off:min(off+16384, len(data))])
+				layer = h.SumMinLength(layer, 16384)
+			}
+			layers = map[string]string{root: string(layer)}
+		}
+		info.FileTree = metainfo.FileTree{Dir: map[string]metainfo.FileTree{"video.bin": {File: metainfo.FileTreeFile{Length: int64(len(data)), PiecesRoot: root}}}}
 	}
 	encoded, err := bencode.Marshal(&info)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &metainfo.MetaInfo{InfoBytes: encoded}
+	return &metainfo.MetaInfo{InfoBytes: encoded, PieceLayers: layers}
 }
 
 func legacyMigrationFixture(t *testing.T, uc *TorrentUseCase, mi *metainfo.MetaInfo, data []byte, part bool) (*models.Torrent, string) {
@@ -504,14 +516,12 @@ func TestHybridV2MagnetLearnsCanonicalAlias(t *testing.T) {
 	}
 	// Simulate metadata received directly by the library, not a second native add.
 	raw := uc.engine.GetRawTorrent(before.Hash)
-	if err := raw.SetInfoBytes(mi.InfoBytes); err != nil {
-		t.Fatal(err)
-	}
+	supplyNamedMetadata(t, raw, mi)
 	canonical, err := repo.StorageMapping(spec.InfoHash.HexString())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if canonical == nil || canonical.Root != payload.Root(before.Hash) {
+	if canonical == nil || canonical.Root != payload.NamedRoot("hybrid", 1) {
 		t.Fatalf("new root allocated for metadata alias: %+v", canonical)
 	}
 	var encoded bytes.Buffer

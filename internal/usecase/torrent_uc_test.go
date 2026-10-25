@@ -154,7 +154,7 @@ func TestDeleteTorrentFilesRemovesSingleFileAndPartFile(t *testing.T) {
 
 	downloadDir := uc.engine.DownloadDir()
 	tor := temporaryFile(t, uc, "movie.mkv", false)
-	filePath := filepath.Join(downloadDir, "payload", tor.Hash, "movie.mkv")
+	filePath := filepath.Join(downloadDir, "payload", "movie.mkv", "movie.mkv")
 	if err := os.MkdirAll(filepath.Dir(filePath), 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -184,7 +184,7 @@ func TestDeleteTorrentFilesRemovesMultiFileStorageLayout(t *testing.T) {
 
 	downloadDir := uc.engine.DownloadDir()
 	tor := temporaryFile(t, uc, "Torrent Root", true)
-	filePath := filepath.Join(downloadDir, "payload", tor.Hash, "Torrent Root", "nested", "video.bin")
+	filePath := filepath.Join(downloadDir, "payload", "Torrent Root", "nested", "video.bin")
 	if err := os.MkdirAll(filepath.Dir(filePath), 0o700); err != nil {
 		t.Fatalf("failed to create dir: %v", err)
 	}
@@ -199,7 +199,7 @@ func TestDeleteTorrentFilesRemovesMultiFileStorageLayout(t *testing.T) {
 	if _, err := os.Stat(filePath); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("expected nested file to be removed, stat err=%v", err)
 	}
-	if _, err := os.Stat(filepath.Join(downloadDir, "Torrent Root")); !errors.Is(err, os.ErrNotExist) {
+	if _, err := os.Stat(filepath.Join(downloadDir, "payload", "Torrent Root")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("expected empty torrent root to be pruned, stat err=%v", err)
 	}
 }

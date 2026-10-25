@@ -85,6 +85,8 @@ type Torrent struct {
 
 	networkingEnabled        chansync.Flag
 	privateSafe              bool
+	metadataPrivate          bool
+	storagePending           bool
 	publicDiscoveryCtx       context.Context
 	stopPublicDiscovery      context.CancelFunc
 	dataDownloadDisallowed   chansync.Flag
@@ -122,7 +124,9 @@ type Torrent struct {
 	// Storage for torrent data.
 	storage *storage.Torrent
 	// Read-locked for using storage, and write-locked for Closing.
-	storageLock sync.RWMutex
+	storageLock      sync.RWMutex
+	storageOpening   chan struct{}
+	hashLayerUpdates int // Pending layer writers get a turn before another hash starts.
 
 	announceList metainfo.AnnounceList
 
@@ -187,8 +191,13 @@ type Torrent struct {
 	// A cache of completed piece indices.
 	_completedPieces roaring.Bitmap
 	// Pieces that need to be hashed.
-	piecesQueuedForHash typedRoaring.Bitmap[pieceIndex]
-	activePieceHashes   int
+	piecesQueuedForHash      typedRoaring.Bitmap[pieceIndex]
+	verificationSelected     roaring.Bitmap
+	verificationSelectionSet bool
+	hashPriorityBurst        int
+	hashBackgroundCursor     pieceIndex
+	lastHashStarted          uint64
+	activePieceHashes        int
 
 	connsWithAllPieces map[*Peer]struct{}
 
@@ -514,6 +523,8 @@ func (t *Torrent) addPieceLayersLocked(layers map[string]string) (errs []error) 
 	if layers == nil {
 		return
 	}
+	t.hashLayerUpdates++
+	defer func() { t.hashLayerUpdates--; t.cl.startPieceHashers() }()
 files:
 	for _, f := range *t.files {
 		if f.numPieces() <= 1 {
@@ -603,17 +614,50 @@ func (t *Torrent) cacheLength() {
 // TODO: This shouldn't fail for storage reasons. Instead we should handle storage failure
 // separately.
 func (t *Torrent) setInfo(info *metainfo.Info) error {
+	if t.closed.IsSet() {
+		return errTorrentClosed
+	}
+	if t.storageOpening != nil {
+		return storage.ErrStoragePending
+	}
 	if err := validateInfo(info); err != nil {
 		return fmt.Errorf("bad info: %w", err)
 	}
+	if info.Private != nil && *info.Private && !t.metadataPrivate {
+		t.metadataPrivate = true
+		t.enforceDiscoveryPolicyLocked()
+	}
 	if t.storageOpener != nil {
-		var err error
-		ctx := log.ContextWithLogger(context.Background(), t.logger)
-		t.storage, err = t.storageOpener.OpenTorrent(ctx, info, *t.canonicalShortInfohash())
+		// Imports, volume validation and zero-length creation may block. Publish
+		// this open generation before releasing the common client lock. Close
+		// joins it; no late result can attach storage to a dropped torrent.
+		opening := make(chan struct{})
+		t.cl.storageTasks.Add(1)
+		t.storageOpening, t.storagePending = opening, true
+		ctx := log.ContextWithLogger(t.closedCtx, t.logger)
+		hash, opener := *t.canonicalShortInfohash(), t.storageOpener
+		t.cl.unlock()
+		opened, err := opener.OpenTorrent(ctx, info, hash)
+		t.cl.lock()
+		if t.closed.IsSet() {
+			t.cl.unlock()
+			if opened != nil && opened.Close != nil {
+				_ = opened.Close()
+			}
+			t.cl.lock()
+			err = errTorrentClosed
+		} else if err == nil {
+			t.storage = opened
+		}
+		t.storageOpening = nil
+		close(opening)
+		t.cl.storageTasks.Done()
 		if err != nil {
+			t.storagePending = errors.Is(err, storage.ErrStoragePending)
 			return fmt.Errorf("error opening torrent storage: %w", err)
 		}
 	}
+	t.storagePending = false
 	t.nameMu.Lock()
 	t.info = info
 	panicif.True(t.fileSegmentsIndex.Set(info.FileSegmentsIndex()).Ok)
@@ -709,6 +753,9 @@ func (t *Torrent) hashInfoBytes(b []byte, info *metainfo.Info) error {
 
 // Called when metadata for a torrent becomes available.
 func (t *Torrent) setInfoBytesLocked(b []byte) (err error) {
+	if t.closed.IsSet() {
+		return errTorrentClosed
+	}
 	var info metainfo.Info
 	err = bencode.Unmarshal(b, &info)
 	if err != nil {
@@ -806,6 +853,7 @@ func (t *Torrent) pieceState(index pieceIndex) (ret PieceState) {
 	ret.Completion = p.completion()
 	ret.QueuedForHash = p.queuedForHash()
 	ret.Hashing = p.hashing
+	ret.WaitingForHashBudget = p.hashWaiting.Load()
 	ret.Checking = ret.QueuedForHash || ret.Hashing
 	ret.Marking = p.marking
 	if ret.Ok && !ret.Complete && t.piecePartiallyDownloaded(index) {
@@ -1160,13 +1208,19 @@ func (t *Torrent) close(wg *sync.WaitGroup) {
 	t.deferUpdateRegularTrackerAnnouncing()
 	t.closedCtxCancel(errTorrentClosed)
 	t.getInfoCtxCancel(errTorrentClosed)
+	if opening := t.storageOpening; opening != nil {
+		wg.Add(1)
+		go func() { defer wg.Done(); <-opening }()
+	}
 	for _, f := range t.onClose {
 		f()
 	}
 	if t.storage != nil {
 		wg.Add(1)
+		t.cl.storageTasks.Add(1)
 		go func() {
 			defer wg.Done()
+			defer t.cl.storageTasks.Done()
 			t.storageLock.Lock()
 			defer t.storageLock.Unlock()
 			if f := t.storage.Close; f != nil {
@@ -1636,7 +1690,7 @@ func (t *Torrent) onPiecePendingTriggers(piece pieceIndex) {
 func (t *Torrent) updatePendingPieces(piece pieceIndex) bool {
 	p := t.piece(piece)
 	newPrio := p.effectivePriority()
-	if newPrio == PiecePriorityNone && p.haveHash() {
+	if newPrio == PiecePriorityNone {
 		return t._pendingPieces.CheckedRemove(uint32(piece))
 	} else {
 		return t._pendingPieces.CheckedAdd(uint32(piece))
@@ -1944,6 +1998,9 @@ func (t *Torrent) maybeCompleteMetadata() error {
 		return nil
 	}
 	err := t.setInfoBytesLocked(t.metadataBytes)
+	if errors.Is(err, storage.ErrStoragePending) {
+		return nil
+	}
 	if err != nil {
 		t.invalidateMetadata()
 		return fmt.Errorf("error setting info bytes: %w", err)
@@ -1973,7 +2030,20 @@ func (t *Torrent) needData() bool {
 		return true
 	}
 	t.checkPendingPiecesMatchesRequestOrder()
-	return !t._pendingPieces.IsEmpty()
+	if !t._pendingPieces.IsEmpty() {
+		return true
+	}
+	// V2 hash discovery is distinct from admission of payload requests. A
+	// missing hash must not put a disabled/unchecked piece in request order.
+	if !t.dataDownloadDisallowed.IsSet() {
+		for i := range t.pieces {
+			p := &t.pieces[i]
+			if !p.haveHash() && p.purePriority() != PiecePriorityNone {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func appendMissingStrings(old, new []string) (ret []string) {
@@ -2883,43 +2953,18 @@ func (t *Torrent) onIncompletePiece(piece pieceIndex) {
 	})
 }
 
-// Torrent piece hashers are sticky and will try to keep hashing pieces in the same Torrent to keep
-// the storage hot.
+// Every piece returns to the shared client scheduler; a large torrent cannot
+// retain a hasher until its entire backlog has drained.
 func (t *Torrent) startPieceHashers() error {
 	if t.closed.IsSet() {
 		return errTorrentClosed
 	}
-	for t.considerStartingHashers() {
-		if !t.startSinglePieceHasher() {
-			break
-		}
-	}
+	t.cl.startPieceHashers()
 	return nil
 }
 
-func (t *Torrent) startSinglePieceHasher() bool {
-	pi := t.getPieceToHash()
-	if !pi.Ok {
-		return false
-	}
-	t.startHash(pi.Value)
-	go t.pieceHasher(pi.Value)
-	return true
-}
-
-// Sticky to a Torrent. Might as well since that keeps the storage hot.
 func (t *Torrent) pieceHasher(initial pieceIndex) {
 	t.finishHash(initial)
-	for {
-		piOpt := t.getPieceToHash()
-		if !piOpt.Ok {
-			break
-		}
-		pi := piOpt.Value
-		t.startHash(pi)
-		t.cl.unlock()
-		t.finishHash(pi)
-	}
 	t.cl.startPieceHashers()
 	t.cl.unlock()
 }
@@ -2928,22 +2973,13 @@ func (t *Torrent) startHash(pi pieceIndex) {
 	p := t.piece(pi)
 	t.piecesQueuedForHash.Remove(pi)
 	p.hashing = true
+	p.hashWaiting.Store(t.cl.config.HashBudget != nil)
+	p.hashPriority = uint8(t.verificationPriority(pi))
 	t.deferPublishPieceStateChange(pi)
 	t.updatePiecePriority(pi, "Torrent.startHash")
 	t.storageLock.RLock()
 	t.activePieceHashes++
 	t.cl.activePieceHashers++
-}
-
-func (t *Torrent) getPieceToHash() (_ g.Option[pieceIndex]) {
-	for i := range t.piecesQueuedForHash.Iterate {
-		p := t.piece(i)
-		if p.hashing || p.marking {
-			continue
-		}
-		return g.Some(i)
-	}
-	return
 }
 
 func (t *Torrent) dropBannedPeers() {
@@ -2975,8 +3011,33 @@ func (t *Torrent) finishHash(index pieceIndex) {
 	p := t.piece(index)
 	// Do we really need to spell out that it's a copy error? If it's a failure to hash the hash
 	// will just be wrong.
-	correct, failedPeers, copyErr := t.hashPiece(index)
+	var release func()
+	var copyErr error
+	if budget := t.cl.config.HashBudget; budget != nil {
+		var keys []string
+		if resources, ok := p.Storage().PieceImpl.(interface{ VerificationResources() ([]string, error) }); ok {
+			keys, copyErr = resources.VerificationResources()
+		}
+		if copyErr == nil {
+			release, copyErr = budget.Acquire(t.closedCtx, keys, int(p.hashPriority))
+		}
+		p.hashWaiting.Store(false)
+	}
+	var correct bool
+	var failedPeers map[bannableAddr]struct{}
+	if copyErr == nil {
+		if err := t.closedCtx.Err(); err != nil {
+			copyErr = err
+		} else {
+			correct, failedPeers, copyErr = t.hashPiece(index)
+		}
+	}
 	t.storageLock.RUnlock()
+	// Release before reacquiring Client.lock: a v2 layer publisher can hold
+	// that lock while waiting for a different hasher's storage read lock.
+	if release != nil {
+		release()
+	}
 	level := slog.LevelDebug
 	switch copyErr {
 	case nil, io.EOF:
@@ -3905,6 +3966,9 @@ func (t *Torrent) getClosedErr() error {
 }
 
 func (t *Torrent) considerStartingHashers() bool {
+	if t.hashLayerUpdates != 0 {
+		return false
+	}
 	if t.storage == nil {
 		return false
 	}

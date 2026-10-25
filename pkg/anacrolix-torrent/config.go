@@ -211,8 +211,10 @@ type ClientConfig struct {
 
 	DialRateLimiter *rate.Limiter
 
-	PieceHashersPerTorrent int // default: 2
-	MaxActivePieceHashers  int // 0 uses the CPU/environment default.
+	PieceHashersPerTorrent int         // default: 2
+	MaxActivePieceHashers  int         // 0 uses the CPU/environment default.
+	HashBudget             *HashBudget // Optional shared physical budget across clients.
+	VerificationBackground bool        // Offline jobs stay below reader/selected work.
 }
 
 func (cfg *ClientConfig) SetListenAddr(addr string) *ClientConfig {

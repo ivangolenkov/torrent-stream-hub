@@ -2,12 +2,85 @@ package engine
 
 import (
 	"fmt"
+	"github.com/anacrolix/torrent/metainfo"
 	"path/filepath"
 	"torrent-stream-hub/internal/payload"
 )
 
+func (e *Engine) SetStorageIOGuard(guard func(string) error) {
+	e.storageRootMu.Lock()
+	e.storageIOGuard = guard
+	e.storageRootMu.Unlock()
+}
+
+func (e *Engine) checkStorageIO(path string) error {
+	e.storageRootMu.RLock()
+	guard := e.storageIOGuard
+	e.storageRootMu.RUnlock()
+	if guard != nil {
+		return guard(path)
+	}
+	return nil
+}
+
+func (e *Engine) SetStorageLayoutResolver(resolve func(string, *metainfo.Info) (payload.Layout, error), alias func(string, string) error) {
+	e.storageRootMu.Lock()
+	e.storageLayoutResolver = resolve
+	e.storageAliasRegistrar = alias
+	e.storageRootMu.Unlock()
+}
+
+func (e *Engine) StorageLayout(hash string, info *metainfo.Info) (payload.Layout, error) {
+	e.storageRootMu.RLock()
+	resolve, register := e.storageLayoutResolver, e.storageAliasRegistrar
+	e.storageRootMu.RUnlock()
+	if resolve == nil {
+		root, err := e.legacyStorageRoot(hash)
+		l := payload.Layout{Version: payload.LayoutVersion, Root: root}
+		if err == nil {
+			err = l.Validate()
+		}
+		return l, err
+	}
+	l, err := resolve(hash, info)
+	if err != nil && register != nil {
+		owner := ""
+		e.mu.RLock()
+		for key, mt := range e.managedTorrents {
+			if key != hash && mt.t != nil && mt.t.InfoHash().HexString() == hash {
+				owner = key
+				break
+			}
+		}
+		e.mu.RUnlock()
+		if owner != "" {
+			if aliasErr := register(hash, owner); aliasErr != nil {
+				return l, aliasErr
+			}
+			l, err = resolve(owner, info)
+		}
+	}
+	if err != nil {
+		return l, err
+	}
+	if err = l.Validate(); err != nil {
+		return l, err
+	}
+	_, err = e.validateStorageRoot(l.Root)
+	return l, err
+}
+
+func (e *Engine) PayloadPath(hash string, info *metainfo.Info, file *metainfo.FileInfo) (string, error) {
+	l, err := e.StorageLayout(hash, info)
+	if err != nil {
+		return "", err
+	}
+	return l.File(info, file)
+}
+
 func (e *Engine) SetStorageRootResolver(resolve func(string) (string, error), aliases ...func(string, string) error) {
 	e.storageRootMu.Lock()
+	e.storageLayoutResolver = nil
 	e.storageRootResolver = resolve
 	if len(aliases) > 0 {
 		e.storageAliasRegistrar = aliases[0]
@@ -16,6 +89,11 @@ func (e *Engine) SetStorageRootResolver(resolve func(string) (string, error), al
 }
 
 func (e *Engine) StorageRoot(hash string) (string, error) {
+	l, err := e.StorageLayout(hash, nil)
+	return l.Root, err
+}
+
+func (e *Engine) legacyStorageRoot(hash string) (string, error) {
 	e.storageRootMu.RLock()
 	resolve, register := e.storageRootResolver, e.storageAliasRegistrar
 	e.storageRootMu.RUnlock()
@@ -55,7 +133,7 @@ func (e *Engine) StorageRoot(hash string) (string, error) {
 }
 
 func (e *Engine) validateStorageRoot(root string) (string, error) {
-	if !payload.ValidRoot(root) {
+	if payload.ValidateRelative(root) != nil {
 		return "", fmt.Errorf("invalid isolated storage mapping")
 	}
 	abs, err := filepath.Abs(filepath.Join(e.cfg.DownloadDir, root))

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"iter"
 	"sync"
+	"sync/atomic"
 
 	"github.com/RoaringBitmap/roaring"
 	"github.com/anacrolix/chansync"
@@ -42,6 +43,9 @@ type Piece struct {
 	publicPieceState PieceState
 	// Piece-specific priority. There are other priorities like File and Reader.
 	priority PiecePriority
+	// This transition must not take Client.lock while storageLock is held:
+	// v2 hash updates use the opposite lock order.
+	hashWaiting atomic.Bool
 	// Availability adjustment for this piece relative to len(Torrent.connsWithAllPieces). This is
 	// incremented for any piece a peer has when a peer has a piece, Torrent.haveInfo is true, and
 	// the Peer isn't recorded in Torrent.connsWithAllPieces.
@@ -59,7 +63,8 @@ type Piece struct {
 	// Value to twiddle to detect races.
 	race byte
 	// Currently being hashed.
-	hashing bool
+	hashing      bool
+	hashPriority uint8
 	// The piece state may have changed, and is being synchronized with storage.
 	marking bool
 	// The Completion.Ok field cached from the storage layer.
@@ -387,7 +392,23 @@ func (p *Piece) mustGetOnlyFile() *File {
 func (p *Piece) setV2Hash(v2h [32]byte) {
 	// See Torrent.onSetInfo. We want to trigger an initial check if appropriate, if we didn't yet
 	// have a piece hash (can occur with v2 when we don't start with piece layers).
-	p.t.storageLock.Lock()
+	p.t.hashLayerUpdates++
+	defer func() { p.t.hashLayerUpdates--; p.t.cl.startPieceHashers() }()
+	for {
+		if p.t.closed.IsSet() || p.hashV2.Ok && p.hashV2.Value == v2h {
+			return
+		}
+		if p.t.storageLock.TryLock() {
+			break
+		}
+		// Hashing may be waiting for a disk lease or an uncancellable syscall.
+		// Wait for storage outside the common lock, then revalidate under the
+		// original Client -> storage lock order. Never invert those locks.
+		p.t.cl.unlock()
+		p.t.storageLock.Lock()
+		p.t.storageLock.Unlock()
+		p.t.cl.lock()
+	}
 	oldV2Hash := p.hashV2.Set(v2h)
 	p.t.storageLock.Unlock()
 	if !oldV2Hash.Ok && p.hash == nil {

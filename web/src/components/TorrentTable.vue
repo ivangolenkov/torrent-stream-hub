@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { progressLabel, storageLabel, storagePending } from '../progress';
+import { progressLabel, storageLabel, storagePending, selectionLabel, activityLabel } from '../progress';
 import { computed, ref, onMounted, onUnmounted, nextTick, watch } from 'vue';
 import { useTorrentStore } from '../stores/torrentStore';
 import { PlayIcon, PauseIcon, TrashIcon, EllipsisVerticalIcon, FolderOpenIcon, PlusIcon } from '@heroicons/vue/24/solid';
@@ -121,7 +121,7 @@ const formatPeerTitle = (torrent: Torrent) => {
 };
 
 const torrentLabel = (torrent: Torrent) => torrent.name || torrent.title || torrent.hash;
-const canDownloadTorrent = (torrent: Torrent) => torrent.progress_source === 'verified' && torrent.size > 0 && torrent.downloaded >= torrent.size;
+const canDownloadTorrent = (torrent: Torrent) => torrent.direct_read_ready === true;
 const normalActions = (torrent: Torrent) => !torrent.deletion_mode && (!torrent.storage_recovery || torrent.storage_recovery.reason === 'recovery_complete');
 
 const downloadTorrent = (torrent: Torrent) => {
@@ -227,7 +227,8 @@ const confirmDelete = async () => {
 							<div v-if="t.activity?.verifying && !t.recheck" class="text-xs text-amber-700">Verifying</div>
               <div v-if="t.control?.reconcile_pending && !t.storage_recovery" class="text-xs text-amber-700" :title="t.control.reconcile_reason">Saved: {{ t.control.desired_run }} · {{ storagePending(t) ? 'waiting for storage migration' : 'apply pending' }}</div>
               <div v-if="t.control?.apply_failure" class="text-xs text-red-600" :title="t.control.apply_failure.code">Apply failed · retry with Pause or Resume</div>
-              <div v-if="t.selection_complete && t.state !== 'Seeding'" class="text-xs text-gray-500">Selected files complete (no background slot)</div>
+              <div v-if="selectionLabel(t)" class="text-xs text-gray-500">{{ selectionLabel(t) }}</div>
+              <div v-if="activityLabel(t)" class="text-xs text-gray-500">{{ activityLabel(t) }}</div>
               <div v-if="t.deletion_mode" class="text-xs text-orange-700">Deletion pending ({{ t.deletion_mode }}). {{ t.deletion_error }}</div>
               <div v-if="t.download_block" class="text-xs text-orange-700">Download blocked: {{ t.download_block }}. Resume manually after recovery.</div>
               <div v-if="storageLabel(t)" class="text-xs text-amber-700">{{ storageLabel(t) }}. {{ t.storage_error }}</div>
@@ -337,7 +338,8 @@ const confirmDelete = async () => {
 					<div v-if="t.activity?.verifying && !t.recheck" class="text-xs text-amber-700">Verifying</div>
           <div v-if="t.control?.reconcile_pending && !t.storage_recovery" class="text-xs text-amber-700" :title="t.control.reconcile_reason">Saved: {{ t.control.desired_run }} · {{ storagePending(t) ? 'waiting for storage migration' : 'apply pending' }}</div>
           <div v-if="t.control?.apply_failure" class="text-xs text-red-600" :title="t.control.apply_failure.code">Apply failed · retry with Pause or Resume</div>
-          <div v-if="t.selection_complete && t.state !== 'Seeding'" class="text-xs text-gray-500">Selected files complete (no background slot)</div>
+          <div v-if="selectionLabel(t)" class="text-xs text-gray-500">{{ selectionLabel(t) }}</div>
+              <div v-if="activityLabel(t)" class="text-xs text-gray-500">{{ activityLabel(t) }}</div>
           <div v-if="t.deletion_mode" class="text-xs text-orange-700">Deletion pending ({{ t.deletion_mode }}). {{ t.deletion_error }}</div>
           <div v-if="t.download_block" class="text-xs text-orange-700">Download blocked: {{ t.download_block }}. Resume manually after recovery.</div>
           <div v-if="storageLabel(t)" class="text-xs text-amber-700">{{ storageLabel(t) }}. {{ t.storage_error }}</div>

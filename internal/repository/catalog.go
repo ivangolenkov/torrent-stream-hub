@@ -126,16 +126,17 @@ func saveCatalogTx(tx sqlWriter, hash string, c models.TorrentCatalog) error {
 		return ErrStateConflict
 	}
 	// A metainfo generation cannot replace an already known file identity.
-	rows, err := tx.Query(`SELECT "index",path,size,file_offset,offset_known FROM files WHERE hash=?`, hash)
+	rows, err := tx.Query(`SELECT "index",path,size,file_offset,offset_known,metadata_path FROM files WHERE hash=?`, hash)
 	if err != nil {
 		return err
 	}
 	for rows.Next() {
 		var index int
 		var storedPath string
+		var metadataPath string
 		var bytes, offset int64
 		var offsetKnown bool
-		if err := rows.Scan(&index, &storedPath, &bytes, &offset, &offsetKnown); err != nil {
+		if err := rows.Scan(&index, &storedPath, &bytes, &offset, &offsetKnown, &metadataPath); err != nil {
 			rows.Close()
 			return err
 		}
@@ -144,6 +145,10 @@ func saveCatalogTx(tx sqlWriter, hash string, c models.TorrentCatalog) error {
 			return ErrStateConflict
 		}
 		file := c.Files[index]
+		if metadataPath != "" && file.MetadataPath != "" && metadataPath != file.MetadataPath {
+			rows.Close()
+			return ErrStateConflict
+		}
 		// Legacy snapshots sometimes stored the root-prefixed metainfo path.
 		// Normalize only this exact representation, never probe filesystem paths.
 		legacyPath := !known && storedPath == path.Join(c.Name, file.Path)
@@ -160,14 +165,14 @@ func saveCatalogTx(tx sqlWriter, hash string, c models.TorrentCatalog) error {
 	if _, err := tx.Exec(`UPDATE torrents SET name=?,size=?,piece_length=?,num_pieces=?,metadata_known=1,metadata_format=?,catalog_version=? WHERE hash=?`, c.Name, c.Size, c.PieceLength, c.NumPieces, c.Format, catalogVersion(c), hash); err != nil {
 		return err
 	}
-	stmt, err := tx.Prepare(`INSERT INTO files(hash,"index",path,size,downloaded,priority,is_media,file_offset,offset_known)
-        VALUES(?,?,?,?,0,0,?,?,1) ON CONFLICT(hash,"index") DO UPDATE SET path=excluded.path,file_offset=excluded.file_offset,offset_known=1,is_media=excluded.is_media`)
+	stmt, err := tx.Prepare(`INSERT INTO files(hash,"index",path,size,downloaded,priority,is_media,file_offset,offset_known,metadata_path)
+        VALUES(?,?,?,?,0,0,?,?,1,?) ON CONFLICT(hash,"index") DO UPDATE SET path=excluded.path,file_offset=excluded.file_offset,offset_known=1,is_media=excluded.is_media,metadata_path=CASE WHEN excluded.metadata_path!='' THEN excluded.metadata_path ELSE files.metadata_path END`)
 	if err != nil {
 		return err
 	}
 	defer stmt.Close()
 	for _, file := range c.Files {
-		if _, err := stmt.Exec(hash, file.Index, file.Path, file.Size, file.IsMedia, file.Offset); err != nil {
+		if _, err := stmt.Exec(hash, file.Index, file.Path, file.Size, file.IsMedia, file.Offset, file.MetadataPath); err != nil {
 			return err
 		}
 	}

@@ -78,7 +78,7 @@ func TestRecoveryUpgradePreservesIntentsAndUnknownManifests(t *testing.T) {
 		if err := repo.SaveTorrent(&models.Torrent{Hash: state, State: models.StatePaused}); err != nil {
 			t.Fatal(err)
 		}
-		if err := repo.SaveStorageMapping(&StorageMapping{Hash: state, State: state, Manifest: `{"Root":"payload/legacy","Entries":[]}`}); err != nil {
+		if _, err := old.DB().Exec(`INSERT INTO torrent_storage(hash,state,manifest) VALUES(?,?,?)`, state, state, `{"Root":"payload/legacy","Entries":[]}`); err != nil {
 			t.Fatal(err)
 		}
 	}

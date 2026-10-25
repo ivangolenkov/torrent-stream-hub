@@ -16,6 +16,7 @@ const store = useTorrentStore();
 const mode = ref<AddMode>('magnet');
 const link = ref('');
 const poster = ref('');
+const folderName = ref('');
 const selectedFile = ref<File | null>(null);
 const fileInput = ref<HTMLInputElement | null>(null);
 const isDragging = ref(false);
@@ -37,6 +38,7 @@ const resetForm = () => {
   mode.value = 'magnet';
   link.value = '';
   poster.value = '';
+  folderName.value = '';
   selectedFile.value = null;
   error.value = '';
   isDragging.value = false;
@@ -76,9 +78,9 @@ const handleAdd = async () => {
 
   try {
     if (mode.value === 'file' && selectedFile.value) {
-      await apiClient.uploadTorrent(selectedFile.value, poster.value.trim());
+      await apiClient.uploadTorrent(selectedFile.value, poster.value.trim(), folderName.value.trim());
     } else {
-      await apiClient.addTorrent(link.value, '', false, poster.value.trim());
+      await apiClient.addTorrent(link.value, '', false, poster.value.trim(), folderName.value.trim());
     }
 
     await store.loadTorrents();
@@ -250,6 +252,9 @@ const onDrop = (e: DragEvent) => {
                   placeholder="https://example.com/poster.jpg"
                 >
               </div>
+
+              <label for="folder-name" class="mt-4 block text-sm font-medium text-gray-700">Folder name (optional)</label>
+              <input id="folder-name" v-model="folderName" type="text" maxlength="180" class="mt-2 block w-full rounded-md border border-gray-300 p-3 text-sm" placeholder="Use the name from torrent metadata">
 
               <p v-if="error" class="mt-3 rounded-md bg-red-50 px-3 py-2 text-sm text-red-700">
                 {{ error }}

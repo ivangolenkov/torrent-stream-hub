@@ -22,7 +22,7 @@ func renameBetweenNoReplace(dir, toDir *os.File, from, to string) error {
 	var status windows.IO_STATUS_BLOCK
 	err = windows.NtCreateFile(&h, windows.DELETE|windows.SYNCHRONIZE, &oa, &status, nil, 0,
 		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, windows.FILE_OPEN,
-		windows.FILE_NON_DIRECTORY_FILE|windows.FILE_SYNCHRONOUS_IO_NONALERT, 0, 0)
+		windows.FILE_SYNCHRONOUS_IO_NONALERT, 0, 0)
 	if err != nil {
 		return err
 	}

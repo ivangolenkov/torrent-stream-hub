@@ -104,12 +104,15 @@ func (t *Torrent) Drop() {
 		return
 	}
 	t.cl.lock()
-	defer t.cl.unlock()
 	if t.closed.IsSet() {
+		t.cl.unlock()
 		return
 	}
 	var wg sync.WaitGroup
 	t.close(&wg)
+	// The owner of a cancelled open/hash needs this lock to finish. Join
+	// outside it so unrelated torrents remain available too.
+	t.cl.unlock()
 	wg.Wait()
 }
 

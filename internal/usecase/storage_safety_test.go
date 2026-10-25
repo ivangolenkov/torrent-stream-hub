@@ -1,6 +1,7 @@
 package usecase
 
 import (
+	"context"
 	"crypto/sha1"
 	"errors"
 	"os"
@@ -266,6 +267,9 @@ func completedSafetyFile(t *testing.T, uc *TorrentUseCase, name string, multi bo
 	tor.Files = []*models.File{{Index: 0, Path: paths[0], Size: 1024, Downloaded: 1024}}
 	if err := uc.repo.SaveTorrent(tor); err != nil {
 		t.Fatal(err)
+	}
+	if ready, err := uc.inspectInventory(context.Background(), tor.Hash, false); err != nil || !ready {
+		t.Fatal("fixture inventory", ready, err)
 	}
 	raw, err := uc.engine.AddPausedMetainfo(&mi)
 	if err != nil {

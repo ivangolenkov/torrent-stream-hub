@@ -11,8 +11,9 @@ type PieceState struct {
 	// The piece is being hashed, or is queued for hash. Deprecated: Use those fields instead.
 	Checking bool
 
-	Hashing       bool
-	QueuedForHash bool
+	Hashing              bool
+	WaitingForHashBudget bool
+	QueuedForHash        bool
 	// The piece state is being marked in the storage.
 	Marking bool
 

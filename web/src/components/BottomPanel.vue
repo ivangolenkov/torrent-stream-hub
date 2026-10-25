@@ -8,6 +8,9 @@ import VideoPlayer from './VideoPlayer.vue';
 import PieceProgressBar from './PieceProgressBar.vue';
 import { fileProgress, progressLabel } from '../progress';
 import TemporaryTorrentControl from './TemporaryTorrentControl.vue';
+import StorageLocationPanel from './StorageLocationPanel.vue';
+import FileObservation from './FileObservation.vue';
+import type { File } from '../types';
 
 const store = useTorrentStore();
 const activeVideo = ref<{ hash: string, index: number, path: string } | null>(null);
@@ -52,7 +55,7 @@ const playVideo = (hash: string, index: number, path: string) => {
   activeVideo.value = { hash, index, path };
 };
 
-const canDownloadFile = (file: { size: number; downloaded: number }) => currentTorrent.value?.progress_source === 'verified' && file.size > 0 && file.downloaded >= file.size;
+const canDownloadFile = (file: File) => file.status?.direct_read_ready === true;
 
 const downloadFile = (hash: string, index: number) => {
   window.location.href = apiClient.fileDownloadUrl(hash, index);
@@ -205,6 +208,7 @@ watch([() => store.selectedHash, activeTab], ([newHash, newTab]) => {
         
         <!-- General Tab -->
         <div v-if="activeTab === 'general'" class="max-w-4xl h-full overflow-y-auto">
+          <StorageLocationPanel :torrent="currentTorrent" />
           <h4 class="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-3">Peer Diagnostics</h4>
           <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6 text-sm">
             <div class="rounded-lg border border-gray-200 bg-gray-50 p-3">
@@ -285,6 +289,7 @@ watch([() => store.selectedHash, activeTab], ([newHash, newTab]) => {
                 <tr v-for="file in currentFiles" :key="file.index" class="hover:bg-gray-50">
                   <td class="px-4 py-2 whitespace-nowrap truncate max-w-[200px]" :title="file.path">
                     {{ file.path.split('/').pop() }}
+                    <FileObservation :file="file" />
                   </td>
                   <td class="px-4 py-2 whitespace-nowrap text-right text-gray-500">
                     {{ formatSize(file.size) }}
@@ -387,6 +392,7 @@ watch([() => store.selectedHash, activeTab], ([newHash, newTab]) => {
                   <span class="font-mono font-medium text-gray-700">{{ fileProgress(file.downloaded, file.size).toFixed(1) }}%</span>
                 </div>
 
+                <FileObservation :file="file" />
                 <!-- Piece Progress Bar -->
                 <div class="w-full mt-1">
                   <PieceProgressBar 

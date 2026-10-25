@@ -55,5 +55,10 @@ jobs:
       - name: Storage vet
         working-directory: pkg/anacrolix-torrent
         run: go vet ./storage
+      - name: Native verification queue and opening lifecycle
+        working-directory: pkg/anacrolix-torrent
+        run: go test -race -count=1 . -run 'TestVerification|TestBlockedStorageOpen|TestHashBudget|TestTypeSizes|TestPendingStorage'
+      - name: Native names and volume markers
+        run: go test -race -count=1 ./internal/payload
       - name: Native recovery journals, ownership and deletion lifecycle
-        run: go test -race -count=1 ./internal/repository ./internal/usecase -run 'TestLegacyRecovery|TestDeletionCancel|TestOwnership|TestStorageOwnership|TestStorageRecovery|TestStorageMigration|TestStorageBlockedIO|TestRecovery'
+        run: go test -race -count=1 ./internal/repository ./internal/usecase -run 'TestLegacyRecovery|TestDeletionCancel|TestOwnership|TestStorage|TestRecovery|TestInventory|TestNamed|TestMagnet|TestFileProjection'

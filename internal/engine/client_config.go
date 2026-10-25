@@ -15,6 +15,7 @@ import (
 
 	"torrent-stream-hub/internal/config"
 	"torrent-stream-hub/internal/logging"
+	"torrent-stream-hub/internal/payload"
 
 	g "github.com/anacrolix/generics"
 	"github.com/anacrolix/torrent"
@@ -30,15 +31,31 @@ func (e *Engine) newTorrentClient() (*torrent.Client, storage.ClientImplCloser, 
 		pieceCompletion.Close()
 		return nil, nil, err
 	}
+	var onRead func(string, int64)
+	var onEvent func(string, string)
+	if e.storageIOObserver != nil {
+		onRead = func(path string, n int64) { e.storageIOObserver("read", path, n) }
+		onEvent = func(operation, path string) { e.storageIOObserver(operation, path, 0) }
+	}
 	torrentStorage := storage.NewFileOpts(storage.NewFileClientOpts{
+		IORead: onRead, IOEvent: onEvent,
 		ClientBaseDir: e.cfg.DownloadDir, RootFS: root, VerifyOnOpen: true, PieceCompletion: pieceCompletion, IOContext: e.ctx,
 		UsePartFiles: g.Some(false), ImportPartFiles: true,
-		TorrentRootResolver: func(base string, _ *metainfo.Info, hash metainfo.Hash) (string, error) {
-			rel, err := e.StorageRoot(hash.HexString())
+		IOGuard: e.checkStorageIO,
+		TorrentPathResolver: func(base string, info *metainfo.Info, hash metainfo.Hash) (string, []string, error) {
+			layout, err := e.StorageLayout(hash.HexString(), info)
 			if err != nil {
-				return "", err
+				return "", nil, err
 			}
-			return filepath.Join(base, rel), nil
+			var paths []string
+			for _, file := range info.UpvertedFiles() {
+				path, err := layout.Relative(payload.Path(info, &file))
+				if err != nil {
+					return "", nil, err
+				}
+				paths = append(paths, path)
+			}
+			return filepath.Join(base, layout.Root), paths, nil
 		},
 	})
 	e.mu.Lock()
@@ -49,6 +66,7 @@ func (e *Engine) newTorrentClient() (*torrent.Client, storage.ClientImplCloser, 
 	clientConfig := buildClientConfig(e.cfg)
 	clientConfig.DefaultStorage = torrentStorage
 	clientConfig.MaxActivePieceHashers = 2
+	clientConfig.HashBudget = sharedVerificationBudget
 	clientConfig.PieceHashersPerTorrent = 1
 	clientConfig.Callbacks.StatusUpdated = append(clientConfig.Callbacks.StatusUpdated, func(event torrent.StatusUpdatedEvent) {
 		owner, _ := e.statusTorrents.Load(strings.ToLower(event.InfoHash))

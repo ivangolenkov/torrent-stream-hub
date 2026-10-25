@@ -4,13 +4,13 @@ import (
 	"errors"
 	"fmt"
 	"github.com/anacrolix/torrent/metainfo"
+	"github.com/anacrolix/torrent/storage"
 	"os"
 	"path/filepath"
 	"syscall"
 
 	"torrent-stream-hub/internal/logging"
 	"torrent-stream-hub/internal/models"
-	"torrent-stream-hub/internal/payload"
 )
 
 var ErrDownloadBlocked = errors.New("payload download is blocked")
@@ -33,6 +33,9 @@ func (e *Engine) diskError(hash string) error {
 
 func (e *Engine) diskErrorWithProbe(hash string, probe func(string) (uint64, error), minimum uint64) error {
 	root, err := e.StorageRoot(hash)
+	if errors.Is(err, storage.ErrStoragePending) {
+		return e.checkDiskPathWithProbe(e.cfg.DownloadDir, make(map[string]bool), probe, minimum)
+	}
 	if err != nil {
 		return err
 	}
@@ -44,7 +47,11 @@ func (e *Engine) diskErrorWithProbe(hash string, probe func(string) (uint64, err
 	if mt != nil && mt.t != nil {
 		if info := mt.t.Info(); info != nil {
 			for _, file := range info.UpvertedFiles() {
-				paths = append(paths, filepath.Dir(filepath.Join(path, payload.Path(info, &file))))
+				rel, err := e.PayloadPath(hash, info, &file)
+				if err != nil {
+					return err
+				}
+				paths = append(paths, filepath.Dir(filepath.Join(e.cfg.DownloadDir, rel)))
 			}
 		}
 	}

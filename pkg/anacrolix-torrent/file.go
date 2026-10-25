@@ -269,7 +269,10 @@ func (f *File) CachedReadyForDirectRead() bool {
 
 	f.t.cl.rLock()
 	defer f.t.cl.rUnlock()
+	return f.cachedReadyForDirectReadLocked()
+}
 
+func (f *File) cachedReadyForDirectReadLocked() bool {
 	if f.t.closed.IsSet() {
 		return false
 	}

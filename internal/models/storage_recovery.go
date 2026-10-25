@@ -35,6 +35,8 @@ const (
 	StorageAttachmentFailed  StorageRecoveryReason = "attachment_failed"
 	StorageInsufficientSpace StorageRecoveryReason = "disk_full"
 	StorageRecoveryComplete  StorageRecoveryReason = "recovery_complete"
+	StorageMove              StorageRecoveryReason = "storage_move"
+	StorageLocate            StorageRecoveryReason = "storage_locate"
 )
 
 type StorageRecoveryAction string

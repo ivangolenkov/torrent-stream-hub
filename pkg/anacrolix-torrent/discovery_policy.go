@@ -10,7 +10,7 @@ func (t *Torrent) PublicDiscoveryAllowed() bool {
 }
 
 func (t *Torrent) publicDiscoveryAllowedLocked() bool {
-	return !t.privateSafe && (t.info == nil || t.info.Private == nil || !*t.info.Private)
+	return !t.privateSafe && !t.metadataPrivate && (t.info == nil || t.info.Private == nil || !*t.info.Private)
 }
 
 func publicPeerSource(source PeerSource) bool {

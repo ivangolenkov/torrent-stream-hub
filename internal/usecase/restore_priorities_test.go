@@ -177,9 +177,7 @@ func TestDBOnlyMetadataPendingResumeAndSyncPreserveIntent(t *testing.T) {
 	if len(saved.Files) != 2 || saved.Files[0].Priority != models.PriorityHigh || saved.Files[1].Priority != models.PriorityNone {
 		t.Fatal("pending snapshot erased settings")
 	}
-	if err := raw.SetInfoBytes(mi.InfoBytes); err != nil {
-		t.Fatal(err)
-	}
+	supplyNamedMetadata(t, raw, mi)
 	// A second Resume serializes with the metadata callback and must be idempotent.
 	if err := uc.Resume(hash); err != nil {
 		t.Fatal(err)

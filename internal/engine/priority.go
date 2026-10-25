@@ -59,6 +59,13 @@ func (e *Engine) applyFilePrioritiesAndDownload(mt *ManagedTorrent) (result erro
 		}
 	}
 
+	var verificationSelection []int
+	for i := range mt.t.Files() {
+		if mt.filePriorities[i] != models.PriorityNone {
+			verificationSelection = append(verificationSelection, i)
+		}
+	}
+	mt.t.SetVerificationSelection(verificationSelection)
 	for i, f := range mt.t.Files() {
 		prio := mt.filePriorities[i]
 		// Queued torrents may serve a reader/stream overlay without turning

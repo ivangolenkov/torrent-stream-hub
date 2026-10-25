@@ -68,7 +68,7 @@ func (uc *TorrentUseCase) initializeStorageLocked(contexts ...context.Context) e
 	return nil
 }
 
-func (uc *TorrentUseCase) checkStorageAvailable(hash string) error {
+func (uc *TorrentUseCase) checkStorageWorkflow(hash string) error {
 	if recovery, err := uc.repo.Recovery(hash); err != nil {
 		return err
 	} else if recoveryBlocks(recovery) {
@@ -78,85 +78,27 @@ func (uc *TorrentUseCase) checkStorageAvailable(hash string) error {
 	if err != nil {
 		return err
 	}
-	if m == nil || m.Version != payload.LayoutVersion || m.State != "ready" || m.Manifest != "" {
+	if !m.Ready() && (m == nil || m.State != "reserved" || m.Version != payload.NamedLayoutVersion || m.Root != "") {
 		return ErrStorageConflict
 	}
 	return nil
 }
 
-func (uc *TorrentUseCase) reserveStorageLocked(hash, alias string) error {
+func (uc *TorrentUseCase) checkStorageAvailable(hash string) error {
+	if err := uc.checkStorageWorkflow(hash); err != nil {
+		return err
+	}
 	m, err := uc.repo.StorageMapping(hash)
 	if err != nil {
 		return err
 	}
-	if m == nil && alias != "" {
-		m, err = uc.repo.StorageMapping(alias)
-		if err != nil {
+	if m.Ready() {
+		if err := uc.inventoryAdmitted(m); err != nil {
 			return err
 		}
-		if m != nil && m.State == "ready" {
-			copy := *m
-			copy.Hash = hash
-			if err := uc.publishStorage(&copy, true, false); err != nil {
-				return err
-			}
-			m = &copy
-		}
+		return uc.checkVolume(m.Root)
 	}
-	if m == nil {
-		root, err := os.OpenRoot(uc.engine.DownloadDir())
-		if err != nil {
-			return err
-		}
-		defer root.Close()
-		rel := payload.Root(hash)
-		if _, err := root.Lstat(rel); !errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("%w: isolated target already occupied", ErrStorageConflict)
-		}
-		ownershipRelease, err := uc.reserveOwnership(uc.engine.Context(), root, hash, []string{rel})
-		if err != nil {
-			return err
-		}
-		defer ownershipRelease()
-		m = &repository.StorageMapping{Hash: hash, Version: payload.LayoutVersion, Root: rel, State: "ready"}
-		if err := uc.publishStorage(m, false, true); err != nil {
-			return err
-		}
-		actual, err := uc.repo.StorageMapping(hash)
-		if err != nil {
-			return err
-		}
-		if actual == nil || actual.Root != m.Root || actual.State != "ready" || actual.Manifest != "" {
-			return ErrStorageConflict
-		}
-		m = actual
-	}
-	if m.State != "ready" || m.Version != payload.LayoutVersion || m.Manifest != "" {
-		return ErrStorageConflict
-	}
-	uc.ownershipMu.Lock()
-	claimErr := uc.claimsConflictLocked(hash, []string{m.Root})
-	uc.ownershipMu.Unlock()
-	if claimErr != nil {
-		return claimErr
-	}
-	if alias != "" && alias != hash {
-		a, err := uc.repo.StorageMapping(alias)
-		if err != nil {
-			return err
-		}
-		if a != nil && (a.Root != m.Root || a.State != "ready") {
-			return ErrStorageConflict
-		}
-		if a == nil {
-			copy := *m
-			copy.Hash = alias
-			if err := uc.publishStorage(&copy, true, false); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
+	return uc.checkVolume(".")
 }
 
 func (uc *TorrentUseCase) runStorageMigrations(ctx context.Context) {
@@ -211,8 +153,15 @@ func (uc *TorrentUseCase) migrateStorage(ctx context.Context, t *models.Torrent)
 	if hintErr != nil {
 		return hintErr
 	}
-	if hint == nil || (hint.State == "ready" && hint.Manifest == "") {
+	if hint == nil || hint.State == "reserved" || (hint.State == "ready" && hint.Manifest == "") {
 		return nil
+	}
+	if ctx.Value(storageMutationHeld{}) != true {
+		mutation, err := uc.coordinator.tryAcquire("storage/mutation")
+		if err != nil {
+			return err
+		}
+		defer mutation.release()
 	}
 	sequential, err := uc.coordinator.tryAcquire("storage/migration")
 	if err != nil {
@@ -394,6 +343,12 @@ func (uc *TorrentUseCase) migrateStorage(ctx context.Context, t *models.Torrent)
 	// maximum possible re-read volume as a known total.
 	uc.storageStage(t.Hash, "cleanup", nil, int64ptr(int64(len(journal.Entries))))
 	for index, entry := range journal.Entries {
+		if err := uc.guardPayloadIO(entry.Source); err != nil {
+			return err
+		}
+		if err := uc.guardPayloadIO(entry.Target); err != nil {
+			return err
+		}
 		uc.storageFile(t.Hash, entry.Source, nil)
 		if err := ctx.Err(); err != nil {
 			return err
@@ -414,6 +369,9 @@ func (uc *TorrentUseCase) migrateStorage(ctx context.Context, t *models.Torrent)
 		}
 		if digest != entry.Digest {
 			return fmt.Errorf("legacy source changed after migration; retained")
+		}
+		if err := uc.guardPayloadIO(entry.Source); err != nil {
+			return err
 		}
 		if err := root.Remove(entry.Source); err != nil {
 			return err
@@ -460,6 +418,10 @@ func (uc *TorrentUseCase) migrateStorage(ctx context.Context, t *models.Torrent)
 		return nil
 	}
 	err = uc.restoreMappedTorrentLocked(current)
+	if errors.Is(err, ErrInventoryPending) {
+		uc.wakeInventory()
+		return nil
+	}
 	if err == nil {
 		logging.Infof("storage migration finished hash=%s files=%d duration=%s", t.Hash, len(journal.Entries), time.Since(started))
 	}
@@ -527,6 +489,12 @@ func (uc *TorrentUseCase) copyMigrationEntries(ctx context.Context, root *os.Roo
 			}
 			entry := &batch[i]
 			uc.storageFile(m.Hash, entry.Source, nil)
+			if err := uc.guardPayloadIO(entry.Source); err != nil {
+				return err
+			}
+			if err := uc.guardPayloadIO(entry.Target); err != nil {
+				return err
+			}
 			if err := root.MkdirAll(filepath.Dir(entry.Target), 0700); err != nil {
 				return err
 			}
@@ -560,6 +528,12 @@ func (uc *TorrentUseCase) copyMigrationEntries(ctx context.Context, root *os.Roo
 }
 
 func (uc *TorrentUseCase) restoreMappedTorrentLocked(t *models.Torrent) error {
+	if ready, err := uc.inspectInventory(uc.engine.Context(), t.Hash, false); (err != nil || !ready) && !uc.canFetchOnlyMetadata(t) {
+		if err != nil {
+			return err
+		}
+		return ErrInventoryPending
+	}
 	if uc.engine.GetTorrent(t.Hash) != nil {
 		return nil
 	}

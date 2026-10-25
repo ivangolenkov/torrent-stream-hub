@@ -365,7 +365,7 @@ func (h *TorrServerHandler) UploadTorrent(w http.ResponseWriter, r *http.Request
 	}
 	defer cleanup()
 	filename := "upload"
-	t, err := h.uc.AddTorrentFile(file)
+	t, err := h.uc.AddTorrentFileWithPolicy(file, usecase.TorrentMetadata{FolderName: fields["folder_name"]}, false)
 	if err != nil {
 		logging.Warnf("torrent upload failed filename=%q: %v", filename, err)
 		response.Error(w, http.StatusInternalServerError, err.Error())

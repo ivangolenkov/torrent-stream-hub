@@ -12,7 +12,7 @@ func TestStorageMigrationUpgradeAndAliasPersistence(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Reconstruct the schema immediately before migration 0005.
-	if _, err := db.DB().Exec(`DROP TABLE torrent_storage; DELETE FROM migrations WHERE name='0005_storage_layout.sql'; INSERT INTO torrents(hash,name,size,state) VALUES ('old','legacy',4,'Paused')`); err != nil {
+	if _, err := db.DB().Exec(`DROP TABLE torrent_storage; DELETE FROM migrations WHERE name IN ('0005_storage_layout.sql','0015_named_storage.sql'); INSERT INTO torrents(hash,name,size,state) VALUES ('old','legacy',4,'Paused')`); err != nil {
 		db.Close()
 		t.Fatal(err)
 	}

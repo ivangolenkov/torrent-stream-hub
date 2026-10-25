@@ -7,7 +7,6 @@ import (
 	"io"
 	"io/fs"
 	"os"
-	"path/filepath"
 	"sync"
 	"sync/atomic"
 
@@ -265,11 +264,10 @@ func (e *Engine) OpenStreamSource(ctx context.Context, hash string, index int, i
 	// 3. Compute relative path from layout
 	info := mt.t.Info()
 	fi := file.FileInfo()
-	storageRoot, err := e.StorageRoot(hash)
+	relPath, err := e.PayloadPath(hash, info, &fi)
 	if err != nil {
 		return nil, err
 	}
-	relPath := filepath.Join(storageRoot, payload.Path(info, &fi))
 	if !isSafeRelativePath(relPath) {
 		return makeTorrentFallback(FallbackReasonPathOutsideRoot)
 	}
@@ -428,11 +426,10 @@ func (e *Engine) CheckFileDirectReady(hash string, index int) (bool, int64, erro
 
 	info := mt.t.Info()
 	fi := file.FileInfo()
-	storageRoot, err := e.StorageRoot(hash)
+	relPath, err := e.PayloadPath(hash, info, &fi)
 	if err != nil {
 		return false, fileLength, err
 	}
-	relPath := filepath.Join(storageRoot, payload.Path(info, &fi))
 	if !isSafeRelativePath(relPath) {
 		return false, fileLength, nil
 	}

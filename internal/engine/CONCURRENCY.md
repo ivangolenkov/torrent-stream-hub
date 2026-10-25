@@ -1,5 +1,39 @@
 # Engine concurrency contract
 
+## Phase 42 verification and storage open
+
+Main (two slots, one per torrent) and offline (one slot) clients share one
+`HashBudget(2, 1, 64, 8)`: two active hash read/compute tasks, one per live
+filesystem, 64 pending leases, a FIFO turn after eight priority grants. Existing
+slots bound waiters; no worker is spawned per queued piece. Resource keys come
+from rooted directory descriptors (`st_dev` / Windows volume serial), outside
+Client.lock. A boundary piece acquires all contributing keys atomically. Release
+follows the storage read lock, before reacquiring Client.lock; completion flush/SQL
+is outside that physical hash lease and retains normal slot limits.
+
+Every piece returns to the scheduler. Reader ranges, readahead and durable selection
+precede background work; oldest torrent plus cyclic background cursor prevent
+starvation. Candidate selection takes one pass with constant scratch space; bitmaps
+coalesce duplicate ranges. Selection does not enable networking. `hashWaiting` is
+atomic: Client.lock acquisition under storageLock would deadlock with v2 updates.
+Layer updates wait for storage outside Client.lock, then revalidate closed/unchanged
+state under the original Client -> storage order. Pending layer writers suppress
+new hash admission for that torrent until the batch completes, so a long backlog
+cannot repeatedly take their storage lock turn. Other torrents remain schedulable.
+
+OpenTorrent (imports, volume checks, empty files) runs outside Client.lock. Its
+opening generation is published first; Close/Drop revoke and join it. The owner
+closes a late result instead of attaching it. Drop joins outside Client.lock.
+Client.Close also joins storage tasks removed from its map by concurrent Drop
+before closing the default backend. Uncancellable syscalls retain ownership.
+
+FileObservations and REST/SSE use cached facts, without stat/hash. Inventory uses
+one worker, 64 records per round, 128 files per visit, mapping/session fences.
+Real reads recheck freshness/volume admission. One location worker shares a mutation
+ticket with legacy recovery, with a durable queue of 64 and bounded manifests/buffers.
+Enrollment can take this ticket for an interrupted journal without advancing it.
+See `tasks/phase42-storage-contract.md` and the measurement report.
+
 ## Phase 41 storage worker contract
 
 The normal migration worker remains sequential. Ownership retries wake that worker,

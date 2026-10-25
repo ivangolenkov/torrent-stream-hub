@@ -20,9 +20,9 @@ export const useTorrentStore = defineStore('torrents', () => {
   let listRequest = 0;
   const detailVersions = new Map<string, string>();
   const detailRequests = new Map<string, string>();
-  const detailsIdentity = (t?: Torrent) => t ? `${t.control?.record_id || ''}/${t.catalog_version || ''}/${t.control?.desired_revision || ''}` : '';
+  const detailsIdentity = (t?: Torrent) => t ? `${t.control?.record_id || ''}/${t.catalog_version || ''}/${t.control?.desired_revision || ''}/${t.storage?.revision || ''}/${t.control?.runtime_attachment || ''}` : '';
   const priorityGeneration = new Map<string, number>();
-  const detailsKey = (t?: Torrent) => t ? `${priorityGeneration.get(t.hash) || 0}/${snapshotOrder.epoch || ''}/${detailsIdentity(t)}/${t.metadata_known}/${t.downloaded}/${t.progress_source}/${t.recheck?.status || ''}` : '';
+  const detailsKey = (t?: Torrent) => t ? `${priorityGeneration.get(t.hash) || 0}/${snapshotOrder.epoch || ''}/${detailsIdentity(t)}/${t.metadata_known}/${t.downloaded}/${t.progress_source}/${t.recheck?.status || ''}/${t.verification?.status || ''}/${t.verification?.checked_bytes ?? ''}/${t.storage?.inventory || ''}/${t.storage?.inventory_observed_at_ms || ''}/${t.storage?.operation?.stage || ''}` : '';
 
   const confirmedPriorities = new Map<string, { values: Map<number, number>; recordID?: string; commandAt: number; snapshotVersion?: string }>();
   const commandBarriers = new Map<string, number>();

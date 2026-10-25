@@ -27,6 +27,7 @@ const (
 )
 
 type stateEvent struct {
+	selectionEmpty                                   bool
 	kind                                             stateEventKind
 	verification                                     verificationEvent
 	metadataKnown, selectedComplete, payloadComplete bool

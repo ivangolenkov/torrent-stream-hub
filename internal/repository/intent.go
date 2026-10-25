@@ -195,6 +195,17 @@ func (r *TorrentRepo) SaveRuntimeObservation(o models.RuntimeObservation, contex
 				return err
 			}
 		}
+		if verified && f.VerifiedBytes > 0 {
+			// Current attachment proof creates an expectation, never a resume
+			// capability. Unchanged expectations do not generate telemetry writes.
+			_, err := tx.Exec(`INSERT INTO file_inventory(hash,record_id,file_index,mapping_revision,metadata_path,size,expected,presence,reason,observed_at_ms)
+ SELECT f.hash,?,f."index",s.revision,f.path,f.size,1,'present','',? FROM files f JOIN torrent_storage s ON s.hash=f.hash WHERE f.hash=? AND f."index"=? AND s.state='ready'
+ ON CONFLICT(hash,file_index) DO UPDATE SET record_id=excluded.record_id,mapping_revision=excluded.mapping_revision,metadata_path=excluded.metadata_path,size=excluded.size,expected=1,presence='present',reason='',observed_at_ms=excluded.observed_at_ms
+ WHERE file_inventory.expected=0 OR file_inventory.record_id!=excluded.record_id OR file_inventory.mapping_revision!=excluded.mapping_revision OR file_inventory.metadata_path!=excluded.metadata_path OR file_inventory.size!=excluded.size`, o.Fence.RecordID, o.ObservedAt/1000000, o.Fence.Hash, f.Index)
+			if err != nil {
+				return err
+			}
+		}
 	}
 
 	return tx.Commit()

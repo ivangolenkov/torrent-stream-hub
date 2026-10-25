@@ -21,17 +21,27 @@ type fileClientImpl struct {
 	opts NewFileClientOpts
 }
 
+// ErrStoragePending retains validated metadata while an application prepares
+// its durable location outside the client lock. SetInfoBytes retries the open.
+var ErrStoragePending = errors.New("storage preparation pending")
+
 // All Torrent data stored in this baseDir. The info names of each torrent are used as directories.
 func NewFile(baseDir string) ClientImplCloser {
 	return NewFileWithCompletion(baseDir, pieceCompletionForDir(baseDir))
 }
 
 type NewFileClientOpts struct {
+	// IOEvent observes payload storage syscall attempts. It must be fast and
+	// must not reenter this storage. Nil has no instrumentation overhead.
+	IOEvent func(operation, path string)
 	// The base directory for all downloads.
 	ClientBaseDir       string
 	FilePathMaker       FilePathMaker
 	TorrentDirMaker     TorrentDirFilePathMaker
 	TorrentRootResolver func(base string, info *metainfo.Info, hash metainfo.Hash) (string, error)
+	// TorrentPathResolver returns one coherent root and physical relative path
+	// per metadata file. It overrides both root and file makers for this open.
+	TorrentPathResolver func(base string, info *metainfo.Info, hash metainfo.Hash) (string, []string, error)
 	// If part files are enabled, this will default to inferring completion from file names at
 	// startup, and keep the rest in memory.
 	PieceCompletion PieceCompletion
@@ -54,6 +64,9 @@ type NewFileClientOpts struct {
 	// IORead is an observational callback invoked after actual reads, outside
 	// the torrent client lock. It must not perform filesystem/SQL I/O.
 	IORead func(path string, n int64)
+	// IOGuard checks the enrolled volume before rooted access/mutation. Paths
+	// are relative to RootFS. It never grants piece completion.
+	IOGuard func(string) error
 }
 
 // The specific part-files option or the default.
@@ -112,16 +125,33 @@ func (fs *fileClientImpl) OpenTorrent(
 			return
 		}
 	}
+	var resolvedPaths []string
+	if fs.opts.TorrentPathResolver != nil {
+		dir, resolvedPaths, err = fs.opts.TorrentPathResolver(fs.opts.ClientBaseDir, info, infoHash)
+		if err != nil {
+			return
+		}
+		if len(resolvedPaths) != len(info.UpvertedFiles()) {
+			return TorrentImpl{}, fmt.Errorf("storage layout file count mismatch")
+		}
+	}
 	logger := log.ContextLogger(ctx).Slogger()
 	logger.DebugContext(ctx, "opened file torrent storage", slog.String("dir", dir))
 	metainfoFileInfos := info.UpvertedFiles()
 	files := make([]fileExtra, len(metainfoFileInfos))
 	var normalized []string
 	for i, fileInfo := range metainfoFileInfos {
-		filePath := filepath.Join(dir, fs.opts.FilePathMaker(FilePathMakerOpts{
+		relative := fs.opts.FilePathMaker(FilePathMakerOpts{
 			Info: info,
 			File: &fileInfo,
-		}))
+		})
+		if resolvedPaths != nil {
+			relative = resolvedPaths[i]
+		}
+		if !filepath.IsLocal(relative) || relative == "." {
+			return TorrentImpl{}, fmt.Errorf("unsafe mapped file path")
+		}
+		filePath := filepath.Join(dir, relative)
 		if !isSubFilepath(dir, filePath) {
 			err = fmt.Errorf("file %v: path %q is not sub path of %q", i, filePath, dir)
 			return
@@ -155,6 +185,21 @@ func (fs *fileClientImpl) OpenTorrent(
 		}
 	}
 	if fs.opts.ImportPartFiles {
+		if fs.opts.IOGuard != nil {
+			base := fs.opts.ClientBaseDir
+			if fs.opts.RootFS != nil {
+				base = fs.opts.RootFS.Name()
+			}
+			for i := range files {
+				rel, e := filepath.Rel(base, files[i].safeOsPath)
+				if e != nil {
+					return TorrentImpl{}, e
+				}
+				if e = fs.opts.IOGuard(rel); e != nil {
+					return TorrentImpl{}, e
+				}
+			}
+		}
 		if err := fs.importPartFiles(ctx, files); err != nil {
 			var conflict *LegacyPartConflictError
 			if errors.As(err, &conflict) {
@@ -172,7 +217,7 @@ func (fs *fileClientImpl) OpenTorrent(
 		if metainfoFileInfos[i].Length == 0 && !fs.opts.ReadOnly {
 			if fs.opts.RootFS != nil {
 				var f fileWriter
-				f, err = (rootFileIo{root: fs.opts.RootFS, ctx: fs.opts.IOContext}).openForWrite(filePath, 0)
+				f, err = (rootFileIo{root: fs.opts.RootFS, ctx: fs.opts.IOContext, guard: fs.opts.IOGuard}).openForWrite(filePath, 0)
 				if err == nil {
 					err = f.Close()
 				}
@@ -195,7 +240,7 @@ func (fs *fileClientImpl) OpenTorrent(
 		client:            fs,
 	}
 	if fs.opts.RootFS != nil {
-		t.io = rootFileIo{root: fs.opts.RootFS, ctx: fs.opts.IOContext, readOnly: fs.opts.ReadOnly, onRead: fs.opts.IORead}
+		t.io = rootFileIo{root: fs.opts.RootFS, ctx: fs.opts.IOContext, readOnly: fs.opts.ReadOnly, onRead: fs.opts.IORead, guard: fs.opts.IOGuard, onEvent: fs.opts.IOEvent}
 	}
 	if fs.opts.VerifyOnOpen {
 		t.fresh = make(map[int][]os.FileInfo)

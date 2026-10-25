@@ -16,11 +16,58 @@ The service is designed for home LAN usage, including low-power devices such as 
 
 ## Storage Layout, Upgrade And Recovery
 
-Payload is stored under `HUB_DOWNLOAD_DIR/payload/<stable-infohash>/`, followed
-by the original metainfo paths. SQLite stores the versioned mapping; hybrid
-v1/v2 aliases share one stable identity and directory. Do not move payload
+New torrents use `HUB_DOWNLOAD_DIR/payload/<readable folder>/`. SQLite stores
+the actual root, layout version, metadata prefix, mapping revision and storage
+owner; hybrid v1/v2 aliases share that owner and directory. Multi-file torrents
+do not repeat their outer metadata folder. Existing `payload/<stable-infohash>`
+directories remain valid and are not renamed by a database upgrade. Do not move payload
 directories or edit mappings while the service is running. Keep the database,
 metainfo and other service files outside the payload namespace.
+
+The Add dialog accepts an optional folder name; otherwise validated metainfo
+supplies it. Names use Unicode NFC, sanitized unsafe characters/Windows reserved
+names and a 180 UTF-8 byte limit. Case-insensitive collisions in SQLite or on disk
+receive `(2)`, `(3)`, etc.; the chosen path persists across restarts. Changing the
+display title does not rename files. Magnets have no writable payload root until
+metadata and reservation are ready; their display name is only a hint.
+
+The storage panel previews an explicit move/conversion, including source, target,
+rename/copy method and required/free space. Apply rechecks those facts, drains
+transfers and journals publication before changing the mapping. Cross-filesystem
+moves use a verified copy; same-filesystem directory moves use native no-replace
+rename when the internal layout is unchanged. Cancellation is accepted only
+before publication. Interrupted moves retain claims and resume from their journal.
+
+To connect existing data, analyze a root-relative directory, review matching pieces,
+then apply. Analysis is read-only; Apply checks it again, protects the former data
+and leaves the torrent paused. Neither fingerprints nor offline verification allow
+a new runtime to skip hash checks. Ordinary torrent deletion retains old sources
+and backups protected by recovery ownership.
+
+`POST /api/v1/torrent/{hash}/storage` accepts `plan_move`, `apply_move`,
+`analyze_location`, `apply_location`, `retry_storage`, `cancel_storage` and
+`reconcile_storage`. Send `record_id`, `storage_id`, string `mapping_revision`,
+and string operation `version` for apply/retry/cancel. Plans accept `folder_name`;
+analysis accepts `path` and optional `strip_prefix`. Accepted commands return 202;
+stale/conflicting identities return 409, queue saturation 429 with `Retry-After`,
+and shutdown 503. See the [contract](tasks/phase42-storage-contract.md).
+
+Existing installations require an explicit storage check in the panel to enroll
+the volume; empty installations enroll automatically. Include `.tsh-volume` in
+the coordinated backup with SQLite. A missing/different registered marker blocks
+writes/cleanup and is never recreated automatically. Restore the expected mount
+and matching marker from backup, then check storage again. Enrollment remains
+possible for interrupted deletion/recovery without clearing its journal or block;
+retry/cancel stays a separate action. Reconcile leaves the record paused. Check
+remaining blocked records after enrollment, or restart for a fresh inventory.
+
+Inventory distinguishes an expected file that disappeared from one never created;
+unknown legacy evidence stays unknown. Explicit Resume authorizes missing-file
+repair only after volume validation. Tokens and live device/volume identities
+detect ordinary mount loss/replacement but cannot prove a disk was not cloned with
+its marker. A partial marker after interrupted initial enrollment fails closed:
+while stopped, restore the coordinated backup or inspect that enrollment. Do not
+replace an enrolled token with a newly generated one.
 
 Payload files use their original names and extensions from the first downloaded
 byte (for example, `movie.mkv`); the application no longer appends `.part` or
@@ -42,7 +89,8 @@ Before upgrading an installation using the old shared layout:
    plus the configured `HUB_MIN_FREE_SPACE_GB` reserve. Migration copies files
    sequentially, preserving original files until the mapping commit. It does not
    use an in-place rename optimization.
-3. Start the new binary. A background worker inventories ownership, journals the
+3. Start the new binary and explicitly check/enroll the original storage volume.
+   A background worker inventories ownership, journals the
    copy, checks its digest and performs an offline torrent hash pass. Existing
    partial or corrupt pieces remain incomplete and must be downloaded again;
    verification does not turn them into trusted data. Migration does not change
@@ -194,6 +242,23 @@ it is diagnostic wall-clock time, not a readiness token.
 Cached piece length/count and file offsets carry `metadata_known`/`offset_known`.
 The UI labels last-known progress and does not invent a piece map for unknown
 offsets. Empty files do not produce NaN percentages.
+
+`selection` separately reports selected size, current verified bytes, optional
+percentage and complete status: one ready file of two equal files can be selected
+100% while whole progress is 50%. Empty selection has no percentage and does not
+imply seeding. File `status` separates presence/freshness, verification, current
+verified bytes, last-known bytes/time/source, effective priority and direct-read
+readiness. `metadata_path` and `status.storage_path` show logical/physical paths.
+A ready skipped file may still be read locally. Compact SSE omits the full catalog;
+details are fenced by record/catalog/intent/mapping/attachment.
+
+Verification reports checked bytes (including unsuccessful hashes), queued and
+active pieces. Reader ranges precede readahead, selected files and background work;
+every eight priority grants allow an oldest background turn. Main/offline clients
+share two active hash read/compute tasks, one per live filesystem, and 64 pending
+leases within existing client/torrent slot limits. Completion flushes may overlap
+the next hash. Seek never interrupts a running filesystem syscall. Persistent
+completion remains a hint: trusted fast resume is not enabled.
 
 `POST /api/v1/torrent/{hash}/action` with `{"action":"recheck"}` returns **202**
 with an engine-session operation ID and status; list/SSE snapshots include
@@ -540,6 +605,9 @@ Repeated identical migration failures retain a count and are log-rate-limited.
    `.tsh-recovery` if present. Do not mount the production payload writable in tests.
 3. Start the new version against the copy. Migration 0014 imports pending deletion
    without clearing its mode/manifest, and labels its prior unlink progress unknown.
+   Migrations 0015–0019 add named mappings/claims, volumes/inventory and file
+   projection, preserving old roots and journals. Enroll the rehearsal volume
+   explicitly when required; preserve its token if already registered.
 4. Inspect REST/SSE: layout, runtime, metadata-known, pending actions and queue.
    Rehearse retry/cancel and candidate analysis/apply; interrupt/restart if needed.
 5. Compare candidate/backup bytes, metainfo and records with the saved baseline.
@@ -547,7 +615,7 @@ Repeated identical migration failures retain a count and are log-rate-limited.
    deployment; this procedure does not authorize modifying the live instance.
 
 **Downgrade:** do not run an older binary on this updated working set. Older
-versions do not understand cancellation/fencing or the recovery journal. Restore
+versions do not understand new layouts, cancellation/fencing or recovery journals. Restore
 the coordinated pre-upgrade payload/metainfo/SQLite backup instead. Do not merely
 delete migration records or downgrade SQLite while keeping mutated filenames.
 

@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 	"torrent-stream-hub/internal/engine"
 	"torrent-stream-hub/internal/models"
 	"torrent-stream-hub/internal/payload"
@@ -48,6 +49,9 @@ type legacyRecoveryJournal struct {
 func recoveryBlocks(v *repository.RecoveryRecord) bool {
 	if v == nil {
 		return false
+	}
+	if v.Reason == models.StorageMove || v.Reason == models.StorageLocate {
+		return v.Stage != "planning" && v.Stage != "planned" && v.Stage != "analyzing_location" && v.Stage != "analyzed" && v.Stage != "completed" && v.Stage != "cancelled"
 	}
 	if v.Reason == models.StorageDeletionCancelled || v.Stage == "cancel_requested" {
 		return true
@@ -150,7 +154,7 @@ func (uc *TorrentUseCase) recoveryLayout(hash string) (*models.Torrent, *reposit
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	if m == nil || m.Version != payload.LayoutVersion || m.State != "ready" || m.Manifest != "" {
+	if !m.Ready() {
 		return nil, nil, nil, ErrStorageConflict
 	}
 	mi, err := metainfo.LoadFromFile(filepath.Join(uc.engine.ConfigDir(), "metainfo", hash+".torrent"))
@@ -229,8 +233,15 @@ func (uc *TorrentUseCase) StartRecovery(ctx context.Context, hash, id string, ve
 	if err != nil {
 		return ErrStorageConflict
 	}
+	mutation, err := uc.coordinator.tryAcquire("storage/mutation")
+	if err != nil {
+		ticket.release()
+		return ErrStorageConflict
+	}
 	if !uc.engine.RunStorageTask(func(workerCtx context.Context) {
 		defer ticket.release()
+		defer mutation.release()
+		workerCtx = context.WithValue(workerCtx, storageMutationHeld{}, true)
 		var opErr error
 		switch action {
 		case "analyze_legacy":
@@ -245,6 +256,7 @@ func (uc *TorrentUseCase) StartRecovery(ctx context.Context, hash, id string, ve
 		}
 	}) {
 		ticket.release()
+		mutation.release()
 		return engine.ErrTaskLimit
 	}
 	return nil
@@ -279,7 +291,7 @@ func (uc *TorrentUseCase) analyzeLegacy(ctx context.Context, hash, id string, ve
 		release()
 		return err
 	}
-	paths, err := storagePaths(&info)
+	paths, err := relativeStoragePaths(m, &info)
 	if err != nil {
 		release()
 		return err
@@ -385,11 +397,11 @@ func (uc *TorrentUseCase) analyzeLegacy(ctx context.Context, hash, id string, ve
 	// The verifier checks the whole torrent, preserving v1 shared-boundary and
 	// v2/hybrid semantics. Missing neighbors make evidence inconclusive, not valid.
 	uc.storageStage(hash, "verification", nil, nil)
-	final, err := engine.VerifyReadOnlyStorage(ctx, uc.engine.DownloadDir(), m.Root, mi, nil, uc.storageIORead(hash))
+	final, err := engine.VerifyReadOnlyLayout(ctx, uc.engine.DownloadDir(), m.Layout(), mi, nil, uc.storageIORead(hash))
 	if err != nil {
 		return err
 	}
-	part, err := engine.VerifyReadOnlyStorage(ctx, uc.engine.DownloadDir(), m.Root, mi, map[string]string{path: path + ".part"}, uc.storageIORead(hash))
+	part, err := engine.VerifyReadOnlyLayout(ctx, uc.engine.DownloadDir(), m.Layout(), mi, map[string]string{path: path + ".part"}, uc.storageIORead(hash))
 	if err != nil {
 		return err
 	}
@@ -469,7 +481,7 @@ func (uc *TorrentUseCase) applyLegacy(ctx context.Context, hash, id string, vers
 		release()
 		return err
 	}
-	metadataPaths, err := storagePaths(&info)
+	metadataPaths, err := relativeStoragePaths(m, &info)
 	if err != nil {
 		release()
 		return err
@@ -544,6 +556,16 @@ func (uc *TorrentUseCase) applyLegacy(ctx context.Context, hash, id string, vers
 	if move == nil {
 		move = storage.MoveRootNoReplace
 	}
+	uncheckedMove := move
+	move = func(root *os.Root, source, target string) error {
+		if err := uc.guardPayloadIO(source); err != nil {
+			return err
+		}
+		if err := uc.guardPayloadIO(target); err != nil {
+			return err
+		}
+		return uncheckedMove(root, source, target)
+	}
 	if _, err := root.Lstat(j.Backup); errors.Is(err, os.ErrNotExist) {
 		if err := matchesRecovery(ctx, root, alternative, altStamp, observe); err != nil {
 			return err
@@ -555,6 +577,9 @@ func (uc *TorrentUseCase) applyLegacy(ctx context.Context, hash, id string, vers
 			return err
 		}
 		if err := payload.Validate(root, j.Backup); err != nil {
+			return err
+		}
+		if err := uc.guardPayloadIO(j.Backup); err != nil {
 			return err
 		}
 		if err := root.MkdirAll(filepath.Dir(j.Backup), 0700); err != nil {
@@ -614,7 +639,7 @@ func (uc *TorrentUseCase) applyLegacy(ctx context.Context, hash, id string, vers
 		return err
 	}
 	uc.storageStage(hash, "verification", nil, nil)
-	if _, err := engine.VerifyReadOnlyStorage(ctx, uc.engine.DownloadDir(), m.Root, mi, nil, uc.storageIORead(hash)); err != nil {
+	if _, err := engine.VerifyReadOnlyLayout(ctx, uc.engine.DownloadDir(), m.Layout(), mi, nil, uc.storageIORead(hash)); err != nil {
 		return err
 	}
 	if err := uc.recoveryBoundary("verified"); err != nil {
@@ -742,7 +767,7 @@ func (uc *TorrentUseCase) resumeVerifiedRecovery(ctx context.Context, hash, id s
 	stop := uc.startStorageProgress(hash, id, version, rec.Reason)
 	defer stop()
 	uc.storageStage(hash, "verification", nil, nil)
-	if _, err := engine.VerifyReadOnlyStorage(ctx, uc.engine.DownloadDir(), m.Root, mi, nil, uc.storageIORead(hash)); err != nil {
+	if _, err := engine.VerifyReadOnlyLayout(ctx, uc.engine.DownloadDir(), m.Layout(), mi, nil, uc.storageIORead(hash)); err != nil {
 		return err
 	}
 	release, err = uc.lockRecord(hash, ctx)
@@ -758,6 +783,27 @@ func (uc *TorrentUseCase) resumeVerifiedRecovery(ctx context.Context, hash, id s
 	rec.Error = ""
 	if err := uc.repo.SaveRecovery(rec); err != nil {
 		return err
+	}
+	for {
+		ready, err := uc.inspectInventory(ctx, hash, false)
+		if err != nil {
+			return err
+		}
+		if ready {
+			break
+		}
+		state, err := uc.repo.Inventory(m.StorageID)
+		if err != nil {
+			return err
+		}
+		if state == nil || state.Status == "blocked" {
+			return ErrStorageConflict
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(time.Millisecond):
+		}
 	}
 	return uc.resumeLocked(hash)
 }
@@ -805,4 +851,18 @@ func (uc *TorrentUseCase) saveRecoveryFailure(hash, id string, version int64, ca
 		rec.Error = "Filesystem does not support safe publication"
 	}
 	_ = uc.repo.SaveRecovery(rec)
+}
+
+func relativeStoragePaths(m *repository.StorageMapping, info *metainfo.Info) ([]string, error) {
+	paths, err := storagePaths(info)
+	if err != nil {
+		return nil, err
+	}
+	for i, p := range paths {
+		paths[i], err = m.Layout().Relative(p)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return paths, nil
 }

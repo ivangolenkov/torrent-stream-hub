@@ -2,7 +2,7 @@
 export type StorageRecoveryReason =
   | 'legacy_file_conflict' | 'deletion_pending' | 'deletion_cancelled'
   | 'deletion_mode_conflict' | 'ownership_catalog_changed' | 'ownership_conflict'
-  | 'migration_queued' | 'migration_active' | 'attachment_failed' | 'disk_full' | 'recovery_complete';
+  | 'migration_queued' | 'migration_active' | 'attachment_failed' | 'disk_full' | 'recovery_complete' | 'storage_move' | 'storage_locate';
 
 export type StorageRecoveryAction =
   | 'analyze_legacy' | 'apply_legacy' | 'retry_deletion' | 'cancel_deletion'
@@ -10,7 +10,8 @@ export type StorageRecoveryAction =
 
 export interface StorageProgress {
   stage: 'queued' | 'preflight' | 'checksum' | 'copy' | 'verification' | 'cleanup'
-    | 'analysis' | 'preserve_alternative' | 'publication';
+    | 'analysis' | 'preserve_alternative' | 'publication'
+    | 'planning' | 'planned' | 'waiting_readers' | 'prepared' | 'copying' | 'publishing' | 'published' | 'committed' | 'completed' | 'cancel_requested' | 'cancelled';
   queue_position?: number;
   bytes_done: number;
   bytes_total?: number;

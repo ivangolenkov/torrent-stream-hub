@@ -41,6 +41,7 @@ func projectTorrent(runtime, persisted *models.Torrent) *models.Torrent {
 		c.ReconcileReason = failure.Code
 	}
 	runtime.Control = &c
+	projectFileStates(runtime, persisted, rc != nil && rc.RecordID == c.RecordID && rc.RuntimeAttachment != "")
 	return runtime
 }
 
@@ -52,6 +53,7 @@ func projectDetachedTorrent(t *models.Torrent) *models.Torrent {
 	if c := t.Control; c != nil && c.DesiredRun.Valid() {
 		t.State, t.Error = restoreActivation(c.DesiredRun, t.DownloadBlock, c.ActivationBlocks)
 	}
+	projectFileStates(t, t, false)
 	return t
 }
 

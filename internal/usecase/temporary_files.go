@@ -42,12 +42,18 @@ func (uc *TorrentUseCase) knownStoragePaths(t *models.Torrent) ([]string, error)
 	if err != nil {
 		return nil, err
 	}
-	if m != nil && m.Version == payload.LayoutVersion {
+	if err := checkMappingVersion(m); err != nil {
+		return nil, err
+	}
+	if m != nil && payload.Supported(m.Version) {
 		paths, known, err := uc.metadataStoragePaths(t)
 		if err != nil {
 			return nil, err
 		}
 		if !known {
+			if m.Root == "" {
+				return nil, nil
+			}
 			return []string{m.Root}, nil
 		}
 		return paths, nil
@@ -69,9 +75,18 @@ func (uc *TorrentUseCase) metadataStoragePaths(t *models.Torrent) ([]string, boo
 	if err != nil {
 		return nil, false, err
 	}
-	if m != nil && m.Version == payload.LayoutVersion {
+	if err := checkMappingVersion(m); err != nil {
+		return nil, false, err
+	}
+	if m != nil && m.State == "reserved" && m.Root == "" {
+		return nil, false, nil
+	}
+	if m != nil && payload.Supported(m.Version) {
 		for i, path := range paths {
-			paths[i] = filepath.Join(m.Root, path)
+			paths[i], err = m.Layout().Path(path)
+			if err != nil {
+				return nil, false, err
+			}
 		}
 	}
 	return paths, true, err
@@ -182,9 +197,14 @@ func (uc *TorrentUseCase) deletePayloadLocked(t *models.Torrent) (retErr error) 
 			paths, err = storagePaths(info)
 			if m, e := uc.repo.StorageMapping(hash); e != nil {
 				return e
-			} else if m != nil && m.Version == payload.LayoutVersion {
+			} else if e = checkMappingVersion(m); e != nil {
+				return e
+			} else if m != nil && payload.Supported(m.Version) {
 				for i, path := range paths {
-					paths[i] = filepath.Join(m.Root, path)
+					paths[i], err = m.Layout().Path(path)
+					if err != nil {
+						return err
+					}
 				}
 			}
 			if err != nil {
@@ -226,6 +246,9 @@ func (uc *TorrentUseCase) deletePayloadLocked(t *models.Torrent) (retErr error) 
 	defer ownershipRelease()
 	// Validate the entire manifest before removing any entry.
 	for _, path := range owned {
+		if err := uc.checkVolume(path); err != nil {
+			return err
+		}
 		if err := validateCleanupPath(root, path); err != nil {
 			return fmt.Errorf("%w: %v", ErrStorageConflict, err)
 		}
@@ -243,6 +266,9 @@ func (uc *TorrentUseCase) deletePayloadLocked(t *models.Torrent) (retErr error) 
 			return err
 		}
 		if err := uc.repo.DeletionGate(hash, t.Control.RecordID); err != nil {
+			return err
+		}
+		if err := uc.checkVolume(path); err != nil {
 			return err
 		}
 		removeErr := remove(root, path)
@@ -265,6 +291,19 @@ func (uc *TorrentUseCase) deletePayloadLocked(t *models.Torrent) (retErr error) 
 		return err
 	}
 	return uc.repo.DeleteTorrent(hash)
+}
+
+func checkMappingVersion(m *repository.StorageMapping) error {
+	if m == nil || m.Version == 0 {
+		return nil
+	} // explicit shared-layout adapter
+	if m.Version == payload.NamedLayoutVersion && m.State == "reserved" && m.Root == "" {
+		return nil
+	}
+	if err := m.Layout().Validate(); err != nil {
+		return fmt.Errorf("%w: unsupported or invalid storage layout: %v", ErrStorageConflict, err)
+	}
+	return nil
 }
 
 func (uc *TorrentUseCase) validateOwnership(root *os.Root, hash string, owned []string, all []*models.Torrent) error {
@@ -299,6 +338,16 @@ func (uc *TorrentUseCase) validateOwnershipContext(ctx context.Context, root *os
 }
 
 func (uc *TorrentUseCase) validateOwnershipSnapshot(ctx context.Context, root *os.Root, hash string, owned []string, snapshot *repository.OwnershipSnapshot) error {
+	for _, c := range snapshot.Claims {
+		if m := snapshot.Mappings[hash]; m != nil && c.StorageID == m.StorageID {
+			continue
+		}
+		for _, p := range owned {
+			if ownershipOverlap(p, c.Path) {
+				return fmt.Errorf("%w: durable storage reservation", ErrStorageConflict)
+			}
+		}
+	}
 	stat := cachedStorageStat(root.Stat)
 	protectedStat := cachedStorageStat(os.Stat)
 	var protectedPaths []string
@@ -337,7 +386,7 @@ func (uc *TorrentUseCase) validateOwnershipSnapshot(ctx context.Context, root *o
 	}
 	for _, rec := range snapshot.Records {
 		other := rec.Torrent
-		if other.Hash == hash {
+		if other.Hash == hash || (rec.Mapping != nil && rec.Mapping.State == "reserved" && rec.Mapping.Root == "") {
 			continue
 		}
 		others, err := uc.snapshotStoragePaths(rec)
@@ -370,7 +419,7 @@ func (uc *TorrentUseCase) validateOwnershipSnapshot(ctx context.Context, root *o
 	// Orphan mappings are intentional keep-data namespace reservations, and
 	// aliases can exist before the canonical torrent record is committed.
 	for alias, m := range snapshot.Mappings {
-		if alias == hash {
+		if alias == hash || (m.State == "reserved" && m.Root == "") {
 			continue
 		}
 		if m.Root == "" {

@@ -1,5 +1,6 @@
 import type { Torrent, File, BTHealth } from '../types';
 import type { StorageRecovery, StorageRecoveryAction } from '../types/storageRecovery';
+import type { StorageCommand, StorageLocation } from '../types/storage';
 
 const API_BASE = '/api/v1';
 
@@ -12,6 +13,13 @@ async function commandReceipt(response: Response): Promise<CommandReceipt> {
 }
 
 export const apiClient = {
+  async storageCommand(hash: string, command: StorageCommand): Promise<StorageLocation> {
+    const response = await fetch(`${API_BASE}/torrent/${encodeURIComponent(hash)}/storage`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(command),
+    });
+    if (!response.ok) throw new Error(await readError(response, 'Storage operation failed'));
+    return response.json();
+  },
   async recoveryAction(hash: string, recovery: StorageRecovery, action: StorageRecoveryAction, choice?: 'final' | 'part'): Promise<CommandResult> {
     const response = await fetch(`${API_BASE}/torrent/${encodeURIComponent(hash)}/action`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -29,19 +37,20 @@ export const apiClient = {
     return data;
   },
 
-  async addTorrent(link: string, savePath: string = '', sequential: boolean = false, poster: string = ''): Promise<void> {
+  async addTorrent(link: string, savePath: string = '', sequential: boolean = false, poster: string = '', folderName: string = ''): Promise<void> {
     const normalizedLink = normalizeTorrentLink(link);
     const response = await fetch(`${API_BASE}/torrent/add`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ link: normalizedLink, save_path: savePath, sequential, poster })
+      body: JSON.stringify({ link: normalizedLink, save_path: savePath, sequential, poster, folder_name: folderName })
     });
     if (!response.ok) throw new Error(await readError(response, 'Failed to add torrent'));
   },
 
-  async uploadTorrent(file: globalThis.File, poster: string = ''): Promise<void> {
+  async uploadTorrent(file: globalThis.File, poster: string = '', folderName: string = ''): Promise<void> {
     const formData = new FormData();
     formData.append('file', file);
+    if (folderName.trim()) formData.append('folder_name', folderName.trim());
     if (poster.trim()) formData.append('poster', poster.trim());
 
     const response = await fetch('/torrent/upload', {

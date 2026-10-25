@@ -6,8 +6,6 @@ import (
 	"github.com/anacrolix/torrent/metainfo"
 	"slices"
 	"sort"
-
-	"torrent-stream-hub/internal/payload"
 )
 
 func (uc *TorrentUseCase) lockSpec(spec *torrent.TorrentSpec) (func(), error) {
@@ -24,10 +22,13 @@ func (uc *TorrentUseCase) lockSpec(spec *torrent.TorrentSpec) (func(), error) {
 func (uc *TorrentUseCase) commandKeys(hashes ...string) ([]string, error) {
 	var keys []string
 	for _, hash := range hashes {
-		keys = append(keys, "hash/"+hash, "root/"+payload.Root(hash))
+		keys = append(keys, "hash/"+hash)
 		m, err := uc.repo.StorageMapping(hash)
 		if err != nil {
 			return nil, err
+		}
+		if m != nil {
+			keys = append(keys, "storage/"+m.StorageID)
 		}
 		if m != nil && m.Root != "" {
 			keys = append(keys, "root/"+m.Root)

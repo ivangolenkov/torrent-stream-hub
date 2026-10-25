@@ -43,7 +43,11 @@ func customLegacyConflict(t *testing.T, uc *TorrentUseCase, info metainfo.Info, 
 		t.Fatal(err)
 	}
 	for path, data := range contents {
-		target := filepath.Join(uc.engine.DownloadDir(), m.Root, path)
+		physical, err := m.Layout().Path(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		target := filepath.Join(uc.engine.DownloadDir(), physical)
 		if err := os.MkdirAll(filepath.Dir(target), 0700); err != nil {
 			t.Fatal(err)
 		}
@@ -83,7 +87,7 @@ func TestLegacyRecoveryAmbiguousBoundaryAndZeroLength(t *testing.T) {
 				t.Fatalf("shared boundary evidence ignored: %+v", j.Analysis)
 			}
 			if missingNeighbor {
-				if _, err := os.Stat(filepath.Join(uc.engine.DownloadDir(), payload.Root(hash), "boundary/b")); !errors.Is(err, os.ErrNotExist) {
+				if _, err := os.Stat(filepath.Join(uc.engine.DownloadDir(), "payload", "boundary", "b")); !errors.Is(err, os.ErrNotExist) {
 					t.Fatal("analysis created neighbor", err)
 				}
 			}

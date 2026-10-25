@@ -48,23 +48,30 @@ func ValidFilePriority(priority FilePriority) bool {
 
 // Torrent defines the core properties and state of a single torrent
 type Torrent struct {
-	Control         *TorrentControl  `json:"control,omitempty"`
-	DeletionMode    string           `json:"deletion_mode,omitempty"`
-	DeletionError   string           `json:"deletion_error,omitempty"`
-	DownloadBlock   string           `json:"download_block,omitempty"`
-	StorageState    string           `json:"storage_state,omitempty"`
-	StorageError    string           `json:"storage_error,omitempty"`
-	StorageRecovery *StorageRecovery `json:"storage_recovery,omitempty"`
-	IsTemporary     bool             `json:"is_temporary"`
-	Hash            string           `json:"hash"`
-	Name            string           `json:"name"`
-	Title           string           `json:"title,omitempty"`
-	Data            string           `json:"data,omitempty"`
-	Poster          string           `json:"poster,omitempty"`
-	Category        string           `json:"category,omitempty"`
-	Size            int64            `json:"size"`
-	Downloaded      int64            `json:"downloaded"`
-	Progress        float64          `json:"progress"`
+	DirectReadReady bool                  `json:"direct_read_ready"`
+	Selection       *SelectionProgress    `json:"selection,omitempty"`
+	Verification    *VerificationProgress `json:"verification,omitempty"`
+	LastKnownBytes  int64                 `json:"last_known_bytes"`
+	LastKnownAtMS   int64                 `json:"last_known_at_ms,omitempty"`
+	LastKnownSource string                `json:"last_known_source,omitempty"`
+	Storage         *StorageLocation      `json:"storage,omitempty"`
+	Control         *TorrentControl       `json:"control,omitempty"`
+	DeletionMode    string                `json:"deletion_mode,omitempty"`
+	DeletionError   string                `json:"deletion_error,omitempty"`
+	DownloadBlock   string                `json:"download_block,omitempty"`
+	StorageState    string                `json:"storage_state,omitempty"`
+	StorageError    string                `json:"storage_error,omitempty"`
+	StorageRecovery *StorageRecovery      `json:"storage_recovery,omitempty"`
+	IsTemporary     bool                  `json:"is_temporary"`
+	Hash            string                `json:"hash"`
+	Name            string                `json:"name"`
+	Title           string                `json:"title,omitempty"`
+	Data            string                `json:"data,omitempty"`
+	Poster          string                `json:"poster,omitempty"`
+	Category        string                `json:"category,omitempty"`
+	Size            int64                 `json:"size"`
+	Downloaded      int64                 `json:"downloaded"`
+	Progress        float64               `json:"progress"`
 	// Persisted observations never grant file readiness. LegacyDownloaded is
 	// the pre-upgrade observation, NOT a cumulative network transfer counter.
 	ProgressSource     string            `json:"progress_source"`
@@ -196,6 +203,8 @@ type BTTorrentHealth struct {
 
 // File represents a single file within a torrent
 type File struct {
+	MetadataPath     string       `json:"metadata_path,omitempty"`
+	Status           *FileStatus  `json:"status,omitempty"`
 	Index            int          `json:"index"`
 	Path             string       `json:"path"`
 	Size             int64        `json:"size"`

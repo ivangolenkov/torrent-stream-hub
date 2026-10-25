@@ -53,7 +53,7 @@ func TestMissingExpectedPayloadPersistsAndRequiresExplicitRepairAfterReopen(t *t
 	if err := restored.RestoreTorrents(); err != nil {
 		t.Fatal(err)
 	}
-	if raw := e.GetRawTorrent(tor.Hash); raw == nil || raw.NetworkingEnabled() || raw.DataDownloadAllowed() {
+	if raw := e.GetRawTorrent(tor.Hash); raw != nil && (raw.NetworkingEnabled() || raw.DataDownloadAllowed()) {
 		t.Fatal("reopen repaired without authorization")
 	}
 	if err := restored.Resume(tor.Hash); err != nil {

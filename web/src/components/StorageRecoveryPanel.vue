@@ -15,6 +15,7 @@ const labels: Record<StorageRecoveryAction, string> = {
   analyze_legacy: 'Analyze both candidates', apply_legacy: 'Apply selected candidate', retry_ownership: 'Retry ownership check',
 };
 const reasons: Record<string, string> = {
+  storage_move: 'Moving files', storage_locate: 'Finding existing data',
   legacy_file_conflict: 'Legacy file conflict — both copies preserved',
   deletion_pending: 'Deletion pending', deletion_cancelled: 'Deletion cancelled — remaining data not yet verified',
   deletion_mode_conflict: 'Deletion mode differs from the saved operation',

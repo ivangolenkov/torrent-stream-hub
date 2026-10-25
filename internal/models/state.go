@@ -38,11 +38,12 @@ type UserMetadata struct{ Title, Data, Poster, Category string }
 
 // FileCatalog contains only metainfo-derived facts, never observed priorities.
 type FileCatalog struct {
-	Index   int
-	Path    string
-	Size    int64
-	Offset  int64
-	IsMedia bool
+	MetadataPath string
+	Index        int
+	Path         string
+	Size         int64
+	Offset       int64
+	IsMedia      bool
 }
 
 type TorrentCatalog struct {

@@ -17,7 +17,7 @@ import (
 
 func setupHTTPStreamServer(t *testing.T, pieceLength int64, name string, fileData []byte) (*httptest.Server, string, string, func()) {
 	t.Helper()
-	dir, _, h, cleanup := setupTorrServerIntegration(t)
+	dir, repo, h, cleanup := setupTorrServerIntegration(t)
 
 	r := chi.NewRouter()
 	h.RegisterRoutes(r)
@@ -35,7 +35,11 @@ func setupHTTPStreamServer(t *testing.T, pieceLength int64, name string, fileDat
 	}
 	hash := tor.Hash
 
-	filePath := filepath.Join(dir, "payload", tor.Hash, name, name+".mp4")
+	mapping, err := repo.StorageMapping(hash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	filePath := filepath.Join(dir, mapping.Root, name+".mp4")
 	if err := os.MkdirAll(filepath.Dir(filePath), 0o755); err != nil {
 		ts.Close()
 		cleanup()

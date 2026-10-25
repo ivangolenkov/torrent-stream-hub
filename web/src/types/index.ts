@@ -1,4 +1,5 @@
 import type { StorageRecovery } from './storageRecovery';
+import type { StorageLocation, FileStatus, SelectionProgress, VerificationProgress } from './storage';
 
 export type TorrentState = 
   | 'Queued'
@@ -23,6 +24,8 @@ export type ErrorReason =
   | '';
 
 export interface File {
+  metadata_path?: string;
+  status?: FileStatus;
   index: number;
   path: string;
   size: number;
@@ -47,6 +50,13 @@ export interface PeerSummary {
 }
 
 export interface Torrent {
+ direct_read_ready?: boolean;
+ selection?: SelectionProgress;
+ verification?: VerificationProgress;
+ last_known_bytes?: number;
+ last_known_at_ms?: number;
+ last_known_source?: string;
+ storage?: StorageLocation;
  catalog_version?: string;
  snapshot_freshness?: string;
 	control?: {

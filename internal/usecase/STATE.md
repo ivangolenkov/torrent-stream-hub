@@ -1,5 +1,37 @@
 # Application state and coordination contract
 
+## Phase 42 locations, inventory and files
+
+`torrent_storage` owns placement: layout 0 shared legacy, 1 isolated hash, 2 readable
+root with an explicit metadata prefix. `storage_id` is stable across aliases;
+`revision` changes with mapping. Record ID, desired revision, operation version,
+inventory session and runtime attachment remain distinct fences. Every consumer
+resolves persisted placement. SQL upgrade and title edits do not rename files;
+magnet reservation precedes its first payload open.
+
+Move/locate reuse `storage_recovery`. `storage_claims` protect source/staging/target
+and retained paths beyond record lifetime. Mapping/alias publication commits
+atomically; manifests retain their version. Before-publication cancel differs from
+after-publication recovery. Locate retains the source, clears its old expected
+inventory and commits pause. Copy digests/offline checks never grant runtime readiness.
+
+`storage_volumes` and `.tsh-volume` record enrollment; live filesystem identity
+closes admission on ordinary mount replacement/loss. Old installations require
+explicit reconcile, including ones containing only interrupted journals. Reconcile
+serializes against storage mutation and leaves blocked workflows intact. It cannot
+recreate an absent registered marker. Inventory observations are fenced by session,
+mapping, record and catalog. Verified observations can establish expected presence
+without per-chunk SQL. A disappeared expected file differs from a never-created
+skipped file. Explicit Resume authorizes repair after volume validation only.
+
+File state separates presence, history/provenance, checked/verified bytes, effective
+priority and direct readiness. Unknown metadata paths are not guessed from display
+names. Selected progress has its own denominator and desired revision; empty
+selection is neither 100% nor Seeding. DTO readiness is observational: actual opens
+enforce current gates again. DiskFull may permit verified read-only access; skipped
+complete files remain readable. Details identity includes mapping and attachment.
+See `tasks/phase42-storage-contract.md` and the README rehearsal procedure.
+
 ## Phase 41 storage recovery
 
 `storage_catalog_version` orders identity/mapping/cleanup/catalog changes without

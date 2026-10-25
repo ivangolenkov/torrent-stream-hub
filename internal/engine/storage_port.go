@@ -12,6 +12,22 @@ import (
 type MetadataHandle struct{ torrent *torrent.Torrent }
 
 func (h MetadataHandle) Exists() bool { return h.torrent != nil }
+func (h MetadataHandle) Pending() *metainfo.MetaInfo {
+	if h.torrent == nil {
+		return nil
+	}
+	b := h.torrent.PendingStorageMetadata()
+	if len(b) == 0 {
+		return nil
+	}
+	return &metainfo.MetaInfo{InfoBytes: b}
+}
+func (h MetadataHandle) RetryStorage(mi *metainfo.MetaInfo) error {
+	if h.torrent == nil {
+		return ErrTorrentNotFound
+	}
+	return h.torrent.SetInfoBytes(mi.InfoBytes)
+}
 func (h MetadataHandle) Info() (*metainfo.Info, error) {
 	if h.torrent == nil || h.torrent.Info() == nil {
 		return nil, nil

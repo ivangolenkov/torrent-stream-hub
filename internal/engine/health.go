@@ -9,6 +9,7 @@ import (
 	"torrent-stream-hub/internal/config"
 	"torrent-stream-hub/internal/logging"
 	"torrent-stream-hub/internal/models"
+	"torrent-stream-hub/internal/payload"
 
 	"github.com/anacrolix/torrent"
 )
@@ -273,6 +274,12 @@ func (e *Engine) mapManagedTorrent(mt *ManagedTorrent) *models.Torrent {
 		model.NumPieces = info.NumPieces()
 		model.ProgressSource = "verified"
 		model.ProgressObservedAt = observedAt
+		observations := t.FileObservations()
+		verification := &models.VerificationProgress{Attachment: model.Control.RuntimeAttachment, Status: "completed", TotalBytes: size}
+		if model.Recheck != nil {
+			verification.Operation = model.Recheck.ID
+		}
+		model.Verification = verification
 
 		mt.mu.Lock()
 		checking := mt.rechecking || mt.initializing
@@ -287,15 +294,50 @@ func (e *Engine) mapManagedTorrent(mt *ManagedTorrent) *models.Torrent {
 				downloaded = 0
 			}
 			model.Downloaded += downloaded
+			fi := file.FileInfo()
+			status := &models.FileStatus{Presence: "unknown", Verification: "unknown", EffectivePriority: "none", ReadReason: "verification_required", VerificationTotal: file.Length()}
+			if i < len(observations) {
+				o := observations[i]
+				status.VerifiedBytes, status.CheckedBytes = o.VerifiedBytes, o.CheckedBytes
+				status.EffectivePriority = observedPriority(o.EffectivePriority)
+				status.Verification = "completed"
+				if o.QueuedPieces > 0 {
+					status.Verification = "queued"
+				}
+				if o.ActivePieces > 0 {
+					status.Verification = "running"
+				}
+				status.DirectReadReady = o.DirectReadReady && !checking && !uncertain && file.Length() > 0
+				if status.DirectReadReady {
+					status.ReadReason = ""
+				} else if status.Verification == "completed" && !checking && !uncertain {
+					status.ReadReason = "incomplete"
+				}
+				verification.CheckedBytes += o.CheckedBytes
+				// Piece counts below are collected once from runs, not duplicated
+				// for shared v1 boundaries.
+			}
+			if uncertain {
+				status.VerifiedBytes = 0
+				status.Verification = "unknown"
+			}
+			if checking && status.Verification == "completed" && status.CheckedBytes == 0 && file.Length() > 0 {
+				status.Verification = "queued"
+			}
+			if model.Recheck != nil && (model.Recheck.Status == "failed" || model.Recheck.Status == "cancelled") {
+				status.Verification = model.Recheck.Status
+			}
 			model.Files = append(model.Files, &models.File{
-				Index:       i,
-				Path:        file.DisplayPath(),
-				Size:        file.Length(),
-				Offset:      file.Offset(),
-				OffsetKnown: true,
-				Downloaded:  downloaded,
-				Priority:    prio,
-				IsMedia:     isMediaFile(file.DisplayPath()),
+				MetadataPath: payload.Path(info, &fi),
+				Status:       status,
+				Index:        i,
+				Path:         file.DisplayPath(),
+				Size:         file.Length(),
+				Offset:       file.Offset(),
+				OffsetKnown:  true,
+				Downloaded:   downloaded,
+				Priority:     prio,
+				IsMedia:      isMediaFile(file.DisplayPath()),
 			})
 		}
 		if checking {
@@ -306,10 +348,58 @@ func (e *Engine) mapManagedTorrent(mt *ManagedTorrent) *models.Torrent {
 			model.ProgressObservedAt = 0
 		}
 		mt.mu.Unlock()
+		for _, run := range t.PieceStateRuns() {
+			if run.QueuedForHash || run.WaitingForHashBudget {
+				verification.QueuedPieces += run.Length
+			}
+			if run.Hashing && !run.WaitingForHashBudget || run.Marking {
+				verification.ActivePieces += run.Length
+			}
+		}
+		if verification.QueuedPieces > 0 || checking {
+			verification.Status = "queued"
+		}
+		if verification.ActivePieces > 0 {
+			verification.Status = "running"
+		}
+		if uncertain {
+			verification.Status = "unknown"
+		}
+		if model.Recheck != nil && (model.Recheck.Status == "failed" || model.Recheck.Status == "cancelled") {
+			verification.Status = model.Recheck.Status
+		}
+		mt.mu.Lock()
+		if mt.verificationSampleOperation != verification.Operation || verification.CheckedBytes < mt.verificationSampleBytes {
+			mt.verificationProgressAtMS, mt.verificationSampleBytes = 0, 0
+		}
+		if verification.CheckedBytes > mt.verificationSampleBytes {
+			mt.verificationProgressAtMS = observedAt / 1e6
+		}
+		mt.verificationSampleOperation, mt.verificationSampleBytes = verification.Operation, verification.CheckedBytes
+		verification.ProgressAtMS = mt.verificationProgressAtMS
+		mt.mu.Unlock()
+		model.Activity.Verifying = model.Activity.Verifying || verification.QueuedPieces > 0 || verification.ActivePieces > 0
 	}
 	model.Progress = models.ProgressPercent(model.Downloaded, model.Size)
 
 	return model
+}
+
+func observedPriority(p torrent.PiecePriority) string {
+	switch p {
+	case torrent.PiecePriorityNow:
+		return "now"
+	case torrent.PiecePriorityReadahead:
+		return "readahead"
+	case torrent.PiecePriorityNext:
+		return "next"
+	case torrent.PiecePriorityHigh:
+		return "high"
+	case torrent.PiecePriorityNormal:
+		return "normal"
+	default:
+		return "none"
+	}
 }
 
 func isMediaFile(filePath string) bool {

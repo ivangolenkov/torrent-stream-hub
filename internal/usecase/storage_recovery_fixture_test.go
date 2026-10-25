@@ -84,7 +84,7 @@ func TestStorageRecoveryReaddedOwnerFixture(t *testing.T) {
 	if err := repo.SaveTorrentWithPolicy(two, true); err != nil {
 		t.Fatal(err)
 	}
-	if err := repo.SaveStorageMapping(&repository.StorageMapping{Hash: two.Hash, Version: payload.LayoutVersion, Root: "one", State: "ready"}); err != nil {
+	if err := repo.SaveStorageMapping(&repository.StorageMapping{Hash: two.Hash, Version: payload.NamedLayoutVersion, Root: "one", State: "ready"}); err != nil {
 		t.Fatal(err)
 	}
 	after, err := repo.GetTorrent(two.Hash)

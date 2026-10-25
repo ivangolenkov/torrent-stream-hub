@@ -166,9 +166,7 @@ func TestPrivateSafeCannotUpgradePublicHybridAlias(t *testing.T) {
 		t.Fatal(err)
 	}
 	raw := uc.engine.GetRawTorrent(got.Hash)
-	if err := raw.SetInfoBytes(mi.InfoBytes); err != nil {
-		t.Fatal(err)
-	}
+	supplyNamedMetadata(t, raw, mi)
 	var encoded bytes.Buffer
 	if err := mi.Write(&encoded); err != nil {
 		t.Fatal(err)

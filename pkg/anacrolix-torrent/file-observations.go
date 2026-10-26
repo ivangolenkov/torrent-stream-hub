@@ -4,6 +4,10 @@ package torrent
 // CheckedBytes includes failed hash attempts; VerifiedBytes does not. A direct
 // open must refresh storage evidence even when DirectReadReady was observed.
 type FileObservation struct {
+	// Bytes excluded from the startup hash plan as missing/short, and not yet
+	// attempted since. Includes present portions of an incomplete boundary piece;
+	// historical planning evidence, never current file presence.
+	SkippedMissingBytes                 int64
 	RestoredBytes, FreshlyVerifiedBytes int64
 	ReaderPieces                        int
 	VerifiedBytes, CheckedBytes         int64
@@ -43,6 +47,8 @@ func (t *Torrent) FileObservations() []FileObservation {
 			}
 			if p.numVerifies > 0 && !busy {
 				o.CheckedBytes += n
+			} else if p.initialVerificationSkipped && p.numVerifies == 0 && !busy {
+				o.SkippedMissingBytes += n
 			}
 			if t.pieceComplete(index) && p.storageCompletionOk && !busy && !p.hasDirtyChunks() && !p.hasPendingWrites() {
 				o.VerifiedBytes += n

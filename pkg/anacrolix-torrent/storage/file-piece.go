@@ -187,6 +187,8 @@ func (me *filePieceImpl) BeginVerification() error {
 		return os.ErrClosed
 	}
 	defer me.t.lifecycle.RUnlock()
+	unlock := me.t.lockPayloadRange(me.p.Offset(), me.p.Length(), false)
+	defer unlock()
 	me.t.checkpointEpoch.Add(1)
 	if err := me.t.revokeResume(me.p.Index(), me.p.Index()+1); err != nil {
 		return err
@@ -202,12 +204,40 @@ func (me *filePieceImpl) BeginVerification() error {
 }
 
 func (me *filePieceImpl) MarkComplete() (err error) {
-	var verifiedSignature []os.FileInfo
 	if !me.t.beginOperation() {
 		return os.ErrClosed
 	}
 	defer me.t.lifecycle.RUnlock()
 	me.t.checkpointEpoch.Add(1)
+	if err := me.commitCompletion(); err != nil {
+		return err
+	}
+	// Publication's payload lease is released before promotion/refresh, which
+	// take their own leases. Recursive RLock can deadlock behind a queued writer.
+	for f := range me.pieceFiles() {
+		res := me.allFilePiecesComplete(f)
+		if res.Err != nil {
+			return res.Err
+		}
+		if !res.Ok {
+			continue
+		}
+		if err := me.promotePartFile(f); err != nil {
+			return fmt.Errorf("error promoting part file %q: %w", f.safeOsPath, err)
+		}
+		me.t.freshMu.Lock()
+		if sig := me.t.signatures[f.index]; sig != nil && sig.valid {
+			sig.published = true
+		}
+		me.t.freshMu.Unlock()
+	}
+	return nil
+}
+
+func (me *filePieceImpl) commitCompletion() error {
+	unlock := me.t.lockPayloadRange(me.p.Offset(), me.p.Length(), false)
+	defer unlock()
+	var verifiedSignature []os.FileInfo
 	if me.t.client.opts.VerifyOnOpen {
 		current, e := me.t.pieceSignature(me.p.Index())
 		if e != nil {
@@ -232,40 +262,33 @@ func (me *filePieceImpl) MarkComplete() (err error) {
 		me.t.freshMu.Unlock()
 	}
 	if pieceCompletionIsPersistent(me.pieceCompletion()) {
-		if err = me.Flush(); err != nil {
+		if err := me.Flush(); err != nil {
 			return err
 		}
 	}
-	err = me.pieceCompletion().Set(me.pieceKey(), true)
-	if err != nil {
+	if err := me.pieceCompletion().Set(me.pieceKey(), true); err != nil {
 		return err
 	}
 	if me.t.client.opts.VerifyOnOpen {
 		me.t.freshMu.Lock()
+		defer me.t.freshMu.Unlock()
+		// Revoke/refresh/layer invalidation need not take a payload writer lease.
+		// Never resurrect a snapshot revoked while Flush/Set was in flight.
+		snapshot, ok := me.t.hashSnapshot[me.p.Index()]
+		if !ok || len(snapshot) != len(verifiedSignature) {
+			return fmt.Errorf("storage generation changed during verification")
+		}
+		for i, st := range snapshot {
+			if st != verifiedSignature[i] {
+				return fmt.Errorf("storage generation changed during verification")
+			}
+			if sig, ok := st.(*verifiedFileSignature); ok && !sig.valid {
+				return fmt.Errorf("storage changed during verification")
+			}
+		}
 		me.t.markFreshLocked(me.p.Index(), verifiedSignature, false)
-		me.t.freshMu.Unlock()
 	}
-	for f := range me.pieceFiles() {
-		res := me.allFilePiecesComplete(f)
-		if res.Err != nil {
-			err = res.Err
-			return
-		}
-		if !res.Ok {
-			continue
-		}
-		err = me.promotePartFile(f)
-		if err != nil {
-			err = fmt.Errorf("error promoting part file %q: %w", f.safeOsPath, err)
-			return
-		}
-		me.t.freshMu.Lock()
-		if sig := me.t.signatures[f.index]; sig != nil && sig.valid {
-			sig.published = true
-		}
-		me.t.freshMu.Unlock()
-	}
-	return
+	return nil
 }
 
 func (me *filePieceImpl) allFilePiecesComplete(f file) (ret g.Result[bool]) {
@@ -322,6 +345,7 @@ func (me *filePieceImpl) MarkNotComplete() (err error) {
 	me.t.checkpointEpoch.Add(1)
 	me.t.freshMu.Lock()
 	me.t.forgetPieceLocked(me.p.Index())
+	delete(me.t.hashSnapshot, me.p.Index())
 	me.t.freshMu.Unlock()
 	if err := me.t.revokeResume(me.p.Index(), me.p.Index()+1); err != nil {
 		return err

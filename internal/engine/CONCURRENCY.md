@@ -115,6 +115,45 @@ or trusted by normal sessions; no worker is installed by default yet.
 
 ## Phase 42 verification and storage open
 
+### Phase 44 selective startup and signature publication
+
+Rooted VerifyOnOpen backends collect ordered, merged `InitialIncomplete` piece
+ranges after namespace initialization and validated resume import, before backend
+publication. Metadata probes are O(files); interval storage is O(files), without
+a new piece bitmap or payload buffers. The client consumes ranges in O(files +
+pieces) during initial completion admission and releases them before GotInfo.
+Only known incomplete is installed, never trust or a hash count. The resulting
+piece flag preserves known incomplete when the first v2 piece layer arrives
+(which continues initial admission without changing payload). It does not exempt
+subsequent downloads or explicit rechecks, and is cleared when any hash starts.
+New complete network pieces always queue hashing. Interval storage is lazily
+allocated and capped at 65536 entries (1 MiB on 64-bit); overflow discards the
+negative plan and safely falls back to ordinary initial verification.
+Unknown access/guard errors take the ordinary error path, not the absent path.
+
+Signature capture (`BeginVerification`) and validation/commit (`MarkComplete`)
+take existing contributing-file payload read leases in torrent offset order,
+inside the lifecycle read lease, before name locks/stat and short freshMu
+sections. Internal writers hold the matching payload write lease while changing
+bytes and updating shared signatures. No writer can make captured stat older than
+the accounted signature within either publication step. The lease is NOT held
+across the entire hash attempt: independent piece writes between steps remain
+valid; same-piece writes erase hashSnapshot and reject the stale result.
+
+Hint persistence/flush runs outside freshMu and Client.lock. The snapshot is
+revalidated under freshMu after persistence, so an intervening revoke/layer
+invalidation cannot be resurrected. MarkNotComplete also removes the snapshot.
+Release the publication payload lease before promotion/refresh: recursive RLock
+can deadlock behind a queued writer. Close/checkpoint retain their existing
+lifecycle exclusive fences. A failed MarkComplete never installs library complete
+or announces HAVE; it keeps requests eligible, without busy retry or peer blame.
+Filesystem errors stay visible rather than being downgraded to successful checks.
+
+FileObservations derives skipped_missing_bytes only for initially skipped pieces
+with no subsequent hash attempt and no queued/active work. REST/SSE copies those
+cached facts, without filesystem work. Skips neither grant readiness nor advance
+the actual hash progress timestamp. The observation is not current inventory.
+
 Main (two slots, one per torrent) and offline (one slot) clients share one
 `HashBudget(2, 1, 64, 8)`: two active hash read/compute tasks, one per live
 filesystem, 64 pending leases, a FIFO turn after eight priority grants. Existing

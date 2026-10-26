@@ -201,6 +201,14 @@ epoch и context. `RestoreCheckpoint` повторяет rooted evidence и owne
 6. Fork импортирует только допустимые complete pieces с usable file signatures и необходимыми v2 layers. Остальное — обычная hash очередь фазы 42. Ни `VerifyOnOpen=false`, ни общий `Complete=true` из hints не заменяют token.
 7. Реальный Range/direct/archive/upload повторяет существующий storage gate. Обнаруженная короткая read/error/signature mismatch снимает trust затронутого диапазона и планирует проверку, не automatic repair. Cached REST наблюдение не является lease.
 
+Уточнение фазы 44 к шагу 6: обычный startup fallback не требует hash attempt для
+достоверно отсутствующих/коротких extents. Они получают только incomplete;
+существующие непроверенные bytes по-прежнему хешируются. Одноразовый negative plan
+освобождается после initial admission и не разрешает пропуск проверки новых writes
+или повторное использование evidence при explicit recheck. Новые поля
+`skipped_missing_bytes` — cached planning diagnosis, не hash work и не trust.
+Durable checkpoints/revocations, restore tokens и ограничения fast не изменены.
+
 ## Budgets
 
 | Ресурс | Предел первой версии |

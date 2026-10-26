@@ -49,3 +49,33 @@ func TestStorageLocationContract(t *testing.T) {
 		t.Fatalf("contract changed: %s", encoded)
 	}
 }
+
+func TestSelectiveVerificationContract(t *testing.T) {
+	data, err := os.ReadFile("testdata/selective-verification.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var v struct {
+		Verification VerificationProgress `json:"verification"`
+		File         FileStatus           `json:"file"`
+	}
+	d := json.NewDecoder(bytes.NewReader(data))
+	d.DisallowUnknownFields()
+	if err := d.Decode(&v); err != nil {
+		t.Fatal(err)
+	}
+	if v.Verification.CheckedBytes != 4 || v.Verification.SkippedMissingBytes != 4 || v.File.SkippedMissingBytes != 8 || v.File.VerifiedBytes != 0 || v.File.DirectReadReady {
+		t.Fatal("negative evidence gained positive trust", v)
+	}
+	encoded, err := json.Marshal(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var roundTrip struct {
+		Verification VerificationProgress `json:"verification"`
+		File         FileStatus           `json:"file"`
+	}
+	if err := json.Unmarshal(encoded, &roundTrip); err != nil || roundTrip != v {
+		t.Fatal("wire fields lost", string(encoded), err)
+	}
+}

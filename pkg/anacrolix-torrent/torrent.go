@@ -193,8 +193,11 @@ type Torrent struct {
 	// A cache of completed piece indices.
 	_completedPieces roaring.Bitmap
 	// Pieces that need to be hashed.
-	piecesQueuedForHash      typedRoaring.Bitmap[pieceIndex]
-	verificationSelected     roaring.Bitmap
+	piecesQueuedForHash  typedRoaring.Bitmap[pieceIndex]
+	verificationSelected roaring.Bitmap
+	// Subset of the existing hash queue whose network chunks are all written.
+	// Coalesced and removed on admission; no worker or scan per received chunk.
+	receivedPiecesForHash    roaring.Bitmap
 	verificationSelectionSet bool
 	hashPriorityBurst        int
 	hashBackgroundCursor     pieceIndex
@@ -692,6 +695,12 @@ func (t *Torrent) onSetInfo() {
 	t.pieceRequestOrder = rand.Perm(t.numPieces())
 	t.initPieceRequestOrder()
 	MakeSliceWithLength(&t.requestPieceStates, t.numPieces())
+	var initialIncomplete []storage.PieceRange
+	if t.storage != nil {
+		initialIncomplete = t.storage.InitialIncomplete
+		t.storage.InitialIncomplete = nil
+	}
+	skipped := 0
 	for i := range t.pieces {
 		p := &t.pieces[i]
 		// Need to add relativeAvailability before updating piece completion, as that may result in
@@ -701,8 +710,22 @@ func (t *Torrent) onSetInfo() {
 		}
 		p.relativeAvailability = t.selectivePieceAvailabilityFromPeers(i)
 		t.addRequestOrderPiece(i)
-		t.setInitialPieceCompletionFromStorage(i)
+		for len(initialIncomplete) > 0 && initialIncomplete[0].End <= i {
+			initialIncomplete = initialIncomplete[1:]
+		}
+		if len(initialIncomplete) > 0 && initialIncomplete[0].Begin <= i {
+			// Negative evidence never installs completion or counts as a hash.
+			// Newly downloaded pieces still use queuePieceCheck unconditionally.
+			t.setPieceCompletion(i, g.Some(false))
+			p.initialVerificationSkipped = true
+			skipped++
+		} else {
+			t.setInitialPieceCompletionFromStorage(i)
+		}
 		t.queueInitialPieceCheck(i)
+	}
+	if skipped > 0 {
+		t.slogger().Info("initial verification skipped absent data", "incomplete_pieces", skipped)
 	}
 	t.cl.event.Broadcast()
 	close(t.gotMetainfoC)
@@ -2852,7 +2875,14 @@ func (t *Torrent) pieceHashed(piece pieceIndex, passed bool, hashIoErr error) {
 			return
 		}
 		t.pendAllChunkSpecs(piece)
-		t.setPieceCompletion(piece, g.Some(true))
+		if err == nil {
+			t.setPieceCompletion(piece, g.Some(true))
+		} else {
+			// A matching hash is not a successful storage commit. Keep requests
+			// eligible and don't announce HAVE or blame a peer for storage faults.
+			t.setPieceCompletion(piece, g.Some(false))
+			t.onIncompletePiece(piece)
+		}
 	} else {
 		if len(p.dirtiers) != 0 && p.allChunksDirty() && hashIoErr == nil {
 			// Peers contributed to all the data for this piece hash failure, and the failure was
@@ -2982,10 +3012,12 @@ func (t *Torrent) pieceHasher(initial pieceIndex) {
 
 func (t *Torrent) startHash(pi pieceIndex) {
 	p := t.piece(pi)
+	p.initialVerificationSkipped = false
 	t.piecesQueuedForHash.Remove(pi)
 	p.hashing = true
 	p.hashWaiting.Store(t.cl.config.HashBudget != nil)
 	p.hashPriority = uint8(t.verificationPriority(pi))
+	t.receivedPiecesForHash.Remove(uint32(pi))
 	t.deferPublishPieceStateChange(pi)
 	t.updatePiecePriority(pi, "Torrent.startHash")
 	t.storageLock.RLock()
@@ -3118,6 +3150,9 @@ func (t *Torrent) queuePieceCheck(pieceIndex pieceIndex) (targetVerifies pieceVe
 		return
 	}
 	targetVerifies = piece.nextNovelHashCount()
+	if piece.allChunksDirty() && !piece.hasPendingWrites() {
+		t.receivedPiecesForHash.Add(uint32(pieceIndex))
+	}
 	if piece.queuedForHash() {
 		return
 	}

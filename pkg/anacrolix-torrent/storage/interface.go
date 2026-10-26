@@ -26,6 +26,11 @@ type TorrentCapacity *func() (cap int64, capped bool)
 
 // Data storage bound to a torrent.
 type TorrentImpl struct {
+	// InitialIncomplete contains ordered, disjoint half-open piece ranges found
+	// missing/short during this backend open. Initial admission only: never reuse
+	// it for download verification, refresh or explicit recheck. It grants no trust.
+	// The client consumes and releases it before publishing metadata readiness.
+	InitialIncomplete []PieceRange
 	CachedRestored    func(int) bool           // I/O-free source classification for current readiness
 	ResumeObservation func() ResumeObservation // immutable open outcome
 	// v2 infos might not have the piece hash available even if we have the info. The
@@ -60,6 +65,8 @@ type TorrentImpl struct {
 	// It must not do I/O, block on mutation admission or grant payload readiness.
 	CheckpointState func() (revision uint64, dirty bool)
 }
+
+type PieceRange struct{ Begin, End int }
 
 // Interacts with torrent piece data. Optional interfaces to implement include://
 //

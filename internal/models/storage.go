@@ -40,20 +40,21 @@ type LocationAnalysis struct {
 }
 
 type FileStatus struct {
-	ReadReason        string `json:"read_reason,omitempty"`
-	LastKnownAtMS     int64  `json:"last_known_at_ms,omitempty"`
-	LastKnownSource   string `json:"last_known_source,omitempty"`
-	CheckedBytes      int64  `json:"checked_bytes,omitempty"`
-	VerificationTotal int64  `json:"verification_total,omitempty"`
-	StoragePath       string `json:"storage_path"`
-	Presence          string `json:"presence"`
-	Reason            string `json:"reason,omitempty"`
-	VerifiedBytes     int64  `json:"verified_bytes"`
-	LastKnownBytes    int64  `json:"last_known_bytes"`
-	ObservedAtMS      int64  `json:"observed_at_ms,omitempty"`
-	Verification      string `json:"verification"`
-	DirectReadReady   bool   `json:"direct_read_ready"`
-	EffectivePriority string `json:"effective_priority"`
+	ReadReason          string `json:"read_reason,omitempty"`
+	LastKnownAtMS       int64  `json:"last_known_at_ms,omitempty"`
+	LastKnownSource     string `json:"last_known_source,omitempty"`
+	CheckedBytes        int64  `json:"checked_bytes,omitempty"`
+	SkippedMissingBytes int64  `json:"skipped_missing_bytes,omitempty"`
+	VerificationTotal   int64  `json:"verification_total,omitempty"`
+	StoragePath         string `json:"storage_path"`
+	Presence            string `json:"presence"`
+	Reason              string `json:"reason,omitempty"`
+	VerifiedBytes       int64  `json:"verified_bytes"`
+	LastKnownBytes      int64  `json:"last_known_bytes"`
+	ObservedAtMS        int64  `json:"observed_at_ms,omitempty"`
+	Verification        string `json:"verification"`
+	DirectReadReady     bool   `json:"direct_read_ready"`
+	EffectivePriority   string `json:"effective_priority"`
 }
 
 type SelectionProgress struct {
@@ -69,14 +70,15 @@ type SelectionProgress struct {
 // Checked bytes count completed hash attempts, including invalid data. They do
 // not grant readiness. Attachment and operation distinguish a new pass.
 type VerificationProgress struct {
-	ProgressAtMS int64  `json:"progress_at_ms,omitempty"`
-	Attachment   string `json:"attachment,omitempty"`
-	Operation    uint64 `json:"operation,omitempty"`
-	Status       string `json:"status"`
-	CheckedBytes int64  `json:"checked_bytes"`
-	TotalBytes   int64  `json:"total_bytes"`
-	QueuedPieces int    `json:"queued_pieces"`
-	ActivePieces int    `json:"active_pieces"`
+	ProgressAtMS        int64  `json:"progress_at_ms,omitempty"`
+	Attachment          string `json:"attachment,omitempty"`
+	Operation           uint64 `json:"operation,omitempty"`
+	Status              string `json:"status"`
+	CheckedBytes        int64  `json:"checked_bytes"`
+	SkippedMissingBytes int64  `json:"skipped_missing_bytes,omitempty"`
+	TotalBytes          int64  `json:"total_bytes"`
+	QueuedPieces        int    `json:"queued_pieces"`
+	ActivePieces        int    `json:"active_pieces"`
 }
 
 type StorageCommand struct {

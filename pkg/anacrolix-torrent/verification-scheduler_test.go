@@ -176,6 +176,36 @@ func TestVerificationReaderPassesBacklog(t *testing.T) {
 	}
 }
 
+func TestVerificationReceivedPiecePassesExistingBacklog(t *testing.T) {
+	cl, add, requests := schedulerFixture(t, NewHashBudget(2, 1, 64, 8))
+	tor := add("downloading")
+	first := nextVerification(t, requests)
+	cl.lock()
+	// Simulate the last network chunk writer's normal queuePieceCheck call.
+	// The piece was already in the initial queue; promotion must coalesce it.
+	p := tor.piece(63)
+	for chunk := chunkIndexType(0); chunk < p.numChunks(); chunk++ {
+		p.unpendChunkIndex(chunk)
+	}
+	_, err := tor.queuePieceCheck(63)
+	cl.unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	close(first.proceed)
+	next := nextVerification(t, requests)
+	if next.piece != 63 {
+		t.Fatalf("downloaded piece waited behind existing-data scan: %+v", next)
+	}
+	cl.rLock()
+	retained := tor.receivedPiecesForHash.Contains(63)
+	cl.rUnlock()
+	if retained {
+		t.Fatal("received queue entry retained after hash admission")
+	}
+	close(next.proceed)
+}
+
 func TestVerificationRepeatedSeekDoesNotStarveBackground(t *testing.T) {
 	cl, add, requests := schedulerFixture(t, nil)
 	interactive := add("interactive")

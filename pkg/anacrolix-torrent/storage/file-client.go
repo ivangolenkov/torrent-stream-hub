@@ -336,5 +336,11 @@ func (fs *fileClientImpl) OpenTorrent(
 			return TorrentImpl{}, errors.Join(err, t.Close())
 		}
 	}
+	if fs.opts.VerifyOnOpen && fs.opts.RootFS != nil {
+		result.InitialIncomplete, err = t.initialIncomplete(ctx)
+		if err != nil {
+			return TorrentImpl{}, errors.Join(err, t.Close())
+		}
+	}
 	return result, nil
 }

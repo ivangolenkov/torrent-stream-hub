@@ -1,14 +1,41 @@
 package engine
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"testing"
+	"torrent-stream-hub/internal/config"
 	"torrent-stream-hub/internal/models"
 
 	"github.com/anacrolix/torrent"
+	"github.com/anacrolix/torrent/metainfo"
 	"github.com/anacrolix/torrent/storage"
 )
+
+func TestAbsentStartupIsNotActiveOrVerifiedProgress(t *testing.T) {
+	dir := t.TempDir()
+	e, err := New(&config.Config{DownloadDir: dir, DBPath: filepath.Join(dir, "hub.db"), TorrentPort: 0, BTDisableDHT: true, BTDisablePEX: true, BTDisableTCP: true, BTDisableUTP: true, BTNoUpload: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer e.Close()
+	raw := createTestTorrentBytes(4, "new", []metainfo.FileInfo{{Length: 8, Path: []string{"data"}}}, [][]byte{[]byte("gooddata")})
+	tor, err := e.AddTorrentFile(bytes.NewReader(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	model := e.GetTorrent(tor.Hash)
+	if model.Verification == nil || model.Verification.SkippedMissingBytes != 8 || model.Verification.CheckedBytes != 0 || model.Activity.Verifying || model.Downloaded != 0 || model.DirectReadReady {
+		t.Fatalf("missing startup misrepresented: %+v", model)
+	}
+	if model.Files[0].Status.SkippedMissingBytes != 8 || model.Files[0].Status.ReadReason != "incomplete" {
+		t.Fatal(model.Files[0].Status)
+	}
+	if e.GetTorrentCached(tor.Hash).Verification.ProgressAtMS != 0 {
+		t.Fatal("negative evidence advanced hash progress timestamp")
+	}
+}
 
 func TestVerifiedProgressRevokesReplacedPayload(t *testing.T) {
 	e, tor := setupCompletedLifecycleTorrent(t)

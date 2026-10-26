@@ -1,0 +1,4 @@
+{
+  "verification": {"status":"completed","checked_bytes":4,"skipped_missing_bytes":4,"total_bytes":8,"queued_pieces":0,"active_pieces":0},
+  "file": {"storage_path":"payload/data","presence":"missing","reason":"not_created","verified_bytes":0,"last_known_bytes":0,"checked_bytes":0,"skipped_missing_bytes":8,"verification_total":8,"verification":"completed","direct_read_ready":false,"effective_priority":"normal","read_reason":"incomplete"}
+}

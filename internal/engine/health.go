@@ -311,6 +311,7 @@ func (e *Engine) mapManagedTorrent(mt *ManagedTorrent) *models.Torrent {
 					model.Resume.FreshlyVerifiedBytes += o.FreshlyVerifiedBytes
 				}
 				status.VerifiedBytes, status.CheckedBytes = o.VerifiedBytes, o.CheckedBytes
+				status.SkippedMissingBytes = o.SkippedMissingBytes
 				status.EffectivePriority = observedPriority(o.EffectivePriority)
 				status.Verification = "completed"
 				if o.QueuedPieces > 0 {
@@ -326,6 +327,7 @@ func (e *Engine) mapManagedTorrent(mt *ManagedTorrent) *models.Torrent {
 					status.ReadReason = "incomplete"
 				}
 				verification.CheckedBytes += o.CheckedBytes
+				verification.SkippedMissingBytes += o.SkippedMissingBytes
 				// Piece counts below are collected once from runs, not duplicated
 				// for shared v1 boundaries.
 			}

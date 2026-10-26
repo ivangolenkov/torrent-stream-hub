@@ -21,6 +21,7 @@ export interface FileStatus {
 	last_known_at_ms?: number;
 	last_known_source?: string;
 	checked_bytes?: number;
+	skipped_missing_bytes?: number;
 	verification_total?: number;
   storage_path: string;
   presence: 'unknown' | 'present' | 'missing' | 'unavailable';
@@ -40,6 +41,8 @@ export interface VerificationProgress {
   progress_at_ms?: number;
   attachment?: string; operation?: number; status: string;
   checked_bytes: number; total_bytes: number; queued_pieces: number; active_pieces: number;
+  // Startup negative evidence, not a current file presence/readiness signal.
+  skipped_missing_bytes?: number;
 }
 export interface StorageCommand {
   action: 'plan_move' | 'apply_move' | 'analyze_location' | 'apply_location' | 'retry_storage' | 'cancel_storage' | 'reconcile_storage';

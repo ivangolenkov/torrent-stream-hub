@@ -38,6 +38,13 @@ Torrent получает `storage`: `id`, `revision`, `layout_version`, `root`, 
 
 Файл получает `metadata_path` (полный metainfo storage path, в отличие от совместимого display `path`) и необязательный `status`: `storage_path`, `presence` (unknown/present/missing/unavailable), `reason`, `verified_bytes`, `last_known_bytes`, `last_known_at_ms`, `last_known_source`, `observed_at_ms`, `verification` (unknown/queued/running/completed/failed/cancelled), `checked_bytes`, `verification_total`, `direct_read_ready`, `read_reason`, `effective_priority`. Completed verification означает завершение прохода, а не полную пригодность файла. Готовность чтения — только наблюдение текущего attachment; transfer повторно проверяет gate. False direct-read не запрещает torrent-reader streaming неполного файла.
 
+Дополнение фазы 44: стартовый проход может исключить достоверно отсутствующие
+диапазоны как incomplete без hash attempt. Additive `skipped_missing_bytes` в
+file status и torrent verification описывает такое negative planning evidence
+для ещё не проверявшихся после пропуска pieces, не текущее presence. Счётчик
+не увеличивает checked/verified/downloaded bytes и не разрешает read/upload.
+Завершённая очередь проверки не означает, что все bytes прошли hashing.
+
 Torrent содержит исторические `last_known_bytes/last_known_at_ms/last_known_source`, агрегатный `direct_read_ready` для всех файлов и `verification`: attachment, operation ID явного recheck, status, checked_bytes, total_bytes, queued_pieces, active_pieces. Checked bytes — завершённые попытки hashing, включая несовпавшие pieces; verified bytes — подтверждённый текущий payload. V1 boundary bytes учитываются только в пересечении с файлом, v2 padding не входит в пользовательские totals. Неактивная запись не имеет live verification; её status не выдаёт persisted completion за текущую проверку.
 
 REST/SSE используют единую проекцию. Compact event не включает file catalog. `X-Hub-Details` содержит `record_id/catalog_version/desired_revision/mapping_revision/runtime_attachment`; GUI отсекает ответы прежнего attachment/mapping, а обновление inspection/verification инвалидирует выбранные details. Чтение REST не запускает stat/hash: freshness обновляют background workers и реальные операции открытия.

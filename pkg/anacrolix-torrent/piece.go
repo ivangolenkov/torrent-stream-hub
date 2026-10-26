@@ -69,6 +69,8 @@ type Piece struct {
 	marking bool
 	// The Completion.Ok field cached from the storage layer.
 	storageCompletionOk bool
+	// Negative startup evidence, not a hash or a current presence observation.
+	initialVerificationSkipped bool
 	// Sticks on once set for the first time.
 	storageCompletionHasBeenOk bool
 }
@@ -432,7 +434,14 @@ func (p *Piece) setV2Hash(v2h [32]byte) {
 	oldV2Hash := p.hashV2.Set(v2h)
 	p.t.storageLock.Unlock()
 	if !oldV2Hash.Ok && p.hash == nil {
-		p.t.updatePieceCompletion(p.index)
+		// Installing the first piece layer continues initial admission; it does
+		// not change payload. Preserve known incomplete from the open scan rather
+		// than turning it back into unknown and queuing a missing-file hash.
+		if p.initialVerificationSkipped && p.numVerifies == 0 {
+			p.t.setPieceCompletion(p.index, g.Some(false))
+		} else {
+			p.t.updatePieceCompletion(p.index)
+		}
 		p.t.queueInitialPieceCheck(p.index)
 	}
 }

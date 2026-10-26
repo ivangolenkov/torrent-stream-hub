@@ -33,6 +33,9 @@ func (t *Torrent) verificationPriority(index pieceIndex) int {
 	if t.readerReadaheadPieces().Contains(uint32(index)) {
 		return 2
 	}
+	if t.receivedPiecesForHash.Contains(uint32(index)) {
+		return 2
+	}
 	if !t.cl.config.VerificationBackground && (!t.verificationSelectionSet || t.verificationSelected.Contains(uint32(index))) {
 		return 1
 	}
@@ -70,6 +73,9 @@ func (t *Torrent) hashCandidate(fair bool) (_ g.Option[pieceIndex]) {
 			return p
 		}
 		if p := t.firstQueuedIn(t.readerReadaheadPieces().RB); p.Ok {
+			return p
+		}
+		if p := t.firstQueuedIn(&t.receivedPiecesForHash); p.Ok {
 			return p
 		}
 		if !t.cl.config.VerificationBackground && t.verificationSelectionSet {

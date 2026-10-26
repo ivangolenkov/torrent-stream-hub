@@ -3,8 +3,22 @@ import { mount } from '@vue/test-utils';
 import FileObservation from '../src/components/FileObservation.vue';
 import { selectionLabel, activityLabel, progressLabel } from '../src/progress';
 import type { File, Torrent } from '../src/types';
+import selective from '../../internal/models/testdata/selective-verification.json';
 
 describe('separate file observations', () => {
+  it('labels absent startup bytes as not hashed and never as usable data', () => {
+    const file = { path: 'data', size: 8, status: selective.file } as File;
+    const wrapper = mount(FileObservation, { props: { file } });
+    expect(wrapper.text()).toContain('Skipped at startup (missing piece data), not hashed yet: 100.0%');
+    expect(wrapper.text()).toContain('Usable verified or restored data: 0.0%');
+    expect(wrapper.text()).not.toContain('Ready for file download');
+    const torrent = { metadata_known: true, state: 'Downloading', download_speed: 1,
+      verification: { ...selective.verification } } as Torrent;
+    expect(activityLabel(torrent)).toBe('');
+    torrent.verification!.status = 'running';
+    expect(activityLabel(torrent)).toContain('Verification running: 50.0%');
+    expect(activityLabel(torrent)).toContain('skipped at startup (missing piece data): 50.0% (not hashed)');
+  });
   it('shows current and historical bytes while checking without granting download readiness', () => {
     const file = { path: 'a', metadata_path: 'Original/a', size: 4, downloaded: 0, priority: -1,
       status: { storage_path: 'payload/Readable/a', presence: 'present', verified_bytes: 0, last_known_bytes: 4,

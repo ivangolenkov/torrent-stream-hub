@@ -819,7 +819,7 @@ every open. Neither mode promises protection against malicious local access or
 hardware that falsely acknowledges flush; fast does not detect all bit rot.
 
 Old `piece_completion` rows are disposable hints, **never adopted as trust**. The
-first upgraded open without a valid checkpoint hashes normally; periodic
+first upgraded open without a valid checkpoint hashes existing data normally; periodic
 (60-second dirty owners) and bounded shutdown sealing then create checkpoints.
 Missing/unsupported/oversized checkpoints fall back to ordinary verification,
 not deletion or repair. Storage safety blocks still take precedence. Unsealed
@@ -835,6 +835,28 @@ counter to the second; invalid data contributes to neither. These are cached
 attachment-local observations, not durable authority; `verification.checked_bytes`
 also includes failed checks. GUI explains fallback and provides the existing
 Recheck action. Polling performs no new payload stat/hash/flush.
+
+On opening rooted managed storage, missing files and ranges beyond the actual
+file size are classified as **incomplete**, without queuing pointless startup
+hash attempts. This applies to both modes: absence cannot be hash-verified.
+Existing untrusted bytes (including sparse files) still need hashing; every
+newly downloaded piece must pass its hash before it can be read or uploaded.
+This startup plan is discarded after attachment, never reused to exempt later
+writes or explicit Recheck. Missing previously present data, access/volume faults
+and recovery journals retain their normal safety gates; no automatic repair is
+introduced. Recheck still performs a fresh pass, independent of startup evidence.
+
+Additive `verification.skipped_missing_bytes` and file-status
+`skipped_missing_bytes` report ranges excluded from the initial hash plan that
+have not since had a hash attempt. They are historical planning observations,
+**not current file presence, verified progress or readable bytes**. They do not
+increase `checked_bytes`, restored bytes or downloaded progress. A completed
+verification **queue** does not mean all payload exists or is valid. Expected
+startup absence is logged as one piece-count summary rather than a warning for
+every missing piece.
+Accounting follows whole pieces: at a shared file boundary, present bytes can
+also be excluded because another contributing file is missing/short. The counter
+is therefore not a measurement of the physically absent byte count.
 
 For backups, stop the service and take a consistent snapshot of database/WAL and
 payload together (or use a coordinated read-only snapshot of both). Restoring a

@@ -86,6 +86,16 @@ reason. Polling only samples cached facts and preserves existing snapshot fences
 GUI exposes the distinction and external-writer warning plus the existing Recheck
 menu action. Legacy verified progress describes usable data, not new hash work.
 
+Phase 44: startup negative evidence can mark absent/short piece ranges incomplete
+without hashing them. It is consumed before metadata publication, never persisted
+as completion or reused by later writes/recheck. Existing untrusted bytes still
+need hashing and trusted restore still requires the phase-43 token. Additive
+`verification.skipped_missing_bytes` and file-status `skipped_missing_bytes` are
+cached attachment-local planning observations for pieces not attempted since the
+startup skip, not current physical absence. They never increase checked, restored,
+freshly-verified or downloaded bytes. An idle/completed check queue is not payload
+readiness. MissingFiles, storage workflow, volume and DiskFull gates are unchanged.
+
 In fast mode FileResumeHooks.Restore runs only on a remaining restore candidate,
 after namespace preflight/native initialization but BEFORE library publication.
 The library's tracked closedCtx/open generation is the attachment fence when no

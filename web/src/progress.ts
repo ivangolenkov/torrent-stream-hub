@@ -40,7 +40,8 @@ export function activityLabel(torrent: Torrent): string {
   if (op && !['planned', 'analyzed', 'completed', 'cancelled'].includes(op.stage)) return op.kind === 'move' ? 'Moving files' : 'Checking existing data';
   if (torrent.verification && ['queued', 'running'].includes(torrent.verification.status)) {
     const v = torrent.verification;
-    return `Verification ${v.status}: ${v.total_bytes ? `${fileProgress(v.checked_bytes, v.total_bytes).toFixed(1)}%` : 'empty payload'}; queued pieces: ${v.queued_pieces}`;
+    const skipped = v.skipped_missing_bytes ? `; skipped at startup (missing piece data): ${fileProgress(v.skipped_missing_bytes, v.total_bytes).toFixed(1)}% (not hashed)` : '';
+    return `Verification ${v.status}: ${v.total_bytes ? `${fileProgress(v.checked_bytes, v.total_bytes).toFixed(1)}%` : 'empty payload'}; queued pieces: ${v.queued_pieces}${skipped}`;
   }
   if (torrent.state === 'Queued' && !torrent.selection?.complete && !torrent.selection_complete && torrent.selection?.files !== 0) return 'Waiting for a download slot';
   if (torrent.state === 'Downloading' && torrent.download_speed === 0) return 'No transfer';

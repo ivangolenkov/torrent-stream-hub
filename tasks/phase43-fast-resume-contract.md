@@ -1,6 +1,6 @@
 # Фаза 43 — протокол fast resume, версия 1
 
-Статус: **реализация и macOS/Linux приёмка блоков 1–6 выполнены; native Windows gate открыт**. Producer/scanner/finalizer установлены автоматически; guarded writable restore подключён при backend open. Public constructor читает restart-scoped config с default fast; REST/SSE/GUI различают restore и hashing. Расширенная crash/fault matrix и transaction/fsync/online-seal measurements завершены. Основание: [план](phase43-trusted-fast-resume.md) и [отчёт](implementation/phase43-report.md). По команде пользователя Windows результат ожидается отдельно; фаза целиком пока не закрыта.
+Статус: **фаза 43 завершена; блоки 1–6 и platform gates закрыты**. Producer/scanner/finalizer установлены автоматически; guarded writable restore подключён при backend open. Public constructor читает restart-scoped config с default fast; REST/SSE/GUI различают restore и hashing. Расширенная crash/fault matrix и transaction/fsync/online-seal measurements завершены. Успешный CI, закрывающий ожидавшийся native Windows gate, подтверждён пользователем сообщением «CI прошел». Основание: [план](phase43-trusted-fast-resume.md) и [отчёт](implementation/phase43-report.md).
 
 ## Политика и граница доказательства
 
@@ -308,7 +308,7 @@ Legacy progress/selection остаются долей usable complete pieces с 
 
 ## Приёмка
 
-Блоки 1–2 закрывают policy/durable store/OS lock, блоки 3–4 — installed producer/restore и mutation barriers. Настройка/default/projection блока 5 и расширенные crash/fault tests/measurements блока 6 выполнены. Final macOS root/fork/race/frontend checks и native Linux suites прошли. Открыт **только native Windows platform gate**, исключённый пользователем из последней части работ. Cross-compilation/старое подтверждение фазы 42 не заменяют execution на текущем дереве. Process kill не доказывает power-loss durability, local FS — NAS/SMB/NFS semantics.
+Блоки 1–2 закрывают policy/durable store/OS lock, блоки 3–4 — installed producer/restore и mutation barriers. Настройка/default/projection блока 5 и расширенные crash/fault tests/measurements блока 6 выполнены. Final macOS root/fork/race/frontend checks и native Linux suites прошли локально. Ожидавшийся native Windows platform gate закрыт на основании последующего пользовательского подтверждения успешного CI; cross-compilation/старое подтверждение фазы 42 не использовались вместо этого результата. Process kill по-прежнему не доказывает power-loss durability, local FS — NAS/SMB/NFS semantics.
 
 Финальные crash probes наблюдают existing seal ownership через optional IOEvent
 snapshot/payload-sync/directory-sync before/after, не создавая новый admission

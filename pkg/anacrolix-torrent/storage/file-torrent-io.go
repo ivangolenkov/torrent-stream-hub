@@ -1,9 +1,11 @@
 package storage
 
 import (
+	"context"
 	"errors"
 	"io"
 	"io/fs"
+	"math"
 	"os"
 
 	"github.com/anacrolix/missinggo/v2/panicif"
@@ -49,10 +51,37 @@ func (fst fileTorrentImplIO) readFileAt(file file, b []byte, off int64) (n int, 
 
 // Only returns EOF at the end of the torrent. Premature EOF is ErrUnexpectedEOF.
 func (fst fileTorrentImplIO) ReadAt(b []byte, off int64) (n int, err error) {
+	if fst.fts.readClosed.Load() {
+		return 0, os.ErrClosed
+	}
+	if off < 0 || int64(len(b)) > math.MaxInt64-off {
+		return 0, io.EOF
+	}
+	unlock := fst.fts.lockPayloadRange(off, int64(len(b)), false)
+	defer unlock()
+	if fst.fts.readClosed.Load() {
+		return 0, os.ErrClosed
+	}
+	if fst.fts.resume.hooks != nil && len(b) != 0 {
+		if off < 0 || int64(len(b)) > math.MaxInt64-off || fst.fts.info.PieceLength <= 0 || (off+int64(len(b))-1)/fst.fts.info.PieceLength >= int64(fst.fts.info.NumPieces()) {
+			return 0, io.EOF
+		}
+		for i, end := int(off/fst.fts.info.PieceLength), int((off+int64(len(b))-1)/fst.fts.info.PieceLength)+1; i < end; i++ {
+			if !fst.fts.cachedCompletion(i).Complete {
+				return 0, ErrUnverifiedPayload
+			}
+		}
+	}
 	for i, e := range fst.fts.segmentLocater.LocateIter(
 		segments.Extent{Start: off, Length: int64(len(b))},
 	) {
 		n1, err1 := fst.readFileAt(fst.fts.file(i), b[:e.Length], e.Start)
+		cancelled := errors.Is(err1, context.Canceled) || errors.Is(err1, context.DeadlineExceeded)
+		if !cancelled && ((err1 != nil && err1 != io.EOF) || segments.Int(n1) != e.Length) {
+			if revokeErr := fst.fts.revokeResumeFile(i); revokeErr != nil {
+				return n + n1, errors.Join(err1, revokeErr)
+			}
+		}
 		n += n1
 		b = b[n1:]
 		if segments.Int(n1) == e.Length {
@@ -81,9 +110,29 @@ func (fst fileTorrentImplIO) WriteAt(p []byte, off int64) (n int, err error) {
 		return 0, os.ErrClosed
 	}
 	defer fst.fts.lifecycle.RUnlock()
+	if len(p) != 0 && (off < 0 || int64(len(p)) > math.MaxInt64-off || fst.fts.info.PieceLength <= 0 || (off+int64(len(p))-1)/fst.fts.info.PieceLength >= int64(fst.fts.info.NumPieces())) {
+		return 0, io.ErrShortWrite
+	}
+	unlock := fst.fts.lockPayloadRange(off, int64(len(p)), true)
+	defer unlock()
+	if len(p) != 0 {
+		if err := fst.fts.revokeResume(int(off/fst.fts.info.PieceLength), int((off+int64(len(p))-1)/fst.fts.info.PieceLength)+1); err != nil {
+			return 0, err
+		}
+		fst.fts.freshMu.Lock()
+		for i, end := int(off/fst.fts.info.PieceLength), int((off+int64(len(p))-1)/fst.fts.info.PieceLength)+1; i < end; i++ {
+			fst.fts.forgetPieceLocked(i)
+			delete(fst.fts.hashSnapshot, i)
+		}
+		fst.fts.freshMu.Unlock()
+	}
+	fst.fts.checkpointEpoch.Add(1)
 	for i, e := range fst.fts.segmentLocater.LocateIter(
 		segments.Extent{Start: off, Length: int64(len(p))},
 	) {
+		if err := fst.fts.guardResumeFileWrite(i); err != nil {
+			return n, err
+		}
 		var f fileWriter
 		f, err = fst.fts.openForWrite(fst.fts.file(i))
 		if err != nil {

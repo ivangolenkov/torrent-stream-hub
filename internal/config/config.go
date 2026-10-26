@@ -12,6 +12,8 @@ import (
 )
 
 type Config struct {
+	FastResumeMode             string
+	fastResumeConfigured       bool
 	DeprecatedOptions          []string
 	MetainfoTempDir            string
 	MetainfoAllowlist          string
@@ -102,6 +104,7 @@ func Load() *Config {
 	flag.IntVar(&cfg.TorrentPort, "torrent-port", getEnvAsInt("HUB_TORRENT_PORT", 50007), "BitTorrent protocol port")
 	flag.StringVar(&cfg.DownloadDir, "download-dir", getEnv("HUB_DOWNLOAD_DIR", "/downloads"), "Directory to save downloaded files")
 	flag.StringVar(&cfg.DBPath, "db-path", getEnv("HUB_DB_PATH", "/config/hub.db"), "Path to SQLite database file")
+	flag.StringVar(&cfg.FastResumeMode, "fast-resume-mode", getEnv("HUB_FAST_RESUME_MODE", "fast"), "Restart-scoped resume policy: fast (assumes no external payload writers) or verify (hash on every open)")
 	flag.StringVar(&cfg.LogDir, "log-dir", getEnv("HUB_LOG_DIR", ""), "Log directory (default: logs beside database)")
 	flag.StringVar(&logMaxFile, "log-max-file-bytes", getEnv("HUB_LOG_MAX_FILE_BYTES", "16777216"), "Maximum bytes per log segment")
 	flag.StringVar(&logMaxTotal, "log-max-total-bytes", getEnv("HUB_LOG_MAX_TOTAL_BYTES", "134217728"), "Maximum managed log bytes")
@@ -166,6 +169,12 @@ func Load() *Config {
 	flag.IntVar(&cfg.BTClientRecycleMaxPerHour, "bt-client-recycle-max-per-hour", getEnvAsInt("HUB_BT_CLIENT_RECYCLE_MAX_PER_HOUR", 0), "Deprecated: accepted for compatibility; has no effect")
 
 	flag.Parse()
+	_, cfg.fastResumeConfigured = os.LookupEnv("HUB_FAST_RESUME_MODE")
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == "fast-resume-mode" {
+			cfg.fastResumeConfigured = true
+		}
+	})
 	cfg.DeprecatedOptions = deprecatedOptions(flag.CommandLine, os.LookupEnv)
 	cfg.MaxTemporaryTorrents, cfg.temporaryConfigError = strconv.Atoi(maxTemporary)
 	var retentionErr error
@@ -431,6 +440,9 @@ func getEnvAsBool(key string, fallback bool) bool {
 }
 
 func (cfg *Config) ValidateResources() error {
+	if (cfg.FastResumeMode != "" || cfg.fastResumeConfigured) && cfg.FastResumeMode != "fast" && cfg.FastResumeMode != "verify" {
+		return fmt.Errorf("fast-resume-mode must be fast or verify")
+	}
 	if cfg.MaxActiveStreams <= 0 {
 		return fmt.Errorf("max-streams must be positive")
 	}

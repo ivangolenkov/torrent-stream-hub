@@ -4,11 +4,12 @@ package torrent
 // CheckedBytes includes failed hash attempts; VerifiedBytes does not. A direct
 // open must refresh storage evidence even when DirectReadReady was observed.
 type FileObservation struct {
-	ReaderPieces                int
-	VerifiedBytes, CheckedBytes int64
-	QueuedPieces, ActivePieces  int
-	EffectivePriority           PiecePriority
-	DirectReadReady             bool
+	RestoredBytes, FreshlyVerifiedBytes int64
+	ReaderPieces                        int
+	VerifiedBytes, CheckedBytes         int64
+	QueuedPieces, ActivePieces          int
+	EffectivePriority                   PiecePriority
+	DirectReadReady                     bool
 }
 
 func (t *Torrent) FileObservations() []FileObservation {
@@ -45,6 +46,11 @@ func (t *Torrent) FileObservations() []FileObservation {
 			}
 			if t.pieceComplete(index) && p.storageCompletionOk && !busy && !p.hasDirtyChunks() && !p.hasPendingWrites() {
 				o.VerifiedBytes += n
+				if t.storage != nil && t.storage.CachedRestored != nil && t.storage.CachedRestored(int(index)) {
+					o.RestoredBytes += n
+				} else if p.numVerifies > 0 && (t.storage == nil || t.storage.CachedComplete == nil || t.storage.CachedComplete(int(index))) {
+					o.FreshlyVerifiedBytes += n
+				}
 			}
 			o.EffectivePriority = max(o.EffectivePriority, p.effectivePriority())
 		}

@@ -128,19 +128,30 @@ func TestHTTPAvailableDuringPersistedRestore(t *testing.T) {
 			base := "http://" + listener.Addr().String()
 			request := func(method, path string, want int) {
 				t.Helper()
-				req, _ := http.NewRequest(method, base+path, strings.NewReader(`{}`))
-				req.Header.Set("Origin", "http://lampa.app")
-				resp, err := client.Do(req)
-				if err != nil {
-					t.Fatal(err)
-				}
-				defer resp.Body.Close()
-				body, _ := io.ReadAll(resp.Body)
-				if resp.StatusCode != want || resp.Header.Get("Access-Control-Allow-Origin") != "*" {
-					t.Fatalf("%s %s: status=%d body=%s headers=%v", method, path, resp.StatusCode, body, resp.Header)
-				}
-				if want == http.StatusServiceUnavailable && (resp.Header.Get("Retry-After") != "1" || !strings.Contains(string(body), "restoring persisted torrents")) {
-					t.Fatalf("missing startup response: %s %v", body, resp.Header)
+				deadline := time.Now().Add(time.Second)
+				for {
+					req, _ := http.NewRequest(method, base+path, strings.NewReader(`{}`))
+					req.Header.Set("Origin", "http://lampa.app")
+					resp, err := client.Do(req)
+					if err != nil {
+						t.Fatal(err)
+					}
+					body, _ := io.ReadAll(resp.Body)
+					resp.Body.Close()
+					// Restore readiness does not freeze runtime revisions. The first
+					// snapshot can legitimately conflict while verification attaches;
+					// retry only that documented conflict, never startup 503 or errors.
+					if method == "GET" && path == "/api/v1/torrents" && want == http.StatusOK && resp.StatusCode == http.StatusConflict && strings.Contains(string(body), "torrent snapshot changed during capture") && resp.Header.Get("Access-Control-Allow-Origin") == "*" && time.Now().Before(deadline) {
+						time.Sleep(time.Millisecond)
+						continue
+					}
+					if resp.StatusCode != want || resp.Header.Get("Access-Control-Allow-Origin") != "*" {
+						t.Fatalf("%s %s: status=%d body=%s headers=%v", method, path, resp.StatusCode, body, resp.Header)
+					}
+					if want == http.StatusServiceUnavailable && (resp.Header.Get("Retry-After") != "1" || !strings.Contains(string(body), "restoring persisted torrents")) {
+						t.Fatalf("missing startup response: %s %v", body, resp.Header)
+					}
+					return
 				}
 			}
 			request("GET", "/echo", http.StatusOK)

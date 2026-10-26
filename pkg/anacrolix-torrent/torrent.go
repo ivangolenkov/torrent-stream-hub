@@ -124,9 +124,11 @@ type Torrent struct {
 	// Storage for torrent data.
 	storage *storage.Torrent
 	// Read-locked for using storage, and write-locked for Closing.
-	storageLock      sync.RWMutex
-	storageOpening   chan struct{}
-	hashLayerUpdates int // Pending layer writers get a turn before another hash starts.
+	storageLock            sync.RWMutex
+	storageOpening         chan struct{}
+	hashLayerUpdates       int           // Pending layer writers get a turn before another hash starts.
+	checkpointDone         chan struct{} // Client.lock: quiesce/flush/commit owner, joined by Close.
+	activeCheckpointWrites int           // Client.lock: admitted receiveChunk writes, through completion.
 
 	announceList metainfo.AnnounceList
 
@@ -407,6 +409,11 @@ func (t *Torrent) pieceCompleteUncached(piece pieceIndex) (ret storage.Completio
 		return storage.Completion{Complete: false, Ok: false}
 	}
 	if t.storage.CachedComplete != nil {
+		// A validated file checkpoint is not a substitute for required v2
+		// piece layers. Their normal root validation installs the hash first.
+		if !p.haveHash() {
+			return storage.Completion{}
+		}
 		complete := t.storage.CachedComplete(piece)
 		return storage.Completion{Complete: complete, Ok: complete}
 	}
@@ -1211,6 +1218,10 @@ func (t *Torrent) close(wg *sync.WaitGroup) {
 	if opening := t.storageOpening; opening != nil {
 		wg.Add(1)
 		go func() { defer wg.Done(); <-opening }()
+	}
+	if checkpoint := t.checkpointDone; checkpoint != nil {
+		wg.Add(1)
+		go func() { defer wg.Done(); <-checkpoint }()
 	}
 	for _, f := range t.onClose {
 		f()
@@ -3966,6 +3977,9 @@ func (t *Torrent) getClosedErr() error {
 }
 
 func (t *Torrent) considerStartingHashers() bool {
+	if t.checkpointDone != nil {
+		return false
+	}
 	if t.hashLayerUpdates != 0 {
 		return false
 	}

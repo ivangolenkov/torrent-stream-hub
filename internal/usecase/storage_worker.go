@@ -82,6 +82,11 @@ func (uc *TorrentUseCase) processLocation(parent context.Context, hash string) {
 		uc.locationFailure(m, rec, ErrStorageConflict)
 		return
 	}
+	if err := uc.revokeResumeMutation(parent, hash); err != nil {
+		release()
+		uc.locationFailure(m, rec, err)
+		return
+	}
 	ctx, cancel := context.WithCancelCause(parent)
 	w := &activeLocationWork{hash: hash, id: rec.RecordID, version: rec.Version, cancel: cancel}
 	uc.locationWorkMu.Lock()

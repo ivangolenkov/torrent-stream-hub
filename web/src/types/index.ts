@@ -50,6 +50,7 @@ export interface PeerSummary {
 }
 
 export interface Torrent {
+	resume?: ResumeProgress;
  direct_read_ready?: boolean;
  selection?: SelectionProgress;
  verification?: VerificationProgress;
@@ -109,6 +110,16 @@ export interface Torrent {
   peers: number;
   seeds: number;
   peer_summary: PeerSummary;
+}
+
+export interface ResumeProgress {
+  mode: 'fast' | 'verify';
+  status: 'pending' | 'restored' | 'partial' | 'fallback' | 'disabled';
+  reason: string;
+  checkpoint_generation?: string;
+  checkpoint_at_ms?: number;
+  restored_bytes: number;
+  freshly_verified_bytes: number;
 }
 
 export interface BTTorrentHealth {

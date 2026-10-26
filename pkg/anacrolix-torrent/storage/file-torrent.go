@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -8,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"sync"
+	"sync/atomic"
 
 	"github.com/anacrolix/missinggo/v2"
 	"github.com/anacrolix/missinggo/v2/panicif"
@@ -20,13 +22,19 @@ type fileTorrentImpl struct {
 	// Close is a filesystem-mutation barrier. A hash result may reach storage
 	// after Torrent.Drop; it must not rename payload after application cleanup.
 	lifecycle         sync.RWMutex
+	resume            resumeMutationState
 	closed            bool
+	readClosed        atomic.Bool // reads use payload leases, not the seal mutation gate
+	directory         string
+	checkpointEpoch   atomic.Uint64
+	checkpointSealed  atomic.Uint64
 	closeErr          error
 	freshMu           sync.Mutex
-	fresh             map[int][]os.FileInfo
+	fresh             map[int]pieceEvidence
 	hashSnapshot      map[int][]os.FileInfo
 	signatures        map[int]*verifiedFileSignature
 	statHook          func()
+	checkpointSyncDir func(*os.Root, string) error // nil uses native directory sync
 	info              *metainfo.Info
 	files             []fileExtra
 	metainfoFileInfos []metainfo.FileInfo
@@ -201,8 +209,13 @@ func (fts *fileTorrentImpl) internSignatureLocked(index int, current []os.FileIn
 	return result
 }
 
+type pieceEvidence struct {
+	infos    []os.FileInfo
+	restored bool
+}
+
 func (fts *fileTorrentImpl) forgetPieceLocked(index int) {
-	for _, info := range fts.fresh[index] {
+	for _, info := range fts.fresh[index].infos {
 		if sig, ok := info.(*verifiedFileSignature); ok && sig.valid {
 			sig.complete--
 			sig.published = false
@@ -210,23 +223,25 @@ func (fts *fileTorrentImpl) forgetPieceLocked(index int) {
 	}
 	delete(fts.fresh, index)
 }
-func (fts *fileTorrentImpl) markFreshLocked(index int, signature []os.FileInfo) {
+func (fts *fileTorrentImpl) markFreshLocked(index int, signature []os.FileInfo, restored bool) {
 	old, ok := fts.fresh[index]
-	equal := ok && len(old) == len(signature) && fts.cachedCompletionLocked(index).Complete
+	equal := ok && len(old.infos) == len(signature) && fts.cachedCompletionLocked(index).Complete
 	if equal {
-		for i := range old {
-			if old[i] != signature[i] {
+		for i := range old.infos {
+			if old.infos[i] != signature[i] {
 				equal = false
 				break
 			}
 		}
 	}
 	if equal {
+		old.restored = restored
+		fts.fresh[index] = old
 		delete(fts.hashSnapshot, index)
 		return
 	}
 	fts.forgetPieceLocked(index)
-	fts.fresh[index] = signature
+	fts.fresh[index] = pieceEvidence{infos: signature, restored: restored}
 	for _, info := range signature {
 		if sig, ok := info.(*verifiedFileSignature); ok {
 			sig.complete++
@@ -239,7 +254,7 @@ func (fts *fileTorrentImpl) cachedCompletionLocked(index int) Completion {
 	if !ok {
 		return Completion{}
 	}
-	for _, info := range signature {
+	for _, info := range signature.infos {
 		if sig, ok := info.(*verifiedFileSignature); ok && !sig.valid {
 			return Completion{}
 		}
@@ -247,6 +262,9 @@ func (fts *fileTorrentImpl) cachedCompletionLocked(index int) Completion {
 	return Completion{Ok: true, Complete: true}
 }
 func (fts *fileTorrentImpl) cachedCompletion(index int) Completion {
+	if fts.readClosed.Load() {
+		return Completion{}
+	}
 	fts.freshMu.Lock()
 	defer fts.freshMu.Unlock()
 	return fts.cachedCompletionLocked(index)
@@ -256,6 +274,14 @@ func (fts *fileTorrentImpl) cachedCompletion(index int) Completion {
 // lock). A concurrent internal write changes the captured signature and makes an
 // older stat result inapplicable, rather than invalidating unrelated pieces.
 func (fts *fileTorrentImpl) refreshFile(index int) {
+	if fts.readClosed.Load() {
+		return
+	}
+	fts.files[index].payloadMu.RLock()
+	defer fts.files[index].payloadMu.RUnlock()
+	if fts.readClosed.Load() {
+		return
+	}
 	fts.freshMu.Lock()
 	sig := fts.signatures[index]
 	if sig == nil || !sig.valid {
@@ -276,15 +302,24 @@ func (fts *fileTorrentImpl) refreshFile(index int) {
 	}
 	f.mu.RUnlock()
 	fts.freshMu.Lock()
-	defer fts.freshMu.Unlock()
 	if fts.signatures[index] != sig || !sameSignature(before, sig.FileInfo) {
+		fts.freshMu.Unlock()
 		return
 	}
-	if err != nil || !sameSignature(before, current) {
+	invalid := err != nil || !sameSignature(before, current)
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		invalid = false
+	}
+	if invalid {
+		fts.checkpointEpoch.Add(1)
 		sig.valid = false
 		sig.complete = 0
 		sig.published = false
 	}
+	fts.freshMu.Unlock()
+	if invalid {
+		_ = fts.revokeResumeFile(index)
+	} // live gate remains closed even if durability fails
 }
 func (fts *fileTorrentImpl) refreshRange(begin, end int) {
 	if begin >= end {
@@ -338,6 +373,27 @@ func (fs *fileTorrentImpl) Close() error {
 		return fs.closeErr
 	}
 	fs.closed = true
+	fs.readClosed.Store(true)
+	for i := range fs.files {
+		fs.files[i].payloadMu.Lock()
+	}
+	defer func() {
+		for i := len(fs.files) - 1; i >= 0; i-- {
+			fs.files[i].payloadMu.Unlock()
+		}
+	}()
+	fs.freshMu.Lock()
+	clear(fs.fresh)
+	clear(fs.hashSnapshot)
+	for _, sig := range fs.signatures {
+		sig.valid = false
+		sig.complete = 0
+		sig.published = false
+	}
+	for i := range fs.files {
+		fs.files[i].zeroReady = false
+	}
+	fs.freshMu.Unlock()
 	// Per-torrent backends may retain handles after an individual read/write.
 	// RootFS remains owned by fileClientImpl, not by a torrent's I/O adapter.
 	if closer, ok := fs.io.(io.Closer); ok {

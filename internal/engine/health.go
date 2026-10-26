@@ -275,6 +275,14 @@ func (e *Engine) mapManagedTorrent(mt *ManagedTorrent) *models.Torrent {
 		model.ProgressSource = "verified"
 		model.ProgressObservedAt = observedAt
 		observations := t.FileObservations()
+		resume := t.FileResumeObservation()
+		model.Resume = &models.ResumeProgress{Mode: resume.Mode, Status: resume.Status, Reason: resume.Reason, CheckpointGeneration: resume.Generation, CheckpointAtMS: resume.CheckpointAtMS}
+		if model.Resume.Mode == "" {
+			model.Resume.Mode = e.FastResumeMode()
+		}
+		if model.Resume.Status == "" {
+			model.Resume.Status, model.Resume.Reason = "fallback", "unsupported_storage"
+		}
 		verification := &models.VerificationProgress{Attachment: model.Control.RuntimeAttachment, Status: "completed", TotalBytes: size}
 		if model.Recheck != nil {
 			verification.Operation = model.Recheck.ID
@@ -298,6 +306,10 @@ func (e *Engine) mapManagedTorrent(mt *ManagedTorrent) *models.Torrent {
 			status := &models.FileStatus{Presence: "unknown", Verification: "unknown", EffectivePriority: "none", ReadReason: "verification_required", VerificationTotal: file.Length()}
 			if i < len(observations) {
 				o := observations[i]
+				if !checking && !uncertain {
+					model.Resume.RestoredBytes += o.RestoredBytes
+					model.Resume.FreshlyVerifiedBytes += o.FreshlyVerifiedBytes
+				}
 				status.VerifiedBytes, status.CheckedBytes = o.VerifiedBytes, o.CheckedBytes
 				status.EffectivePriority = observedPriority(o.EffectivePriority)
 				status.Verification = "completed"

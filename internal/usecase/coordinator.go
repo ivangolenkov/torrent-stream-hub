@@ -18,13 +18,15 @@ var errCoordinatorBusy = errors.New("record command is already reserved")
 // eviction and lease protocols keep their separate reservations; independent keys
 // never imply independent access to the same physical root.
 type applicationCoordinator struct {
-	mu      sync.Mutex
-	entries map[string]*commandEntry
-	ctx     context.Context
-	cancel  context.CancelFunc
-	closed  bool
-	refs    int
-	drained chan struct{}
+	mu          sync.Mutex
+	entries     map[string]*commandEntry
+	ctx         context.Context
+	cancel      context.CancelFunc
+	closed      bool
+	refs        int
+	drained     chan struct{}
+	drainClosed bool
+	drainOwner  *coordinatorDrain
 }
 
 type commandEntry struct {
@@ -69,7 +71,8 @@ func (c *applicationCoordinator) unreference(key string, e *commandEntry) {
 	if e.refs == 0 {
 		delete(c.entries, key)
 	}
-	if c.closed && c.refs == 0 {
+	if c.closed && c.refs == 0 && !c.drainClosed {
+		c.drainClosed = true
 		close(c.drained)
 	}
 }
@@ -169,7 +172,8 @@ func (c *applicationCoordinator) close(ctx context.Context) error {
 	if !c.closed {
 		c.closed = true
 		c.cancel()
-		if c.refs == 0 {
+		if c.refs == 0 && !c.drainClosed {
+			c.drainClosed = true
 			close(c.drained)
 		}
 	}
@@ -180,4 +184,113 @@ func (c *applicationCoordinator) close(ctx context.Context) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+}
+
+// coordinatorDrain is a shutdown-only capability on the SAME key registry. It
+// is issued only after normal admission has stopped and all its references have
+// joined. It cannot revive normal commands or be reused across coordinators.
+type coordinatorDrain struct {
+	owner  *applicationCoordinator
+	ctx    context.Context
+	closed bool // owner.mu
+}
+
+func (c *applicationCoordinator) beginDrain(ctx context.Context) (*coordinatorDrain, error) {
+	if err := c.close(ctx); err != nil {
+		return nil, err
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if c.drainOwner != nil {
+		return nil, errCoordinatorBusy
+	}
+	d := &coordinatorDrain{owner: c, ctx: ctx}
+	c.drainOwner = d
+	return d, nil
+}
+
+func (d *coordinatorDrain) acquire(ctx context.Context, key string) (*commandReservation, error) {
+	c := d.owner
+	c.mu.Lock()
+	if err := ctx.Err(); err != nil {
+		c.mu.Unlock()
+		return nil, err
+	}
+	if err := d.ctx.Err(); err != nil {
+		c.mu.Unlock()
+		return nil, err
+	}
+	if d.closed || c.drainOwner != d {
+		c.mu.Unlock()
+		return nil, context.Canceled
+	}
+	e := c.entries[key]
+	if e == nil {
+		e = &commandEntry{permit: make(chan struct{}, 1)}
+		e.permit <- struct{}{}
+		c.entries[key] = e
+	}
+	e.refs++
+	c.refs++
+	c.mu.Unlock()
+	select {
+	case <-ctx.Done():
+		c.unreference(key, e)
+		return nil, ctx.Err()
+	case <-d.ctx.Done():
+		c.unreference(key, e)
+		return nil, d.ctx.Err()
+	case <-e.permit:
+	}
+	c.mu.Lock()
+	valid := !d.closed && c.drainOwner == d && ctx.Err() == nil && d.ctx.Err() == nil
+	c.mu.Unlock()
+	if !valid {
+		e.permit <- struct{}{}
+		c.unreference(key, e)
+		return nil, context.Canceled
+	}
+	return &commandReservation{owner: c, key: key, entry: e}, nil
+}
+
+func (d *coordinatorDrain) acquireKeys(ctx context.Context, keys ...string) (func(), error) {
+	keys = append([]string(nil), keys...)
+	sort.Strings(keys)
+	var reservations []*commandReservation
+	var once sync.Once
+	release := func() {
+		once.Do(func() {
+			for i := len(reservations) - 1; i >= 0; i-- {
+				reservations[i].release()
+			}
+		})
+	}
+	for i, key := range keys {
+		if i > 0 && keys[i-1] == key {
+			continue
+		}
+		r, err := d.acquire(ctx, key)
+		if err != nil {
+			release()
+			return nil, err
+		}
+		reservations = append(reservations, r)
+	}
+	return release, nil
+}
+
+// finish is not an operation join. The finalizer must first join the worker and
+// release all its reservations; finish then destroys admission permanently.
+func (d *coordinatorDrain) finish() error {
+	c := d.owner
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.refs != 0 {
+		return errCoordinatorBusy
+	}
+	d.closed = true
+	return nil
 }

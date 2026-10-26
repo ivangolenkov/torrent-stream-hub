@@ -1,5 +1,143 @@
 # Application state and coordination contract
 
+## Phase 43 resume metadata (blocks 1–2)
+
+`resume_owners` retains record/mapping/epoch/generation fencing independently of
+disposable `piece_completion` hints. `resume_checkpoints` stores one bounded binary
+snapshot and durable revocations, covered by an integrity digest. Whole-owner
+invalidation keeps an untrusted tombstone; record deletion/re-add, alias mapping
+changes and deletion intent cannot inherit old capabilities. Capture/load never
+grant payload readiness, consume a checkpoint just by opening it, or Resume a
+paused torrent. An active storage journal prevents checkpoint publication/load.
+
+CommitResume requires the caller's quiesced, flushed snapshot and exact CAS token;
+RevokeResume success must precede its corresponding payload mutation. Core and
+application mutation barriers are installed. Strict current-open hashing applies
+when explicitly configured `verify`. The default is now `fast`; the
+periodic/shutdown producer and guarded trusted import are installed.
+Do not enable fast restore from these tables alone. See the phase 43 contract.
+
+## Phase 43 producer/adapter and shutdown drain (block 3)
+
+`SealResume` binds a canonical immutable ResumeSource to its mapping/record, takes
+the durable CAS fence before capture, then commits only inside the library's
+post-flush callback after attachment authorization. `RestoreResume` subtracts
+durable revocations and repeats both attachment and durable token authorization
+through the native one-use restore protocol. No SQL transaction spans FS I/O.
+Backend writable import requires per-open durable mutation hooks. Evidence-driven
+revocation can advance the epoch during prepare; the adapter reloads at most once
+to preserve independent valid files, never to ignore a failed durability barrier.
+
+`applicationResumeProducer` re-resolves an owner after acquiring the existing
+sorted hash/storage/root reservations, retaining them through failed capture as
+well as successful publication. NewTorrentUseCase installs the worker/scanner and
+transfers shutdown ownership to Engine's single finalizer slot. Rejected slot
+registration joins only the new worker, without closing the existing coordinator.
+If scanner admission races Close after ownership transfer, Engine still owns the
+worker join; a constructor error does not release the instance lock or SQLite.
+
+`productionResumeSource` supplies the concrete attachment-scoped capability:
+it binds the runtime pointer, attachment/intent version and applied revision,
+canonical mapping/record, inventory session and enrolled volume token. Authorize
+rechecks read-only repository admission (including aliases/journals/deletion),
+durable/runtime safety and DiskFull, inventory and rooted volume evidence. It
+does not acquire command keys or call back into the torrent library. Paused
+intent and orderly runtime cancellation alone are not reasons to reject a seal;
+the independent job context and retained drain reservations still apply.
+
+`ResumeOwnersAfter` supplies a distinct, ordered page of at most 64 owner IDs.
+`scanResumeDirty` samples cached backend revisions only, without reading payload,
+probing filesystem evidence, decoding checkpoints or writing safety metadata.
+Queue rejection does not acknowledge a revision. The one-second scanner loop is
+installed by the constructor; periodic worker scheduling remains 60 seconds.
+Shutdown closes normal scan admission, then performs a final paginated scan using
+at most one second of the independent ten-second drain budget, stopping on queue
+saturation. Scan failure/timeout is not a failed durability barrier and does not
+discard work already queued. Existing writes retain their native leases and seal
+still joins them; a final scan is best-effort scheduling, never trust authority.
+
+Coordinator `beginDrain` closes ordinary admission/cancels waiters and joins all
+normal references before issuing a single private shutdown capability on the
+same key registry. Normal commands never use this capability, even with a fresh
+context. Drain acquisition remains ordered/cancelable; `finish` rejects unjoined
+references and permanently retires the capability. No second mutation lock
+registry exists. A closed ordinary drained signal is not the final worker join.
+
+On producer Shutdown the worker receives its independent budget after the bounded
+final scan, concurrently with beginDrain. New drain callbacks wait for the capability without retaining
+command references. Wait joins worker and ownership-transition tasks, then retires
+the capability. Deadline cannot release a blocked callback's reservations.
+Publication and validated trusted import are enabled by default. The explicit
+restart-scoped Go constructor NewTorrentUseCaseWithResumeMode accepts fast/verify;
+the public constructor reads Engine's validated configuration (empty Go Config
+means default fast). HUB_FAST_RESUME_MODE / --fast-resume-mode is restart-scoped;
+unknown or explicitly empty CLI/ENV values fail startup, never silently opt in.
+
+`resume` is additive attachment-local diagnosis in REST/full/compact SSE. Its
+open outcome, reason and restored checkpoint generation/time are immutable after
+backend publication, not the latest periodic seal. It is not saved in torrent
+observations. Disjoint current restored/freshly-verified counters come from native
+per-piece evidence source tags and existing file extents; no extra bitmap is
+maintained. A fresh successful hash replaces that piece's restored source; lost
+evidence withdraws counters. Restore does not increment checked bytes or invent a
+recheck operation. An unattached/stale record cannot contribute these facts: its
+diagnosis is pending with zero bytes, the configured mode and a storage-blocked
+reason. Polling only samples cached facts and preserves existing snapshot fences.
+GUI exposes the distinction and external-writer warning plus the existing Recheck
+menu action. Legacy verified progress describes usable data, not new hash work.
+
+In fast mode FileResumeHooks.Restore runs only on a remaining restore candidate,
+after namespace preflight/native initialization but BEFORE library publication.
+The library's tracked closedCtx/open generation is the attachment fence when no
+managed runtime has been registered yet: Drop/Close cancels and joins the entire
+open and rechecks closed state before attachment. It is not replaced by a hash
+lookup. If a managed magnet runtime already exists, its exact pointer/fence and
+live safety blocks are also checked. Existing namespace command reservations and
+Drop joins plus atomic record/mapping/journal epoch fencing remain mandatory.
+
+The open source binds current intent version, canonical cached metainfo, mapping,
+inventory and volume/safety gates. Missing/oversized/invalid metadata or failed
+prepare/import requires durable whole-owner invalidation before ordinary verify;
+failed invalidation rejects the open. It never disables VerifyOnOpen. A candidate
+does not create missing zero files, including fallback. Namespace import clears
+candidate status so a later callback cannot resurrect its prior trust. Failed
+restore callbacks close the backend and withdraw even partially imported state.
+
+FileCheckpointMetainfo materializes only binding metadata, not tracker/webseed
+lists, and bounds layers before allocation. Open metadata decoding caps file and
+declared string sizes. Both application paths conservatively reserve
+pieces*256 + files*2048 + bitmapBytes*8 + metadataBytes*4 <= 32 MiB, using all pieces
+rather than only trusted ones. Metadata is capped at 4 MiB; exceeding this tighter
+production envelope falls back/skips seal, never truncates a candidate.
+
+The block-4 hooks below are prerequisites, not consequences of this adapter's
+existence; configuration/API/GUI changes remain a separate block.
+
+## Phase 43 application mutation coverage (block 4)
+
+InvalidateResumeMutation is a durable untrust-only operation accepting an active
+journal/deletion intent while still fencing exact current record and mapping.
+It advances even an invalidated head, since a late seal may have captured it.
+The existing sorted command/storage-mutation reservations remain mandatory.
+
+Explicit recheck, expected-missing-file repair, volume reconcile, legacy apply,
+migration and move/locate worker admission invoke the barrier before effects.
+Manual and FIFO deletion share deletePayloadLocked; deletion intent and record/
+mapping changes also have atomic SQLite fencing. Migration 0021 revokes on active
+recovery journal insertion/update and on mapping transition into workflow state.
+Thus clearing a finished journal cannot resurrect a pre-operation checkpoint.
+
+Per-open hooks resolve one canonical owner across aliases; split alias layouts
+are rejected. The initial new-torrent open may precede its first intent commit:
+only an exact mapping with no record owner and no live checkpoint can cross that
+untrusted boundary. Its late safety callback binds once, and Drop joins the old
+backend before re-add; stale record/mapping callbacks cannot authorize new data.
+
+Selection and Pause/Resume without repair do not change piece validity or revoke
+independent checkpoint pieces. Move/locate/reconcile never transfer trust by
+fingerprint. All pre-existing journal/volume/ownership/DiskFull/transfer gates
+continue to veto operations regardless of completion or checkpoint metadata.
+
 ## Phase 42 locations, inventory and files
 
 `torrent_storage` owns placement: layout 0 shared legacy, 1 isolated hash, 2 readable

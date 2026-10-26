@@ -48,6 +48,7 @@ func ValidFilePriority(priority FilePriority) bool {
 
 // Torrent defines the core properties and state of a single torrent
 type Torrent struct {
+	Resume          *ResumeProgress       `json:"resume,omitempty"`
 	DirectReadReady bool                  `json:"direct_read_ready"`
 	Selection       *SelectionProgress    `json:"selection,omitempty"`
 	Verification    *VerificationProgress `json:"verification,omitempty"`
@@ -100,6 +101,17 @@ type Torrent struct {
 	PeerSummary   PeerSummary `json:"peer_summary"`
 
 	SourceURI string `json:"-"`
+}
+
+// ResumeProgress is attachment-local cached diagnosis, never durable authority.
+type ResumeProgress struct {
+	Mode                 string `json:"mode"`
+	Status               string `json:"status"`
+	Reason               string `json:"reason"`
+	CheckpointGeneration string `json:"checkpoint_generation,omitempty"`
+	CheckpointAtMS       int64  `json:"checkpoint_at_ms,omitempty"`
+	RestoredBytes        int64  `json:"restored_bytes"`
+	FreshlyVerifiedBytes int64  `json:"freshly_verified_bytes"`
 }
 
 type RecheckOperation struct {

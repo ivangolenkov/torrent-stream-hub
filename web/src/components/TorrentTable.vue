@@ -9,6 +9,7 @@ import type { Torrent } from '../types';
 import ConfirmDialog from './ConfirmDialog.vue';
 import TemporaryTorrentControl from './TemporaryTorrentControl.vue';
 import StorageRecoveryPanel from './StorageRecoveryPanel.vue';
+import ResumeObservation from './ResumeObservation.vue';
 
 const store = useTorrentStore();
 const emit = defineEmits(['add-torrent']);
@@ -220,6 +221,7 @@ const confirmDelete = async () => {
               </div>
               <TemporaryTorrentControl :torrent="t" />
               <StorageRecoveryPanel :torrent="t" />
+              <ResumeObservation :torrent="t" />
               <div v-if="store.actionErrors[t.hash]" role="alert" class="text-xs text-red-700">{{ store.actionErrors[t.hash] }}</div>
               <div v-if="t.recheck" class="text-xs text-amber-700">Recheck: {{ t.recheck.status }} {{ t.recheck.error }}</div>
 							<div v-if="t.activity?.streaming" class="text-xs text-blue-700">Streaming</div>
@@ -331,6 +333,7 @@ const confirmDelete = async () => {
           <!-- Status tag + Size + Priority -->
           <TemporaryTorrentControl :torrent="t" />
           <StorageRecoveryPanel :torrent="t" />
+          <ResumeObservation :torrent="t" />
           <div v-if="store.actionErrors[t.hash]" role="alert" class="text-xs text-red-700">{{ store.actionErrors[t.hash] }}</div>
           <div v-if="t.recheck" class="text-xs text-amber-700">Recheck: {{ t.recheck.status }} {{ t.recheck.error }}</div>
 					<div v-if="t.activity?.streaming" class="text-xs text-blue-700">Streaming</div>

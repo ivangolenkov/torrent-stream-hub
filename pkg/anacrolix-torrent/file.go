@@ -13,14 +13,15 @@ import (
 
 // Provides access to regions of torrent data that correspond to its files.
 type File struct {
-	t           *Torrent
-	path        string
-	offset      int64
-	length      int64
-	fi          metainfo.FileInfo
-	displayPath string
-	prio        PiecePriority
-	piecesRoot  g.Option[infohash_v2.T]
+	t            *Torrent
+	path         string
+	offset       int64
+	length       int64
+	fi           metainfo.FileInfo
+	storageIndex int
+	displayPath  string
+	prio         PiecePriority
+	piecesRoot   g.Option[infohash_v2.T]
 }
 
 func (f *File) String() string {
@@ -255,7 +256,12 @@ func (f *File) ReadyForDirectRead() bool {
 		return false
 	}
 	begin, end := f.BeginPieceIndex(), f.EndPieceIndex()
+	backend := f.t.storage
+	empty := f.length == 0
 	f.t.cl.rUnlock()
+	if empty && backend != nil && backend.RefreshEmptyFile != nil {
+		backend.RefreshEmptyFile(f.storageIndex)
+	}
 	f.t.refreshStorageCompletionRange(begin, end)
 	return f.CachedReadyForDirectRead()
 }
@@ -291,6 +297,9 @@ func (f *File) cachedReadyForDirectReadLocked() bool {
 		return false
 	}
 	if f.length == 0 {
+		if f.t.storage != nil && f.t.storage.CachedEmptyFile != nil {
+			return f.t.storage.CachedEmptyFile(f.storageIndex)
+		}
 		return true
 	}
 

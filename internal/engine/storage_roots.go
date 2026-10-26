@@ -1,11 +1,29 @@
 package engine
 
 import (
+	"context"
 	"fmt"
 	"github.com/anacrolix/torrent/metainfo"
+	"github.com/anacrolix/torrent/storage"
 	"path/filepath"
 	"torrent-stream-hub/internal/payload"
 )
+
+func (e *Engine) SetResumeMutationFactory(factory storage.FileResumeFactory) {
+	e.storageRootMu.Lock()
+	e.storageResumeFactory = factory
+	e.storageRootMu.Unlock()
+}
+
+func (e *Engine) resumeMutationHooks(ctx context.Context, info *metainfo.Info, hash metainfo.Hash) (*storage.FileResumeHooks, error) {
+	e.storageRootMu.RLock()
+	factory := e.storageResumeFactory
+	e.storageRootMu.RUnlock()
+	if factory == nil {
+		return nil, nil
+	}
+	return factory(ctx, info, hash)
+}
 
 func (e *Engine) SetStorageIOGuard(guard func(string) error) {
 	e.storageRootMu.Lock()

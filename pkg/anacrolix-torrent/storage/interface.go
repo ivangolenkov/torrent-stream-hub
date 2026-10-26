@@ -26,6 +26,8 @@ type TorrentCapacity *func() (cap int64, capped bool)
 
 // Data storage bound to a torrent.
 type TorrentImpl struct {
+	CachedRestored    func(int) bool           // I/O-free source classification for current readiness
+	ResumeObservation func() ResumeObservation // immutable open outcome
 	// v2 infos might not have the piece hash available even if we have the info. The
 	// metainfo.Piece.Hash method was removed to enforce this.
 	Piece func(p metainfo.Piece) PieceImpl
@@ -45,6 +47,18 @@ type TorrentImpl struct {
 	// outside the library lock before byte delivery/readiness decisions.
 	CachedComplete func(piece int) bool
 	RefreshFresh   func(begin, end int)
+	// Checkpoint callbacks run outside Client.lock and must not reenter it.
+	WithCheckpoint    func(context.Context, []byte, func(FileCheckpoint) error) error
+	PrepareRestore    func(context.Context, FileCheckpoint, func(context.Context) error) (*RestoreToken, error)
+	RestoreCheckpoint func(context.Context, *RestoreToken) error
+	// RevokeCheckpoint closes live freshness and durably revokes persisted trust
+	// before a known-invalid hash/layer transition. It is not a completion hint.
+	RevokeCheckpoint func(begin, end int) error
+	RefreshEmptyFile func(index int)
+	CachedEmptyFile  func(index int) bool
+	// CheckpointState is cached scheduling metadata, callable under Client.lock.
+	// It must not do I/O, block on mutation admission or grant payload readiness.
+	CheckpointState func() (revision uint64, dirty bool)
 }
 
 // Interacts with torrent piece data. Optional interfaces to implement include://

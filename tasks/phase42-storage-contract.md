@@ -61,8 +61,19 @@ Reconcile также разрешает enrollment для interrupted deletion/r
 
 ## Следующее отдельное решение: trusted fast resume
 
+План следующей фазы: [Фаза 43 — Trusted fast resume](phase43-trusted-fast-resume.md). Это план, не реализованная возможность; до отдельной реализации действуют гарантии ниже.
+
 В этой фазе persistent completion остаётся disposable hint. Все чтение/upload требуют проверки текущего открытия. Измерения показывают пользу приоритета reader без доверия старым bytes; это не отменяет стоимости полного прохода.
 
 Для fast resume понадобится отдельный протокол: checkpoint metainfo/storage/record/mapping generations и piece set; durable dirty/invalidation **до** новых writes, truncate, replacement и move; flush payload **до** durable completion; checkpoint только после завершения всех writers. Crash, dirty shutdown, несовпадение generation/volume/размера/identity или незавершённый journal должны отменять доверие. Нужны barriers на каждом порядке FS/SQL commit и лимиты checkpoint/restore памяти. WAL commit не заменяет payload fsync.
 
 Обычные mtime/size/inode/volume marker не доказывают отсутствие внешней same-size правки, восстановленных timestamps или клонирования тома. Следующее решение должно явно выбрать доверенную модель внешнего доступа, filesystem change journal/immutable ownership либо повторный hash. Sampling не доказывает целостность непрочитанных pieces. До этого решения никаких shortcuts в readiness нет.
+# Phase 43 policy update
+
+The historical phase 42 verified-only guarantee below is retained as history and
+as the explicit `HUB_FAST_RESUME_MODE=verify` policy. Phase 43 defaults to `fast`:
+separately validated durable checkpoints may grant attachment readiness without
+fresh hashing. Disposable completion hints never do. This is a weaker external
+writer/bit-rot assumption, not equivalent proof. See
+[phase 43 contract](phase43-fast-resume-contract.md) and README for upgrade,
+recheck, backup and strict-mode guidance.

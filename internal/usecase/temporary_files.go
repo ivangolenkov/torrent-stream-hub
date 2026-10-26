@@ -157,6 +157,9 @@ func (uc *TorrentUseCase) deletePayloadLocked(t *models.Torrent) (retErr error) 
 	} else if m != nil && (m.State == "moving" || m.Manifest != "") {
 		return ErrStorageConflict
 	}
+	if err := uc.revokeResumeMutation(uc.engine.Context(), hash); err != nil {
+		return err
+	}
 	paths, pending, err := uc.repo.CleanupPaths(hash)
 	if err != nil {
 		return err

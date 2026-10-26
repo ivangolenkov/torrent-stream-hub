@@ -1,5 +1,118 @@
 # Engine concurrency contract
 
+## Phase 43 checkpoint foundations (blocks 1–2)
+
+Engine.New acquires the rooted persistent `.tsh-instance.lock` before creating
+the torrent client/storage. Close releases it only after task joins and backend
+close; failed client initialization releases it too. A second cooperating instance
+cannot acquire the same file through a root alias. Never unlink the lock file.
+This is local-filesystem instance ownership, not exclusion of external writers.
+
+Resume repository calls are not library callbacks. They acquire one of two global
+bounded payload working sets BEFORE a SQL connection/transaction. WAL read snapshots
+copy bounded serialized state, commit, then decode. Safety writes verify FULL/WAL
+on their own connection and use BEGIN IMMEDIATE plus record/mapping/generation/epoch
+CAS. Revocation and its integrity digest commit atomically; late seal cannot clear
+a newer epoch. No filesystem operations occur inside those SQL transactions.
+
+Normal production sessions now default to fast mode; HUB_FAST_RESUME_MODE=verify
+retains strict checking on every open. Mode changes require restart. The use case
+installs the periodic/shutdown producer and mutation hooks. The explicit Go mode
+constructor also enables guarded writable restore with
+those hooks and the validated attachment-scoped protocol. VerifyOnOpen is never
+disabled. Backend-open Restore runs inside the library's tracked open generation,
+before publication; Drop/Close cancels/joins it and a stale result cannot attach.
+
+Resume diagnosis belongs to the backend open, not a mutable hash-keyed registry.
+The factory/restore callback fills scalar outcome facts before publication and
+never mutates them afterwards. Current byte sources are tagged in existing native
+piece evidence under freshMu; the existing library/client snapshot read path
+samples these cached facts without SQL/FS I/O or an additional piece bitmap.
+Successful fresh hashing replaces the restored source; counters do not overlap.
+
+Checkpoint IOEvent boundaries (snapshot, per-payload sync and per-directory sync,
+before/after) are optional observation only. They run inside the already-owned
+seal operation, perform no additional stat/hash/SQL, and grant no authority.
+Observers must not reenter storage/library or acquire command keys. An after
+event means the platform helper returned successfully; only OS tracing establishes
+actual syscall counts for that platform. Crash tests deliberately stop observers
+to kill the subprocess at these protocol boundaries, never release a live fence.
+
+`Torrent.FileCheckpointState` samples atomic cached backend revisions under the
+library read lock, without stat/hash/flush/SQL. A successful seal acknowledges
+only its captured revision; evidence withdrawal during publish stays dirty.
+Successful restore acknowledges its own imported revision, not a new download.
+Read-side evidence withdrawals advance the revision under freshMu. Restore
+rechecks its token epoch under that same lock immediately before atomic import,
+after rooted I/O and owner callbacks. Runtime context cancellation is not file
+corruption: cancelled reads/probes preserve prior evidence and zero-file proof.
+
+## Phase 43 mutation barriers (block 4)
+
+The main rooted file backend obtains FileResumeHooks once per open, outside
+Client.lock. Hooks bind exact record/storage/mapping identity; legacy completion
+hints grant nothing. Default verify opens invalidate prior checkpoints before
+verification. This untrust operation accepts active recovery journals, unlike
+checkpoint admission: an explicit verified recovery must not bypass its journal,
+but must still be able to open storage for ordinary hashing.
+
+Backend lifecycle remains the mutation/seal fence. resume.mu only coalesces the
+persisted bitmap and its durable callback; it is not another application command
+registry. New/untrusted chunks allocate no revoke mask and do no safety SQL.
+After a successful seal/restore, overwriting or rejecting a persisted piece must
+commit revoke before the effect. An uncertain publish retains the union of old
+and possibly committed masks. A discarded generation clears the pending cache.
+
+File payload leases cover actual syscalls: writes take exclusive leases for the
+contributing files in offset order, and reads/hash reads take shared leases.
+Revoke closes freshness before a write; normal ReadAt checks freshness AFTER its
+lease is acquired, closing the available-to-read/overwrite race. Hash WriteTo is
+the verification path and may read unverified data. Missing/truncated/replaced
+files revoke their whole contributing piece set before create/extension.
+
+Reads do NOT take the exclusive seal admission gate, so publish does not stop
+existing read-only streams. Close atomically closes read admission, joins file
+leases (including evidence refresh + durable SQL callback), then clears freshness
+and closes backend handles. A closed attachment cannot read a reused root.
+Namespace commands still use the existing application reservations and Drop/
+transfer joins; file leases do not replace ownership or protect external writers.
+
+Known v2 hash replacement revokes outside Client.lock while counted as layer
+work, then revalidates backend pointer/hash/closed state before applying it. Drop
+joins through storageLock, and Client.Close joins the counted task. A failed revoke
+does not apply the new hash and cannot leave known-invalid live readiness.
+
+Empty-file readiness in the rooted verified backend requires cached rooted-open
+proof, refreshed outside Client.lock on real readiness checks, never on polling.
+Restore candidates do not manufacture missing empty files. Checkpoint flush alone
+uses its independent job context, not the cancelled runtime I/O context; ordinary
+writers remain cancelled during shutdown. Issued syscalls retain their leases.
+
+## Phase 43 seal worker lifetime (partial block 3)
+
+`RegisterStorageFinalizer` transfers exactly one checkpoint worker's shutdown
+ownership, serialized with BeginShutdown by storageTaskMu. Rejection transfers
+nothing; the caller stops/joins its worker. No registration is accepted after
+runtime cancellation. This slot does not authorize storage access or SQL seal.
+
+Close cancels ordinary admission/work and quiesces managed state/streams, then
+requests the registered finalizer's Shutdown with an independent 10-second drain
+context outside engine locks, concurrently with engine task joins. Requesting stop
+before joins is essential: coordinator cleanup can retain a reference until an
+active seal responds to cancellation. After joining ordinary tasks and the
+Shutdown call, Close always calls Wait, even after drain failure/deadline. Only
+then does it close the torrent client/backend and release the instance lock.
+An uninterruptible callback therefore retains ownership rather than being treated
+as joined on timeout. Do not create a service task waiting for finalizer.Done:
+service tasks may depend on a stop request, but must not depend on finalizer.Wait.
+
+SealWorker uses one goroutine, up to 64 coalesced owners including the active one,
+and a 60-second periodic tick. Saturation leaves producer dirty state pending; it
+is never a durable revocation queue. Neither worker registration nor its fresh
+shutdown context bypasses the cancelled application coordinator. Production
+adapter/drain ownership still needs integration before checkpoints are generated
+or trusted by normal sessions; no worker is installed by default yet.
+
 ## Phase 42 verification and storage open
 
 Main (two slots, one per torrent) and offline (one slot) clients share one

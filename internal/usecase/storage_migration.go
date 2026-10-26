@@ -210,6 +210,10 @@ func (uc *TorrentUseCase) migrateStorage(ctx context.Context, t *models.Torrent)
 		release()
 		return nil
 	}
+	if err := uc.revokeResumeMutation(ctx, t.Hash); err != nil {
+		release()
+		return err
+	}
 	stopProgress := uc.startStorageProgress(t.Hash, recordID, operationVersion, models.StorageMigrationActive)
 	defer stopProgress()
 	ctx = context.WithValue(ctx, migrationProgressKey{}, func(n int64) { uc.storageBytes(t.Hash, n) })

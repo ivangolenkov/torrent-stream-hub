@@ -1,0 +1,9 @@
+{
+  "mode": "fast",
+  "status": "partial",
+  "reason": "pieces_revoked",
+  "checkpoint_generation": "9007199254740993",
+  "checkpoint_at_ms": 1793040000000,
+  "restored_bytes": 16384,
+  "freshly_verified_bytes": 8192
+}

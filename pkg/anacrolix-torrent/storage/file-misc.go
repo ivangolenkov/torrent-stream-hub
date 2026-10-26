@@ -87,10 +87,13 @@ type fileExtra struct {
 	index int
 	// This protects high level OS file state like partial file name, permission mod, renaming etc.
 	mu sync.RWMutex
+	// Payload leases span actual read/write syscalls, not just descriptor open.
+	payloadMu sync.RWMutex
 	// The safe, OS-local file path.
 	safeOsPath string
 	// Utility value to help the race detector find issues for us.
-	race byte
+	race      byte
+	zeroReady bool // freshMu; rooted proof for empty-file readiness
 }
 
 func (f *fileExtra) partFilePath() string {

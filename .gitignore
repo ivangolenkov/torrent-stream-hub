@@ -19,6 +19,7 @@ web/*.local
 web/.npm
 
 # Application specific data
+/scripts/__pycache__/
 /downloads/
 /config/
 hub.db

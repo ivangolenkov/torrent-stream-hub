@@ -80,12 +80,27 @@ func (uc *TorrentUseCase) sameIdentities(ids map[string]string) (bool, error) {
 }
 
 func (uc *TorrentUseCase) lockRecordsForIdentities(ctx context.Context, identities map[string]string, hashes ...string) (func(), error) {
+	return uc.lockRecordsWithAcquirer(ctx, uc.coordinator.acquireKeys, identities, hashes...)
+}
+
+func (uc *TorrentUseCase) lockRecordsForDrain(ctx context.Context, drain *coordinatorDrain, hashes ...string) (func(), error) {
+	if drain == nil || drain.owner != uc.coordinator {
+		return nil, context.Canceled
+	}
+	identities, err := uc.recordIdentities(hashes...)
+	if err != nil {
+		return nil, err
+	}
+	return uc.lockRecordsWithAcquirer(ctx, drain.acquireKeys, identities, hashes...)
+}
+
+func (uc *TorrentUseCase) lockRecordsWithAcquirer(ctx context.Context, acquire func(context.Context, ...string) (func(), error), identities map[string]string, hashes ...string) (func(), error) {
 	for attempt := 0; attempt < 2; attempt++ {
 		keys, err := uc.commandKeys(hashes...)
 		if err != nil {
 			return nil, err
 		}
-		release, err := uc.coordinator.acquireKeys(ctx, keys...)
+		release, err := acquire(ctx, keys...)
 		if err != nil {
 			return nil, err
 		}

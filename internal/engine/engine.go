@@ -39,6 +39,7 @@ type Engine struct {
 	storageIOObserver func(operation, path string, bytes int64)
 	client            *torrent.Client
 	storage           storage.ClientImplCloser
+	instanceLock      *payload.InstanceLock
 	cfg               *config.Config
 
 	ctx                   context.Context
@@ -46,6 +47,7 @@ type Engine struct {
 	wg                    sync.WaitGroup
 	closeOnce             sync.Once
 	storageTaskMu         sync.Mutex
+	storageFinalizer      StorageFinalizer // storageTaskMu; one checkpoint worker
 	httpTransfers         int
 	taskCounts            map[string]int
 	eventsMu              sync.Mutex
@@ -55,6 +57,7 @@ type Engine struct {
 	storageRootResolver   func(string) (string, error)
 	storageLayoutResolver func(string, *metainfo.Info) (payload.Layout, error)
 	storageIOGuard        func(string) error
+	storageResumeFactory  storage.FileResumeFactory
 	storageAliasRegistrar func(string, string) error
 
 	mu                      sync.RWMutex
@@ -223,9 +226,19 @@ func New(cfg *config.Config, options ...Option) (*Engine, error) {
 	for _, option := range options {
 		option(eng)
 	}
+	instanceLock, err := payload.LockInstance(cfg.DownloadDir)
+	if err != nil {
+		cancel()
+		if eng.pieceCompletion != nil {
+			_ = eng.pieceCompletion.Close()
+		}
+		return nil, fmt.Errorf("failed to acquire download root: %w", err)
+	}
+	eng.instanceLock = instanceLock
 	client, torrentStorage, err := eng.newTorrentClient()
 	if err != nil {
 		cancel()
+		_ = instanceLock.Close()
 		return nil, fmt.Errorf("failed to create torrent client: %w", err)
 	}
 	eng.client = client
@@ -317,6 +330,14 @@ func (e *Engine) ConfigDir() string {
 		return e.cfg.DownloadDir
 	}
 	return filepath.Dir(e.cfg.DBPath)
+}
+
+// FastResumeMode is immutable for the lifetime of this Engine.
+func (e *Engine) FastResumeMode() string {
+	if e.cfg.FastResumeMode == "" {
+		return "fast"
+	}
+	return e.cfg.FastResumeMode
 }
 
 func (e *Engine) GetTorrentFile(hash string, index int) (*torrent.File, error) {
@@ -451,7 +472,9 @@ func (e *Engine) Close() {
 		if e.streamManager != nil {
 			e.streamManager.CloseAllStreams()
 		}
+		joinStorage := e.beginStorageFinalization()
 		e.wg.Wait()
+		joinStorage()
 
 		e.mu.Lock()
 		client := e.client
@@ -461,6 +484,9 @@ func (e *Engine) Close() {
 		e.mu.Unlock()
 
 		closeTorrentResources(client, torrentStorage)
+		if err := e.instanceLock.Close(); err != nil {
+			logging.Warnf("failed to release download root: %v", err)
+		}
 	})
 }
 

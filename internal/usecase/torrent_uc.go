@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 	"torrent-stream-hub/internal/engine"
+	"torrent-stream-hub/internal/fastresume"
 	"torrent-stream-hub/internal/logging"
 	"torrent-stream-hub/internal/models"
 	"torrent-stream-hub/internal/payload"
@@ -60,6 +61,8 @@ type TorrentUseCase struct {
 	protectedUntil       map[string]time.Time
 	transferRecords      map[string]string
 	storageWorkerStarted bool
+	resumeMode           fastresume.Mode
+	resumeProducer       *applicationResumeProducer
 	// Optional rooted filesystem operation for deterministic failure injection.
 	payloadRemove           func(*os.Root, string) error
 	beforeDetach            func(string)
@@ -112,6 +115,24 @@ func (f DownloadedDiskFile) Open() (*os.File, error) {
 }
 
 func NewTorrentUseCase(e *engine.Engine, r *repository.TorrentRepo) *TorrentUseCase {
+	uc, err := newTorrentUseCase(e, r, fastresume.Mode(e.FastResumeMode()), true)
+	if err != nil {
+		logging.Warnf("resume producer unavailable: %v", err)
+	}
+	return uc
+}
+
+// NewTorrentUseCaseWithResumeMode is a restart-scoped Go integration entrypoint.
+// The public constructor uses the validated engine configuration (default fast).
+// On initialization failure the caller still owns Engine and must Close it.
+func NewTorrentUseCaseWithResumeMode(e *engine.Engine, r *repository.TorrentRepo, mode fastresume.Mode) (*TorrentUseCase, error) {
+	if mode != fastresume.Fast && mode != fastresume.Verify {
+		return nil, fastresume.ErrInvalid
+	}
+	return newTorrentUseCase(e, r, mode, true)
+}
+
+func newTorrentUseCase(e *engine.Engine, r *repository.TorrentRepo, mode fastresume.Mode, installProducer bool) (*TorrentUseCase, error) {
 	e.SetDownloadBlockPersistence(r.SaveDownloadBlock)
 	e.SetSafetyPersistence(r.PutRuntimeSafetyBlock)
 	e.SetVerificationPersistence(func(f models.RuntimeFence, uncertain bool, reason string) error {
@@ -121,7 +142,7 @@ func NewTorrentUseCase(e *engine.Engine, r *repository.TorrentRepo) *TorrentUseC
 		return r.ClearActivationBlock(f, models.BlockVerification)
 	})
 	uc := &TorrentUseCase{
-		engine: e, repo: r, maxTemporary: 3, transfers: make(map[string]int),
+		engine: e, repo: r, resumeMode: mode, maxTemporary: 3, transfers: make(map[string]int),
 		protectedUntil: make(map[string]time.Time), transferRecords: make(map[string]string),
 		coordinator: newApplicationCoordinator(e.Context()), storageWake: make(chan struct{}, 1),
 		layoutWake:    make(chan string, 64),
@@ -129,6 +150,7 @@ func NewTorrentUseCase(e *engine.Engine, r *repository.TorrentRepo) *TorrentUseC
 		inventoryWake: make(chan struct{}, 1),
 	}
 	uc.initializeInventory()
+	e.SetResumeMutationFactory(uc.resumeMutationHooks)
 	e.SetStorageIOGuard(uc.guardPayloadIO)
 	e.SetStorageLayoutResolver(func(hash string, info *metainfo.Info) (payload.Layout, error) {
 		m, err := r.StorageMapping(hash)
@@ -156,7 +178,12 @@ func NewTorrentUseCase(e *engine.Engine, r *repository.TorrentRepo) *TorrentUseC
 	e.StartTask(uc.runLocationOperations)
 	e.StartTask(uc.runInventory)
 	e.StartTask(func(ctx context.Context) { <-ctx.Done(); _ = uc.coordinator.close(context.Background()) })
-	return uc
+	if installProducer {
+		if err := uc.installResumeProducer(); err != nil {
+			return uc, err
+		}
+	}
+	return uc, nil
 }
 
 func (uc *TorrentUseCase) AddMagnet(magnet string) (*models.Torrent, error) {
@@ -403,6 +430,9 @@ func (uc *TorrentUseCase) GetTorrent(hash string) (*models.Torrent, error) {
 		t = items[0]
 	}
 	if t != nil {
+		if t.Resume == nil {
+			t.Resume = &models.ResumeProgress{Mode: string(uc.resumeMode), Status: "pending", Reason: "storage_blocked"}
+		}
 		uc.decorateStorageList([]*models.Torrent{t})
 		t.SnapshotAt = started
 	}

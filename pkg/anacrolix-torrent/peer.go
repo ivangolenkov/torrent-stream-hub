@@ -339,6 +339,9 @@ func (c *Peer) doChunkReadStats(size int64) {
 // Handle a received chunk from a peer. TODO: Break this out into non-wire protocol specific
 // handling. Avoid shoehorning into a pp.Message.
 func (c *Peer) receiveChunk(msg *pp.Message) error {
+	if err := c.t.waitCheckpointLocked(c.closed.Done()); err != nil {
+		return err
+	}
 	ChunksReceived.Add("total", 1)
 
 	ppReq := newRequestFromMessage(msg)
@@ -392,6 +395,7 @@ func (c *Peer) receiveChunk(msg *pp.Message) error {
 	// Need to record that it hasn't been written yet, before we attempt to do
 	// anything with it.
 	piece.incrementPendingWrites()
+	t.activeCheckpointWrites++
 	// Record that we have the chunk, so we aren't trying to download it while
 	// waiting for it to be written to storage.
 	piece.unpendChunkIndex(chunkIndexFromChunkSpec(ppReq.ChunkSpec, t.chunkSize))
@@ -421,6 +425,7 @@ func (c *Peer) receiveChunk(msg *pp.Message) error {
 	}()
 
 	piece.decrementPendingWrites()
+	t.activeCheckpointWrites--
 
 	if err != nil {
 		c.logger.WithDefaultLevel(log.Error).Printf("writing received chunk %v: %v", req, err)

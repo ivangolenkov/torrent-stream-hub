@@ -31,7 +31,10 @@ func NewFile(baseDir string) ClientImplCloser {
 }
 
 type NewFileClientOpts struct {
-	// IOEvent observes payload storage syscall attempts. It must be fast and
+	// IOEvent observes payload storage syscall attempts and checkpoint boundaries
+	// (snapshot/payload-sync/directory-sync before/after). After-sync means the
+	// platform sync helper returned successfully, not proof of a syscall on every
+	// platform or of hardware durability. It must be fast and
 	// must not reenter this storage. Nil has no instrumentation overhead.
 	IOEvent func(operation, path string)
 	// The base directory for all downloads.
@@ -67,6 +70,9 @@ type NewFileClientOpts struct {
 	// IOGuard checks the enrolled volume before rooted access/mutation. Paths
 	// are relative to RootFS. It never grants piece completion.
 	IOGuard func(string) error
+	// ResumeHooks is called once per open before namespace mutations. A nil
+	// factory keeps the historical verified-only backend, never writable trust.
+	ResumeHooks FileResumeFactory
 }
 
 // The specific part-files option or the default.
@@ -184,6 +190,19 @@ func (fs *fileClientImpl) OpenTorrent(
 			}
 		}
 	}
+	var resume *FileResumeHooks
+	if fs.opts.ResumeHooks != nil {
+		if fs.opts.RootFS == nil || !fs.opts.VerifyOnOpen || fs.opts.partFiles() {
+			return TorrentImpl{}, ErrCheckpointUnsupported
+		}
+		resume, err = fs.opts.ResumeHooks(ctx, info, infoHash)
+		if err != nil {
+			return TorrentImpl{}, err
+		}
+		if resume != nil && (resume.Revoke == nil || resume.Invalidate == nil || !validCheckpointBits(resume.Pending, info.NumPieces())) {
+			return TorrentImpl{}, ErrCheckpointUnsupported
+		}
+	}
 	if fs.opts.ImportPartFiles {
 		if fs.opts.IOGuard != nil {
 			base := fs.opts.ClientBaseDir
@@ -200,7 +219,7 @@ func (fs *fileClientImpl) OpenTorrent(
 				}
 			}
 		}
-		if err := fs.importPartFiles(ctx, files); err != nil {
+		if err := fs.importPartFilesWithBarrier(ctx, files, resume); err != nil {
 			var conflict *LegacyPartConflictError
 			if errors.As(err, &conflict) {
 				relative, e := filepath.Rel(dir, conflict.Path)
@@ -215,6 +234,24 @@ func (fs *fileClientImpl) OpenTorrent(
 	for i := range metainfoFileInfos {
 		filePath := files[i].safeOsPath
 		if metainfoFileInfos[i].Length == 0 && !fs.opts.ReadOnly {
+			if resume != nil && resume.RestoreCandidate {
+				continue
+			}
+			if resume != nil {
+				// Existing empty files require no mutation. Missing ones may only
+				// be created after whole-owner durable namespace invalidation.
+				_, probe := (rootFileIo{root: fs.opts.RootFS, readOnly: true}).stat(filePath)
+				if probe == nil {
+					continue
+				}
+				if !errors.Is(probe, os.ErrNotExist) {
+					return TorrentImpl{}, probe
+				}
+				if err := resume.Invalidate(); err != nil {
+					return TorrentImpl{}, err
+				}
+				clear(resume.Pending)
+			}
 			if fs.opts.RootFS != nil {
 				var f fileWriter
 				f, err = (rootFileIo{root: fs.opts.RootFS, ctx: fs.opts.IOContext, guard: fs.opts.IOGuard}).openForWrite(filePath, 0)
@@ -231,6 +268,7 @@ func (fs *fileClientImpl) OpenTorrent(
 		}
 	}
 	t := &fileTorrentImpl{
+		directory:         dir,
 		info:              info,
 		files:             files,
 		metainfoFileInfos: metainfoFileInfos,
@@ -239,12 +277,23 @@ func (fs *fileClientImpl) OpenTorrent(
 		io:                defaultFileIo(),
 		client:            fs,
 	}
+	if resume != nil {
+		t.resume.hooks = resume
+		t.resume.pending = append([]byte(nil), resume.Pending...)
+	}
 	if fs.opts.RootFS != nil {
 		t.io = rootFileIo{root: fs.opts.RootFS, ctx: fs.opts.IOContext, readOnly: fs.opts.ReadOnly, onRead: fs.opts.IORead, guard: fs.opts.IOGuard, onEvent: fs.opts.IOEvent}
 	}
 	if fs.opts.VerifyOnOpen {
-		t.fresh = make(map[int][]os.FileInfo)
+		t.fresh = make(map[int]pieceEvidence)
 		t.hashSnapshot = make(map[int][]os.FileInfo)
+		if fs.opts.RootFS != nil {
+			for i := range metainfoFileInfos {
+				if metainfoFileInfos[i].Length == 0 {
+					t.refreshEmptyFile(i)
+				}
+			}
+		}
 	}
 	if t.partFiles() && !fs.opts.VerifyOnOpen {
 		err = t.setCompletionFromPartFiles()
@@ -259,8 +308,33 @@ func (fs *fileClientImpl) OpenTorrent(
 	}
 	if fs.opts.VerifyOnOpen {
 		result.FreshComplete = func(index int) bool { return t.freshCompletion(index).Complete }
+		result.CachedRestored = func(index int) bool {
+			t.freshMu.Lock()
+			defer t.freshMu.Unlock()
+			return !t.readClosed.Load() && t.fresh[index].restored && t.cachedCompletionLocked(index).Complete
+		}
+		result.ResumeObservation = func() ResumeObservation {
+			if resume != nil {
+				return resume.Observation
+			}
+			return ResumeObservation{}
+		}
 		result.CachedComplete = func(index int) bool { return t.cachedCompletion(index).Complete }
 		result.RefreshFresh = t.refreshRange
+		result.WithCheckpoint = t.withCheckpoint
+		result.CheckpointState = t.checkpointState
+		result.PrepareRestore = t.prepareRestore
+		result.RestoreCheckpoint = t.restoreCheckpoint
+		result.RevokeCheckpoint = t.revokeCheckpoint
+		if fs.opts.RootFS != nil {
+			result.RefreshEmptyFile = t.refreshEmptyFile
+			result.CachedEmptyFile = t.cachedEmptyFile
+		}
+	}
+	if resume != nil && resume.RestoreCandidate && resume.Restore != nil {
+		if err := resume.Restore(ctx, result); err != nil {
+			return TorrentImpl{}, errors.Join(err, t.Close())
+		}
 	}
 	return result, nil
 }

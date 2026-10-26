@@ -476,6 +476,10 @@ func (uc *TorrentUseCase) applyLegacy(ctx context.Context, hash, id string, vers
 		release()
 		return err
 	}
+	if err := uc.revokeResumeMutation(ctx, hash); err != nil {
+		release()
+		return err
+	}
 	info, err := mi.UnmarshalInfo()
 	if err != nil {
 		release()

@@ -10,7 +10,7 @@ describe('separate file observations', () => {
       status: { storage_path: 'payload/Readable/a', presence: 'present', verified_bytes: 0, last_known_bytes: 4,
         last_known_source: 'last_known', verification: 'running', direct_read_ready: false, read_reason: 'verification', effective_priority: 'none' } } as File;
     const wrapper = mount(FileObservation, { props: { file } });
-    expect(wrapper.text()).toContain('Verified now: 0.0%');
+    expect(wrapper.text()).toContain('Usable verified or restored data: 0.0%');
     expect(wrapper.text()).toContain('Last known: 100.0%');
     expect(wrapper.text()).toContain('payload/Readable/a');
     expect(wrapper.text()).not.toContain('Ready for file download');

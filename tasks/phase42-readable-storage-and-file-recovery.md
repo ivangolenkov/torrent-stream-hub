@@ -2,7 +2,7 @@
 
 ## Статус и зависимости
 
-- Статус: **реализация выполнена; приёмка ожидает native Windows**. Реализация разрешена пользователем 25 октября 2026 года. Полный macOS `make check` и native Linux suites прошли; Windows cross-compile не заменяет обязательный запуск. Результаты всех блоков — в [отчёте](implementation/phase42-report.md).
+- Статус: **фаза завершена**. Реализация разрешена пользователем 25 октября 2026 года. Полный macOS `make check` и native Linux suites прошли; успешный native Windows CI подтверждён пользователем. Результаты всех блоков — в [отчёте](implementation/phase42-report.md).
 - Предыдущая [фаза 41](phase41-storage-recovery-and-migration-observability.md) завершена по её [отчёту](implementation/phase41-report.md). Её гарантии хранения, recovery и совместимости являются исходными требованиями этой фазы.
 - Основание: [сравнение архитектуры с qBittorrent](implementation/qbittorrent-storage-architecture-review.md). В отчёте зафиксированы ревизии и ссылки на исходники; план не зависит от истории чата или файлов в `/tmp`.
 - Начинать реализацию по отдельной команде пользователя. Блоки выполнять последовательно; следующий блок начинать после проверки критериев приёмки предыдущего.
@@ -221,5 +221,5 @@ Read model расширяется additive полями. Точные wire-им�
 - [x] F42-07: очередь проверки ограничена, нужные reader диапазоны получают приоритет без голодания фона; измерены I/O/latency/memory/SQL, verified-only policy сохранена.
 - [x] F42-08: upgrade старых layouts и незавершённых journals проходит без обязательного переноса всей библиотеки; retained recovery data защищены; rollback procedure описана.
 - [x] Paused, DiskFull, QoS/debounce, transfer limits, FIFO, temporary policy, fencing и snapshot ordering проходят regression tests.
-- [ ] `make check` и обязательные native filesystem suites Linux/macOS/Windows проходят; источники platform evidence и ограничения измерений зафиксированы.
+- [x] `make check` и обязательные native filesystem suites Linux/macOS/Windows проходят; источники platform evidence и ограничения измерений зафиксированы (Windows CI подтверждён пользователем).
 - [x] README, wire/state/concurrency contracts и `tasks/implementation/phase42-report.md` обновлены; все отклонения от плана объяснены. Fast resume не включён скрыто ради ускорения старта.

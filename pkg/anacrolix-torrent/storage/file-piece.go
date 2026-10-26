@@ -187,6 +187,10 @@ func (me *filePieceImpl) BeginVerification() error {
 		return os.ErrClosed
 	}
 	defer me.t.lifecycle.RUnlock()
+	me.t.checkpointEpoch.Add(1)
+	if err := me.t.revokeResume(me.p.Index(), me.p.Index()+1); err != nil {
+		return err
+	}
 	signature, err := me.t.pieceSignature(me.p.Index())
 	if err != nil {
 		return err
@@ -203,6 +207,7 @@ func (me *filePieceImpl) MarkComplete() (err error) {
 		return os.ErrClosed
 	}
 	defer me.t.lifecycle.RUnlock()
+	me.t.checkpointEpoch.Add(1)
 	if me.t.client.opts.VerifyOnOpen {
 		current, e := me.t.pieceSignature(me.p.Index())
 		if e != nil {
@@ -237,7 +242,7 @@ func (me *filePieceImpl) MarkComplete() (err error) {
 	}
 	if me.t.client.opts.VerifyOnOpen {
 		me.t.freshMu.Lock()
-		me.t.markFreshLocked(me.p.Index(), verifiedSignature)
+		me.t.markFreshLocked(me.p.Index(), verifiedSignature, false)
 		me.t.freshMu.Unlock()
 	}
 	for f := range me.pieceFiles() {
@@ -314,9 +319,13 @@ func (me *filePieceImpl) MarkNotComplete() (err error) {
 		return os.ErrClosed
 	}
 	defer me.t.lifecycle.RUnlock()
+	me.t.checkpointEpoch.Add(1)
 	me.t.freshMu.Lock()
 	me.t.forgetPieceLocked(me.p.Index())
 	me.t.freshMu.Unlock()
+	if err := me.t.revokeResume(me.p.Index(), me.p.Index()+1); err != nil {
+		return err
+	}
 	err = me.pieceCompletion().Set(me.pieceKey(), false)
 	if err != nil {
 		return
@@ -416,6 +425,14 @@ func (me zeroReader) Read(p []byte) (n int, err error) {
 }
 
 func (me *filePieceImpl) WriteTo(w io.Writer) (n int64, err error) {
+	if me.t.readClosed.Load() {
+		return 0, os.ErrClosed
+	}
+	unlock := me.t.lockPayloadRange(me.p.Offset(), me.p.Length(), false)
+	defer unlock()
+	if me.t.readClosed.Load() {
+		return 0, os.ErrClosed
+	}
 	for fileIndex, extent := range me.iterFileSegments() {
 		var n1 int64
 		n1, err = me.writeFileTo(w, fileIndex, extent)

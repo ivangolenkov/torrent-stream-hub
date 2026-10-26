@@ -8,6 +8,9 @@ import (
 // This projection is shared by details, files, full SSE and compact summaries.
 // It uses only immutable snapshots; rendering never performs a stat or hash.
 func projectFileStates(t, persisted *models.Torrent, attached bool) {
+	if !attached {
+		t.Resume = nil
+	}
 	t.LastKnownBytes, t.LastKnownAtMS, t.LastKnownSource = persisted.Downloaded, persisted.ProgressObservedAt/1e6, persisted.ProgressSource
 	saved := make(map[int]*models.File, len(persisted.Files))
 	for _, f := range persisted.Files {

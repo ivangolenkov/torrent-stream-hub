@@ -18,6 +18,9 @@ services:
       HUB_TORRENT_PORT: "50007"
       HUB_DOWNLOAD_DIR: /downloads
       HUB_DB_PATH: /config/hub.db
+      # Fast assumes no external payload writers. After edits/sync/backup restore,
+      # Recheck; choose verify for hashing on every open. Changes require restart.
+      HUB_FAST_RESUME_MODE: fast
       HUB_LOG_DIR: /config/logs
       HUB_LOG_RETENTION_DAYS: "3"
       HUB_LOG_MAX_FILE_BYTES: "16777216"

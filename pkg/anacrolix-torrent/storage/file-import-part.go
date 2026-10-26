@@ -24,6 +24,10 @@ func (e *LegacyPartConflictError) Error() string {
 // Preflight the entire catalog before renaming, so a known conflict leaves every
 // file untouched. Interrupted imports can resume on the next open.
 func (fs *fileClientImpl) importPartFiles(ctx context.Context, files []fileExtra) error {
+	return fs.importPartFilesWithBarrier(ctx, files, nil)
+}
+
+func (fs *fileClientImpl) importPartFilesWithBarrier(ctx context.Context, files []fileExtra, resume *FileResumeHooks) error {
 	normalize := func(path string) string { return strings.ToLower(norm.NFC.String(path)) }
 	payloadNames := make(map[string]bool, len(files))
 	payloadParents := make(map[string]bool)
@@ -69,6 +73,14 @@ func (fs *fileClientImpl) importPartFiles(ctx context.Context, files []fileExtra
 			return err
 		}
 		pending = append(pending, i)
+	}
+	if len(pending) != 0 && resume != nil {
+		if err := resume.Invalidate(); err != nil {
+			return err
+		}
+		clear(resume.Pending)
+		resume.RestoreCandidate = false
+		resume.Observation.Status, resume.Observation.Reason = "fallback", "identity_changed"
 	}
 	for _, i := range pending {
 		if err := ctx.Err(); err != nil {

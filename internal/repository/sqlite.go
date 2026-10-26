@@ -1,6 +1,7 @@
 package repository
 
 import (
+	"context"
 	"database/sql"
 	"embed"
 	"fmt"
@@ -8,8 +9,22 @@ import (
 	"sort"
 	"strings"
 
-	_ "modernc.org/sqlite"
+	"modernc.org/sqlite"
 )
+
+const sqliteDriverName = "tsh-sqlite"
+
+func init() {
+	// modernc sorts DSN pragmas, so appending FULL does not override a caller's
+	// synchronous(OFF). This private driver's hook runs AFTER DSN configuration
+	// on every new/replacement connection, without affecting other SQLite users.
+	driver := &sqlite.Driver{}
+	driver.RegisterConnectionHook(func(conn sqlite.ExecQuerierContext, _ string) error {
+		_, err := conn.ExecContext(context.Background(), "PRAGMA synchronous=FULL", nil)
+		return err
+	})
+	sql.Register(sqliteDriverName, driver)
+}
 
 //go:embed migrations/*.sql
 var migrationFiles embed.FS
@@ -31,7 +46,10 @@ func NewSQLiteDB(dsn string) (_ *SQLiteDB, retErr error) {
 	if !memory {
 		params.Add("_pragma", "journal_mode(WAL)")
 	}
-	db, err := sql.Open("sqlite", base+"?"+params.Encode())
+	// Safety-critical resume revocations must survive before a payload write.
+	// The connection hook enforces this AFTER the driver's sorted DSN pragmas.
+	params.Add("_pragma", "synchronous(FULL)")
+	db, err := sql.Open(sqliteDriverName, base+"?"+params.Encode())
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
@@ -60,6 +78,10 @@ func NewSQLiteDB(dsn string) (_ *SQLiteDB, retErr error) {
 		if err := db.QueryRow("PRAGMA journal_mode").Scan(&mode); err != nil || !strings.EqualFold(mode, "wal") {
 			return nil, fmt.Errorf("SQLite WAL unavailable (mode=%q): %v", mode, err)
 		}
+	}
+	var synchronous int
+	if err := db.QueryRow("PRAGMA synchronous").Scan(&synchronous); err != nil || synchronous != 2 {
+		return nil, fmt.Errorf("SQLite FULL synchronous unavailable (mode=%d): %v", synchronous, err)
 	}
 
 	sqliteDB := &SQLiteDB{db: db}

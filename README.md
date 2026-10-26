@@ -258,7 +258,10 @@ every eight priority grants allow an oldest background turn. Main/offline client
 share two active hash read/compute tasks, one per live filesystem, and 64 pending
 leases within existing client/torrent slot limits. Completion flushes may overlap
 the next hash. Seek never interrupts a running filesystem syscall. Persistent
-completion remains a hint: trusted fast resume is not enabled.
+completion remains a hint, separate from validated durable resume checkpoints.
+With default fast resume, legacy `verified` progress means usable hash-verified
+or trusted-restored data, not necessarily hashing in this attachment. See `resume`
+below; `verification.checked_bytes` counts actual checks only.
 
 `POST /api/v1/torrent/{hash}/action` with `{"action":"recheck"}` returns **202**
 with an engine-session operation ID and status; list/SSE snapshots include
@@ -784,7 +787,71 @@ File/ZIP downloads open inside the download root and reject symlinks, service st
 
 Removed nonfunctional authentication options are no longer supported: remove old authentication CLI flags (now rejected) and environment entries (no longer read) from deployment scripts. There is no built-in access control; management API and logs are accessible to anyone who can reach the service. Use a trusted network or protected reverse proxy.
 
-SQLite uses WAL for file databases, with foreign keys and a 5000 ms busy timeout on every pooled connection. In-memory databases use a single connection and SQLite's memory journal instead of WAL.
+SQLite uses WAL for file databases, `synchronous=FULL`, foreign keys and a 5000 ms busy timeout on every pooled connection, including replacements. Resume checkpoint/revocation transactions also verify WAL/FULL on the connection they use. In-memory databases use a single connection and SQLite's memory journal instead of WAL; they are not eligible for trusted resume persistence.
+
+### Single Instance Per Download Root (Phase 43)
+
+The engine acquires an OS lock on `HUB_DOWNLOAD_DIR/.tsh-instance.lock` before
+opening torrent storage and retains it until all owned tasks and storage have
+closed. Another instance cannot use that same root, even with a different database
+or a symlink alias to the directory. The file remains after shutdown; its presence
+does not mean a process is running. **Do not delete or replace it to bypass a lock.**
+The OS releases the lock after process termination; an initialization failure also
+releases it. Symlink/hardlink lock files are rejected. Linux/macOS use `flock`;
+Windows uses a nonblocking exclusive byte-range lock. Unsupported locking fails
+startup rather than admitting competing writers. Remote SMB/NFS locking and
+arbitrary external file modifications are not covered by this local-filesystem
+ownership guarantee.
+
+### Fast Resume Policy And Upgrade
+
+`HUB_FAST_RESUME_MODE=fast|verify` (CLI `--fast-resume-mode`) defaults to **fast**,
+including upgrades without an explicit setting. Unknown/empty explicit values
+fail startup. Change the policy by restarting, not per request.
+
+**Fast assumes this service is the only payload writer.** Valid sealed pieces can
+be restored without hashing after clean shutdown or process crash. Size, mtime,
+file identity and volume evidence reject changes but do not prove unchanged
+content. Same-size edits with restored timestamps may be served before corruption
+is detected. After external edits, sync, moving/locating data or restoring backup,
+run **Recheck**; it preserves paused intent. Choose `verify` for a hash pass on
+every open. Neither mode promises protection against malicious local access or
+hardware that falsely acknowledges flush; fast does not detect all bit rot.
+
+Old `piece_completion` rows are disposable hints, **never adopted as trust**. The
+first upgraded open without a valid checkpoint hashes normally; periodic
+(60-second dirty owners) and bounded shutdown sealing then create checkpoints.
+Missing/unsupported/oversized checkpoints fall back to ordinary verification,
+not deletion or repair. Storage safety blocks still take precedence. Unsealed
+progress may need checking after a crash. Database checksum alone grants no
+readiness. Unsupported filesystem flush/locking semantics cannot grant trust;
+local filesystem tests do not establish SMB/NFS/NAS guarantees.
+
+REST list/details and full/compact SSE include additive `resume`: configured
+`mode`, open-attempt `status`/`reason`, restored checkpoint `checkpoint_generation`
+(int64 decimal **string**) and `checkpoint_at_ms`, plus current disjoint
+`restored_bytes` and `freshly_verified_bytes`. Rechecking moves bytes from the first
+counter to the second; invalid data contributes to neither. These are cached
+attachment-local observations, not durable authority; `verification.checked_bytes`
+also includes failed checks. GUI explains fallback and provides the existing
+Recheck action. Polling performs no new payload stat/hash/flush.
+
+For backups, stop the service and take a consistent snapshot of database/WAL and
+payload together (or use a coordinated read-only snapshot of both). Restoring a
+backup is an external mutation: use `verify` on its first open and recheck before
+serving. Rolling back an entire consistent snapshot is not detectable by evidence.
+For downgrade, stop first, preserve database/payload backup, and use a version
+that understands this schema or restore its matching pre-upgrade backup; never
+delete migration rows or treat resume tables as old completion hints. Phase 42
+already ignores disposable hints for readiness, but untested downgrade binaries
+are not a supported migration procedure.
+Durable mutation barriers are installed for managed payload writes, rechecks and
+storage workflows. A failed safety write prevents the corresponding filesystem
+mutation; disposable completion-hint queues are not used for these barriers.
+
+Reproducible local-FS hashing, WAL transaction, online-seal and Linux syscall
+measurements are documented in [the measurement guide](scripts/README-resume-measurement.md).
+Process-kill tests do not establish power-loss durability or remote-FS guarantees.
 
 ## Saved Logs And REST Access
 

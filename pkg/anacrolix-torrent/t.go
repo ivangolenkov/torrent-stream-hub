@@ -227,14 +227,15 @@ func (t *Torrent) initFiles() {
 	t.files = new([]*File)
 	for _, fi := range t.info.UpvertedFiles() {
 		*t.files = append(*t.files, &File{
-			t,
-			strings.Join(append([]string{info.BestName()}, fi.BestPath()...), "/"),
-			offset,
-			fi.Length,
-			fi,
-			fi.DisplayPath(info),
-			PiecePriorityNone,
-			fi.PiecesRoot,
+			storageIndex: len(*t.files),
+			t:            t,
+			path:         strings.Join(append([]string{info.BestName()}, fi.BestPath()...), "/"),
+			offset:       offset,
+			length:       fi.Length,
+			fi:           fi,
+			displayPath:  fi.DisplayPath(info),
+			prio:         PiecePriorityNone,
+			piecesRoot:   fi.PiecesRoot,
 		})
 		offset += fi.Length
 		if info.FilesArePieceAligned() {

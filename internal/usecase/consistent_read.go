@@ -40,8 +40,14 @@ func readConsistentTorrents(readVersion func() (int64, error), readDB func() ([]
 }
 
 func (uc *TorrentUseCase) readAllConsistently() ([]*models.Torrent, error) {
-	return readConsistentTorrents(func() (int64, error) { return uc.repo.ReadVersion() }, uc.repo.GetAllTorrents, uc.engine.GetAllTorrentsCached, func() func() bool {
+	items, err := readConsistentTorrents(func() (int64, error) { return uc.repo.ReadVersion() }, uc.repo.GetAllTorrents, uc.engine.GetAllTorrentsCached, func() func() bool {
 		stamp := uc.engine.CaptureReadStamp("")
 		return func() bool { return uc.engine.ValidateReadStamp(stamp) }
 	})
+	for _, item := range items {
+		if item.Resume == nil {
+			item.Resume = &models.ResumeProgress{Mode: string(uc.resumeMode), Status: "pending", Reason: "storage_blocked"}
+		}
+	}
+	return items, err
 }

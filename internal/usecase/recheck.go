@@ -27,6 +27,9 @@ func (uc *TorrentUseCase) Recheck(hash string, contexts ...context.Context) (*mo
 	if uc.transferCount(hash) > 0 {
 		return nil, ErrStorageConflict
 	}
+	if err := uc.revokeResumeMutation(uc.requestContext(contexts...), hash); err != nil {
+		return nil, err
+	}
 	if uc.engine.GetRawTorrent(hash) == nil {
 		if saved.State != models.StatePaused {
 			return nil, ErrStorageConflict

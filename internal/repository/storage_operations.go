@@ -64,7 +64,7 @@ func (r *TorrentRepo) CreateStorageOperation(ctx context.Context, m *StorageMapp
 	return tx.Commit()
 }
 
-func checkStorageFence(tx *writeTx, m *StorageMapping, id string) error {
+func checkStorageFence(tx sqlReader, m *StorageMapping, id string) error {
 	var n int
 	err := tx.QueryRow(`SELECT count(*) FROM torrent_storage s JOIN torrent_intents i ON i.hash=s.hash JOIN torrents t ON t.hash=s.hash WHERE s.hash=? AND i.record_id=? AND s.storage_id=? AND s.revision=? AND s.root=? AND s.prefix=? AND s.version=? AND t.deletion_mode=''`, m.Hash, id, m.StorageID, m.Revision, m.Root, m.Prefix, m.Version).Scan(&n)
 	if err != nil {

@@ -9,13 +9,14 @@ import (
 
 	"torrent-stream-hub/internal/config"
 	"torrent-stream-hub/internal/engine"
+	"torrent-stream-hub/internal/fastresume"
 	"torrent-stream-hub/internal/models"
 	"torrent-stream-hub/internal/repository"
 )
 
 const testInfoHash = "0123456789abcdef0123456789abcdef01234567"
 
-func setupTorrentUseCase(t *testing.T) (*TorrentUseCase, *repository.TorrentRepo, func()) {
+func setupTorrentUseCase(t *testing.T, manualProducer ...bool) (*TorrentUseCase, *repository.TorrentRepo, func()) {
 	t.Helper()
 
 	dir := t.TempDir()
@@ -42,6 +43,13 @@ func setupTorrentUseCase(t *testing.T) (*TorrentUseCase, *repository.TorrentRepo
 		db.Close()
 	}
 
+	if len(manualProducer) != 0 && manualProducer[0] {
+		uc, err := newTorrentUseCase(eng, repo, fastresume.Verify, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return uc, repo, cleanup
+	}
 	return NewTorrentUseCase(eng, repo), repo, cleanup
 }
 

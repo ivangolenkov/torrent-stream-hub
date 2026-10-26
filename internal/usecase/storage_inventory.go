@@ -300,6 +300,9 @@ func (uc *TorrentUseCase) reconcileInventory(ctx context.Context, m *repository.
 	if i == nil || i.Version.RecordID != id {
 		return ErrStorageConflict
 	}
+	if err := uc.revokeResumeMutation(ctx, m.Hash); err != nil {
+		return err
+	}
 	if !deleting {
 		if _, err := uc.repo.CommitRunIntent(i.Version, models.RunPaused); err != nil {
 			return err
@@ -353,6 +356,9 @@ func (uc *TorrentUseCase) repairMissingInventory(hash string) error {
 	}
 	if t == nil {
 		return ErrTorrentNotFound
+	}
+	if err := uc.revokeResumeMutation(uc.engine.Context(), hash); err != nil {
+		return err
 	}
 	if err := uc.repo.QueueInventory(m, t.Control.RecordID, uc.inventorySession); err != nil {
 		return err

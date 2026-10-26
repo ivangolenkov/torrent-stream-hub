@@ -390,10 +390,30 @@ func (p *Piece) mustGetOnlyFile() *File {
 
 // Sets the v2 piece hash, queuing initial piece checks if appropriate.
 func (p *Piece) setV2Hash(v2h [32]byte) {
+	if err := p.t.waitCheckpointLocked(nil); err != nil {
+		return
+	}
 	// See Torrent.onSetInfo. We want to trigger an initial check if appropriate, if we didn't yet
 	// have a piece hash (can occur with v2 when we don't start with piece layers).
 	p.t.hashLayerUpdates++
 	defer func() { p.t.hashLayerUpdates--; p.t.cl.startPieceHashers() }()
+	if p.hashV2.Ok && p.hashV2.Value != v2h && p.t.storage != nil && p.t.storage.RevokeCheckpoint != nil {
+		backend, before := p.t.storage, p.hashV2
+		p.t.cl.storageTasks.Add(1)
+		p.t.cl.unlock()
+		p.t.storageLock.Lock()
+		err := backend.RevokeCheckpoint(p.index, p.index+1)
+		p.t.storageLock.Unlock()
+		p.t.cl.lock()
+		p.t.cl.storageTasks.Done()
+		if p.t.closed.IsSet() || p.t.storage != backend || p.hashV2 != before {
+			return
+		}
+		p.t.updatePieceCompletion(p.index)
+		if err != nil {
+			return
+		}
+	}
 	for {
 		if p.t.closed.IsSet() || p.hashV2.Ok && p.hashV2.Value == v2h {
 			return

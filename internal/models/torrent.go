@@ -216,6 +216,11 @@ type BTTorrentHealth struct {
 
 // Attachment-local cumulative counters; nanoseconds include concurrent work.
 type StorageIOTimings struct {
+	ManagedPayload       bool                  `json:"managed_payload"`
+	FileCacheHits        int64                 `json:"file_cache_hits"`
+	FileCacheMisses      int64                 `json:"file_cache_misses"`
+	FileCacheEvictions   int64                 `json:"file_cache_evictions"`
+	FileCacheOpen        int64                 `json:"file_cache_open"`
 	CompletionSyncCount  int64                 `json:"completion_sync_count"`
 	CompletionSyncErrors int64                 `json:"completion_sync_errors"`
 	CompletionSyncActive int64                 `json:"completion_sync_active"`

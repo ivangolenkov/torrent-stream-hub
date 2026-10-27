@@ -3173,6 +3173,20 @@ func (t *Torrent) VerifyData() error {
 // should not be called before the Info is available. TODO: Make this operate
 // concurrently within the configured piece hashers limit.
 func (t *Torrent) VerifyDataContext(ctx context.Context) error {
+	// Descriptor reuse must not make explicit Recheck hash a pinned old inode.
+	// Capture the attachment callback under the client lock, then join/reset
+	// storage outside it. Backend lifecycle fencing rejects a concurrent Drop.
+	t.cl.rLock()
+	var reset func(context.Context) error
+	if t.storage != nil {
+		reset = t.storage.ResetManagedPayload
+	}
+	t.cl.rUnlock()
+	if reset != nil {
+		if err := reset(ctx); err != nil {
+			return err
+		}
+	}
 	for i := 0; i < t.NumPieces(); i++ {
 		err := t.Piece(i).VerifyDataContext(ctx)
 		if err != nil {

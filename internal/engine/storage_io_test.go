@@ -23,6 +23,9 @@ func TestBTHealthStorageIOTimings(t *testing.T) {
 			t.Fatal("storage timings missing", h)
 		}
 		io := h.Torrents[0].StorageIO
+		if io.ManagedPayload != before.ManagedPayload || io.FileCacheHits != before.FileCacheHits || io.FileCacheMisses != before.FileCacheMisses || io.FileCacheEvictions != before.FileCacheEvictions || io.FileCacheOpen != before.FileCacheOpen {
+			t.Fatal("incorrect file cache projection", io, before)
+		}
 		if io.CompletionSyncCount != before.CompletionSyncCount || io.CompletionSyncNS != before.CompletionSyncNS || io.WriteLeaseWaitNS != before.WriteLeaseWaitNS {
 			t.Fatal("incorrect timing projection", io, before)
 		}

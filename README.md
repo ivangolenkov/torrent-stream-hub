@@ -811,12 +811,57 @@ fail startup. Change the policy by restarting, not per request.
 
 **Fast assumes this service is the only payload writer.** Valid sealed pieces can
 be restored without hashing after clean shutdown or process crash. Size, mtime,
-file identity and volume evidence reject changes but do not prove unchanged
+file identity and volume evidence reject changes at restore admission but do not prove unchanged
 content. Same-size edits with restored timestamps may be served before corruption
 is detected. After external edits, sync, moving/locating data or restoring backup,
 run **Recheck**; it preserves paused intent. Choose `verify` for a hash pass on
 every open. Neither mode promises protection against malicious local access or
 hardware that falsely acknowledges flush; fast does not detect all bit rot.
+
+### Active Payload Ownership And Descriptor Reuse
+
+The engine now uses **managed payload** I/O: while a torrent is attached, the
+service owns its files. It does **not** promise immediate detection of external
+edits, replacement, unlink, truncation or mount changes. Cached verified progress
+describes what was verified/restored in this attachment, not a live filesystem
+attestation. Externally changed bytes may be read before a full Recheck. This
+applies to both `fast` and `verify` during active operation; `verify` controls
+startup hashing, not continuous external-change monitoring.
+
+- Up to **16 retained descriptors per attachment** are shared by writes, reads,
+  hashing and completion sync. Cache misses and read-to-write upgrades perform
+  rooted containment, identity and volume checks. Hits perform no pathwalk,
+  volume-marker reads or before/after descriptor stats for each network chunk.
+  The cap is per attachment, not a process-wide descriptor limit; direct stream
+  and checkpoint metadata descriptors are separate.
+- Filesystem I/O never runs under the cache metadata mutex. Borrowed descriptors
+  cannot be evicted; capacity waits are cancelable. Idle LRU entries are closed
+  before replacement. Failed operations discard their handle, and close errors
+  remain visible. Writable sync descriptors are used on Windows when required.
+- Internal writes still revoke persisted trust **before mutation**, invalidate
+  overlapping hash snapshots, and hold the existing payload/lifecycle leases.
+  New pieces are still hashed before serving/upload. Mandatory completion sync,
+  stable checkpoint evidence/sync, restore validation, DiskFull and storage
+  ownership/recovery gates remain enabled. No mmap is introduced.
+- Full **Recheck** first joins I/O, closes the descriptor cache and revokes live
+  and persisted completion before hashing. A failed durable reset does not keep
+  the live read gate open. Drop/detach/shutdown release retained descriptors
+  before application move/delete/recovery can mutate the namespace. Pause alone
+  retains the attachment/cache because seeding or streams may still use it.
+
+Use application storage operations for move/locate/delete. Before external file
+replacement, stop the service or detach the torrent to release handles; after
+external edits always perform a full **Recheck** before resuming use. Never edit
+files concurrently with active reads/downloads. Reopen/restore and checkpoint
+boundaries still check the enrolled volume; a cache hit is not a fresh volume
+approval. The fork's `NewFileClientOpts.ManagedPayload` is opt-in and restricted
+to writable rooted VerifyOnOpen storage without part files. The application's
+normal backend opts in; offline recovery and default fork fixtures stay strict.
+
+If an acquisition or checkpoint volume guard actually fails, the attachment's
+cache is fenced and live readiness is revoked: later hits cannot bypass a known
+unsafe boundary. Recovery requires detaching/reopening through the storage
+workflow; an error is not a cached positive approval or permission to keep writing.
 
 Old `piece_completion` rows are disposable hints, **never adopted as trust**. The
 first upgraded open without a valid checkpoint hashes existing data normally; periodic
@@ -861,6 +906,12 @@ is therefore not a measurement of the physically absent byte count.
 For diagnosing bursty downloads, `GET /api/v1/health/bt` includes optional
 `torrents[].storage_io` counters for the current backend attachment:
 
+- `managed_payload`: whether the active ownership/descriptor-reuse model applies.
+  `file_cache_hits`, `file_cache_misses`, `file_cache_evictions` (including
+  read-to-write upgrades), and `file_cache_open` show actual descriptor reuse.
+  Misses count acquisition attempts; open counts retained/in-use payload handles,
+  excluding temporary metadata/guard and direct stream handles.
+
 - `completion_sync_count`, `completion_sync_errors`, `completion_sync_active`,
   `completion_sync_ns`, `completion_sync_max_ns`: completed attempts, errors,
   in-flight calls, cumulative and maximum duration of piece completion Flush.
@@ -903,6 +954,14 @@ the lifecycle barrier remains held until close returns. Intermediate contributin
 files, unknown/buffered backends, part-files and legacy verification retain the
 old close exclusion. Open/stat/write/signature accounting remain serialized;
 this change does not claim to eliminate every source of bursty download speed.
+
+In managed mode `write_open` normally measures a cache acquisition and
+`write_close` a lease release, not OS open/close. `write_guard` runs on writable
+descriptor acquisition; `write_stat`/`write_account` are no longer per-chunk
+external-evidence checks. Root-open sub-stage calls primarily represent cache
+misses; on Windows completion sync may also upgrade a read-only cached handle.
+Actual Close errors during eviction or backend close remain errors. These
+counters alone do not prove end-to-end swarm or NAS throughput improvement.
 
 Rooted writer opens additionally split `write_open` into cached sub-stage records:
 `write_open_guard` (application volume guard), `write_open_path` (rooted pathwalk

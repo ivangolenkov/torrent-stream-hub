@@ -59,12 +59,12 @@ jobs:
         run: go vet ./storage
       - name: Native verification queue and opening lifecycle
         working-directory: pkg/anacrolix-torrent
-        run: go test -race -count=1 . -run 'TestVerification|TestSelectiveVerification|TestStorageIOTimings|TestBlockedStorageOpen|TestHashBudget|TestTypeSizes|TestPendingStorage|TestFileCheckpoint'
+        run: go test -race -count=1 . -run 'TestManagedPayload|TestVerification|TestSelectiveVerification|TestStorageIOTimings|TestBlockedStorageOpen|TestHashBudget|TestTypeSizes|TestPendingStorage|TestFileCheckpoint'
       - name: Native names and volume markers
         run: go test -race -count=1 ./internal/payload
       - name: Native resume checkpoints, crash barriers and instance ownership
-        run: go test -race -count=1 ./internal/fastresume ./internal/repository ./internal/engine -run 'TestCodec|TestResume|TestAbsentStartup|TestBTHealthStorageIO|TestEngineInstance|TestStorageConversion|TestSealWorker|TestStorageFinalizer' -timeout=240s
+        run: go test -race -count=1 ./internal/fastresume ./internal/repository ./internal/engine -run 'TestManagedProgress|TestCodec|TestResume|TestAbsentStartup|TestBTHealthStorageIO|TestEngineInstance|TestStorageConversion|TestSealWorker|TestStorageFinalizer' -timeout=240s
       - name: Native recovery journals, ownership and deletion lifecycle
-        run: go test -race -count=1 ./internal/repository ./internal/usecase -run 'TestLegacyRecovery|TestDeletionCancel|TestOwnership|TestStorage|TestRecovery|TestInventory|TestNamed|TestMagnet|TestFileProjection|TestApplicationResumeProducer|TestCoordinator.*Drain|TestResumeApplication|TestResumeSelection|TestResumeLegacyFailed|TestResumeMutation'
+        run: go test -race -count=1 ./internal/repository ./internal/usecase -run 'TestProgressSync|TestLegacyRecovery|TestDeletionCancel|TestOwnership|TestStorage|TestRecovery|TestInventory|TestNamed|TestMagnet|TestFileProjection|TestApplicationResumeProducer|TestCoordinator.*Drain|TestResumeApplication|TestResumeSelection|TestResumeLegacyFailed|TestResumeMutation'
       - name: Native installed resume, periodic/shutdown and HTTP Range
-        run: go test -race -count=1 ./internal/usecase ./internal/delivery/http/api -run 'TestResumeRuntime|TestProductionResume' -timeout=180s
+        run: go test -race -count=1 ./internal/usecase ./internal/delivery/http/api -run 'TestResumeRuntime|TestProductionResume|TestDownloadSafetyAndHEAD|TestDownloadKnownVolumeErrorStatus' -timeout=180s

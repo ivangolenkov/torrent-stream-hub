@@ -24,6 +24,7 @@ type fileTorrentImpl struct {
 	lifecycle         sync.RWMutex
 	resume            resumeMutationState
 	ioTimings         ioTimings
+	managedFiles      managedFileCache
 	closed            bool
 	readClosed        atomic.Bool // reads use payload leases, not the seal mutation gate
 	directory         string
@@ -106,6 +107,11 @@ func (fts *fileTorrentImpl) partFiles() bool {
 	return fts.client.opts.partFiles()
 }
 
+func (fts *fileTorrentImpl) managedPayload() bool {
+	o := fts.client.opts
+	return o.ManagedPayload && o.RootFS != nil && o.VerifyOnOpen && !o.ReadOnly && !o.partFiles()
+}
+
 func (fts *fileTorrentImpl) pathForWrite(f *file) string {
 	if fts.partFiles() {
 		return f.partFilePath()
@@ -148,6 +154,17 @@ func (fts *fileTorrentImpl) pieceSignature(index int) ([]os.FileInfo, error) {
 	var result []os.FileInfo
 	p := fts.info.Piece(index)
 	for i := range fts.segmentLocater.LocateIter(segments.Extent{Start: p.Offset(), Length: p.Length()}) {
+		if fts.managedPayload() {
+			lease, err := fts.acquireManagedFile(i, false)
+			if err != nil {
+				return nil, err
+			}
+			result = append(result, lease.entry.info)
+			if err := lease.Close(); err != nil {
+				return nil, err
+			}
+			continue
+		}
 		f := fts.file(i)
 		f.mu.RLock()
 		var st os.FileInfo
@@ -198,7 +215,11 @@ func (fts *fileTorrentImpl) internSignatureLocked(index int, current []os.FileIn
 		st := current[n]
 		n++
 		signature := fts.signatures[file]
-		if signature == nil || !signature.valid || !sameSignature(signature.FileInfo, st) {
+		matches := signature != nil && signature.valid && sameSignature(signature.FileInfo, st)
+		if fts.managedPayload() {
+			matches = signature != nil && signature.valid && os.SameFile(signature.FileInfo, st)
+		}
+		if !matches {
 			if signature != nil {
 				signature.valid = false
 			}
@@ -275,6 +296,9 @@ func (fts *fileTorrentImpl) cachedCompletion(index int) Completion {
 // lock). A concurrent internal write changes the captured signature and makes an
 // older stat result inapplicable, rather than invalidating unrelated pieces.
 func (fts *fileTorrentImpl) refreshFile(index int) {
+	if fts.managedPayload() {
+		return
+	}
 	if fts.readClosed.Load() {
 		return
 	}
@@ -395,10 +419,13 @@ func (fs *fileTorrentImpl) Close() error {
 		fs.files[i].zeroReady = false
 	}
 	fs.freshMu.Unlock()
+	if fs.managedPayload() {
+		fs.closeErr = fs.managedFiles.closeAll(&fs.ioTimings)
+	}
 	// Per-torrent backends may retain handles after an individual read/write.
 	// RootFS remains owned by fileClientImpl, not by a torrent's I/O adapter.
 	if closer, ok := fs.io.(io.Closer); ok {
-		fs.closeErr = closer.Close()
+		fs.closeErr = errors.Join(fs.closeErr, closer.Close())
 	}
 	return fs.closeErr
 }

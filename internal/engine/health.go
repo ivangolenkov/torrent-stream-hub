@@ -100,6 +100,8 @@ func (e *Engine) BTHealth() *models.BTHealth {
 		var storageIO *models.StorageIOTimings
 		if io, ok := mt.t.StorageIOTimings(); ok {
 			storageIO = &models.StorageIOTimings{
+				ManagedPayload: io.ManagedPayload, FileCacheHits: io.FileCacheHits, FileCacheMisses: io.FileCacheMisses,
+				FileCacheEvictions: io.FileCacheEvictions, FileCacheOpen: io.FileCacheOpen,
 				CompletionSyncCount: io.CompletionSyncCount, CompletionSyncErrors: io.CompletionSyncErrors,
 				CompletionSyncActive: io.CompletionSyncActive, CompletionSyncNS: io.CompletionSyncNS,
 				CompletionSyncMaxNS: io.CompletionSyncMaxNS, WriteLeaseWaitCount: io.WriteLeaseWaitCount,

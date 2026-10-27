@@ -171,7 +171,7 @@ func (t *fileTorrentImpl) checkpointEvidence(ctx context.Context) (FileCheckpoin
 		return c, nil, err
 	}
 	infos := make([]os.FileInfo, len(c.Files))
-	r := rootFileIo{root: t.client.opts.RootFS, guard: t.client.opts.IOGuard, onEvent: t.client.opts.IOEvent, ctx: ctx, readOnly: true}
+	r := rootFileIo{root: t.client.opts.RootFS, guard: t.ioGuard(), onEvent: t.client.opts.IOEvent, ctx: ctx, readOnly: true}
 	for i := range c.Files {
 		if err := ctx.Err(); err != nil {
 			return c, nil, err
@@ -221,7 +221,7 @@ func (t *fileTorrentImpl) withCheckpoint(ctx context.Context, eligible []byte, p
 	c.Complete = bytes.Clone(eligible)
 	t.freshMu.Lock()
 	for i, current := range infos {
-		if sig := t.signatures[i]; sig != nil && sig.valid && !sameSignature(sig.FileInfo, current) {
+		if sig := t.signatures[i]; sig != nil && sig.valid && ((!t.managedPayload() && !sameSignature(sig.FileInfo, current)) || (t.managedPayload() && (current == nil || !os.SameFile(sig.FileInfo, current)))) {
 			sig.valid, sig.complete, sig.published = false, 0, false
 		}
 	}

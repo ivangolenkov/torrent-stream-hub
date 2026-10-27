@@ -373,7 +373,7 @@ func TestEngineLifecycle_RecheckPolicyOnDirectStream(t *testing.T) {
 	if src2.Type != StreamSourceTorrent {
 		t.Fatalf("expected StreamSourceTorrent for new request after file change, got %s", src2.Type)
 	}
-	if src2.FallbackReason != FallbackReasonNotReady {
-		t.Fatalf("expected revoked verified readiness, got %s", src2.FallbackReason)
+	if src2.FallbackReason != FallbackReasonSizeMismatch {
+		t.Fatalf("expected direct-open size gate, got %s", src2.FallbackReason)
 	}
 }

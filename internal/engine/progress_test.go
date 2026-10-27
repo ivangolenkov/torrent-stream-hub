@@ -37,7 +37,7 @@ func TestAbsentStartupIsNotActiveOrVerifiedProgress(t *testing.T) {
 	}
 }
 
-func TestVerifiedProgressRevokesReplacedPayload(t *testing.T) {
+func TestManagedProgressRequiresRecheckAfterExternalChange(t *testing.T) {
 	e, tor := setupCompletedLifecycleTorrent(t)
 	model := e.GetTorrent(tor.Hash)
 	if model.ProgressSource != "verified" || model.Progress != 100 || model.Downloaded != model.Size || !model.MetadataKnown || !model.Files[0].OffsetKnown {
@@ -54,10 +54,16 @@ func TestVerifiedProgressRevokesReplacedPayload(t *testing.T) {
 		t.Fatal(err)
 	}
 	full := filepath.Join(e.DownloadDir(), root, "lifecycle", "video.mp4")
-	if err := os.Remove(full); err != nil {
+	// In-place external changes are unsupported while attached. Polling no
+	// longer performs a filesystem scan; explicit Recheck must detect corruption.
+	if err := os.WriteFile(full, make([]byte, 2048), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(full, make([]byte, 2048), 0600); err != nil {
+	model = e.GetTorrent(tor.Hash)
+	if model.Downloaded != model.Size {
+		t.Fatal("polling unexpectedly revalidated external payload")
+	}
+	if err := e.GetRawTorrent(tor.Hash).VerifyData(); err != nil {
 		t.Fatal(err)
 	}
 	model = e.GetTorrent(tor.Hash)

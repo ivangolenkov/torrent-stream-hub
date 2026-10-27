@@ -218,6 +218,9 @@ func (t *fileTorrentImpl) guardResumeFileWrite(index int) error {
 	t.freshMu.Lock()
 	sig := t.signatures[index]
 	unchanged := sig != nil && sig.valid && sameSignature(sig.FileInfo, st)
+	if t.managedPayload() {
+		unchanged = sig != nil && sig.valid && st != nil && os.SameFile(sig.FileInfo, st)
+	}
 	t.freshMu.Unlock()
 	if err == nil && st.Size() >= f.Length && unchanged {
 		return nil

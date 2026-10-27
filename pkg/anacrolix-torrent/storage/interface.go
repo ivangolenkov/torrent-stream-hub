@@ -62,8 +62,12 @@ type TorrentImpl struct {
 	// RevokeCheckpoint closes live freshness and durably revokes persisted trust
 	// before a known-invalid hash/layer transition. It is not a completion hint.
 	RevokeCheckpoint func(begin, end int) error
-	RefreshEmptyFile func(index int)
-	CachedEmptyFile  func(index int) bool
+	// ResetManagedPayload joins I/O, revokes live/durable trust and releases
+	// retained descriptors before explicit full verification. Never call under
+	// the torrent client lock.
+	ResetManagedPayload func(context.Context) error
+	RefreshEmptyFile    func(index int)
+	CachedEmptyFile     func(index int) bool
 	// CheckpointState is cached scheduling metadata, callable under Client.lock.
 	// It must not do I/O, block on mutation admission or grant payload readiness.
 	CheckpointState func() (revision uint64, dirty bool)

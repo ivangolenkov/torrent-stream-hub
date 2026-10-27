@@ -1,5 +1,22 @@
 # Фаза 44 — отчёт об имплементации
 
+## Уточнение модели доверия пользователем
+
+После сравнения с qBittorrent/libtorrent пользователь сообщил: «Нам не нужны
+более строгие обнаружения внешних изменений». Для следующего рефакторинга
+зафиксировано владение активным payload сервисом, без гарантии немедленного
+обнаружения внешних изменений; после них требуется остановка и Recheck.
+Per-chunk filesystem refresh и повторные open можно пересмотреть в пользу
+ограниченного переиспользования дескрипторов с lifecycle-инвалидацией.
+Полученные pieces по-прежнему хешируются, existing untrusted data проверяются,
+внутренние гонки, rooted containment и DiskFull остаются защищены. Новый контракт
+volume/reopen/resume и descriptor lifecycle ещё требуется разработать; это не
+разрешение игнорировать заведомо неверный том или возвращать устаревший trust.
+В рамках этого уточнения изменены только план/отчёт, не runtime/сервер.
+
+Последующая команда «Приступай к реализации» выполнена локально в managed-payload
+follow-up ниже; ограничение «runtime не изменён» выше относится к моменту решения.
+
 Статус: **основной runtime реализован; финальная приёмка/measurements не завершены**. Основание: [план](../phase44-selective-verification-and-download-concurrency.md). Пользовательский сервер не изменяется; все fixtures — временные.
 
 ## Актуализация platform gate
@@ -430,10 +447,15 @@ open доминирует, но **не доказывают**, какая из �
   WARN permission denied — injected storage-guard scenario, suite завершён PASS.
 - [x] Native Linux arm64 полный internal/payload suite — PASS
   (`phase44-root-open-payload-linux.log`), включая общий rooted boundary и volume checks.
-- [x] Windows amd64 storage/internal-payload cross-compile — PASS. Это новые rooted path/create
-  изменения: **нужен повторный native Windows CI**, прежнее подтверждение
-  пользователя принято для предыдущего writer-path revision и не отменяется.
-- [ ] Новый `make check` выполняется, лог `phase44-root-open-check.log`.
+- [x] Windows amd64 storage/internal-payload cross-compile — PASS.
+- [x] Повторный native Windows CI для root-open path/create изменений — PASS
+  по сообщению пользователя «Windows CI прошел». Агент независимо CI run не
+  проверял; platform gate для этого follow-up закрыт.
+- [x] Новый `make check` — PASS (`phase44-root-open-check.log`): root/fork
+  tests и race, 44 frontend tests/build, vet и application build. Root usecase
+  race — 296.231 s; fork race — 8.697 / 2.924 s. Предупреждения macOS linker
+  LC_DYSYMTAB не привели к ошибкам. Native Windows CI впоследствии подтверждён
+  пользователем; NAS attribution остаётся открытой.
 - [ ] NAS attribution/validation для новых sub-stages: не выполнялась; сервис
   не обновлялся агентом. Фаза и comparative acceptance остаются открыты.
 
@@ -454,3 +476,211 @@ helper реконструирует прежний existing-case path без н�
 нужны новые write_open_* deltas; без separately authorized deployment они
 недоступны. Кэшировать положительный результат проверки тома ради скорости
 не стали, поскольку это ослабило бы обнаружение смены/исчезновения volume.
+
+### Read-only анализ последнего рестарта 18:04 UTC
+
+По запросу пользователя получены GET logs/BT Health/torrents и 31 парный snapshot
+health + verification через ~2 s; сервер/config/payload не изменялись. Новый запуск
+2026-10-27 18:04:08 UTC, restore ~150 ms, skipped missing=4833 pieces. Resume
+запрошен в 18:04:20, HTTP action занял 8.16 s. В 18:04:21:
+`observation persistence postponed ... context deadline exceeded`. В полученном
+последнем shutdown есть closing engine, но прежнего close-storage deadline WARN
+нет; это не доказательство crash/power-loss durability. После запуска также один
+malformed extended-handshake WARN, без ENOENT/signature-conflict flood.
+
+В первом snapshot в 18:05:28 hash queue=23; в минутном окне
+18:05:39.345–18:06:39.416 UTC queue=0–1, active=0–1. Очередь не остаётся большим
+startup backlog, но hashing/sync иногда активны одновременно с download.
+Объект verification учитывает и новые полученные pieces; его active не доказывает
+исключительно проверку старого payload.
+
+За 60.07 s useful reception average=1.693 MiB/s, интервалы 0.078–11.519 MiB/s,
+connected peers=35–39. 6505 write calls; completed writer waits=6498 / 1467.99
+accumulated seconds. Wait-active обычно 18–28, один snapshot=0. Новых ошибок
+write stages и completion sync нет. Длительности completed операций могут
+пересекать границы окна, snapshots approximate, concurrent time складывается.
+
+| Stage | Delta accumulated seconds | Max с attachment, ms |
+| --- | --- | --- |
+| Write lease hold | 58.199 | 3479.397 |
+| WriteOpen (parent) | 45.339 | 2958.443 |
+| Application volume guard | 26.944 | 2332.636 |
+| Rooted path checks | 9.462 | 1513.680 |
+| Descriptor open | 4.902 | 1600.794 |
+| Descriptor identity | 4.015 | 1305.049 |
+| Mkdir | 0 (0 calls в окне) | 0.049 |
+| Payload WriteAt | 9.630 | 1453.680 |
+| Descriptor Stat around WriteAt | 3.099 | 1444.293 |
+| Descriptor Close | 0.035 | 0.106 |
+
+Volume guard — крупнейшая sub-stage: ~59% measured WriteOpen time (~46% hold
+total). Это уже измеренная application guard, а не предположение из старого
+aggregate open. По текущему wiring она вызывает guardPayloadIO/checkVolume:
+fresh DownloadDir root, volume marker и device ancestry. Какая операция внутри
+guard медленная (marker open/read, ancestry, root open или ожидание исполнения
+goroutine), данные пока не разделяют. Raw open/identity/stat/payload тоже имеют
+секундные maxima: нельзя объявить единственной причиной marker или утверждать
+kernel fsync causality. Возможны общая storage latency/конкуренция sync/SQL либо
+descheduling; нужны host I/O/CPU evidence и разбор volume-check path.
+
+Completion sync +53 / 21.820 accumulated seconds, errors=0. Completion persistence
+ошибка **вернулась**: dropped=3 в первом GET, затем 4; во всём парном sampling
+окне 4→4, pending=0. В коде completion.Status ошибка sticky (`lastErr` не
+очищается после успеха), поэтому это evidence хотя бы одного failed batch,
+а не доказательство непрерывной ошибки или SQL-причины каждого speed drop.
+Observation deadline при Resume — дополнительный сигнал persistence latency,
+но первичный SQLite error через API намеренно заменён generic message и не
+установлен. Durable resume revocation не следует смешивать с disposable hints.
+
+Вывод: устранённые duplicate pathwalk/MkdirAll и descriptor Close больше не
+объясняют все провалы. Следующее обоснованное направление — mandatory volume
+guard и общая I/O/persistence latency при всё ещё file-wide serialized writes.
+Не отключать guard/fsync и не кэшировать положительный volume approval как
+«исправление». Ускорение/регрессию относительно предыдущего окна по одному
+average не доказываем: разные payload/restore/peer conditions, не controlled test.
+Новых runtime изменений в рамках этого анализа не выполнялось.
+
+Evidence в OpenCode temp: `phase44-latest-open-health.json`,
+`phase44-latest-open-logs.txt`, `phase44-latest-open-logs-end.txt`,
+`phase44-latest-open-torrents.json`, `phase44-latest-open-samples.jsonl`.
+
+### ManagedPayload: реализация новой модели владения активными файлами
+
+#### Контракт и файлы
+
+- `storage/managed-files.go`: attachment-local LRU на **16 retained payload
+  descriptors**, включая reserved opening/closing slots. References исключают
+  eviction borrowed handles; readonly→write upgrade ждёт возврата ссылок. При
+  заполнении все занятые slots ждут cancelable notification, без overflow fd,
+  фоновых workers или I/O под cache mutex. Guards/rooted validation — на actual
+  acquisition/upgrade, не на каждом chunk. Eviction сначала закрывает старый fd;
+  Close errors остаются видимыми, failed I/O retires descriptor. Cap per attachment,
+  **не global process fd limit**; temporary metadata/direct-stream handles отдельны.
+- `NewFileClientOpts.ManagedPayload` opt-in: writable RootFS+VerifyOnOpen без
+  part-files; неподдерживаемая комбинация явно отклоняется. Application backend
+  `internal/engine/client_config.go` включает этот режим по умолчанию. Offline
+  recovery и default fork tests сохраняют прежний strict mode.
+- `file-torrent-io.go`, `file-piece.go`, `file-torrent.go`: writes/ReadAt/hash
+  WriteTo/completion sync разделяют retained inode. У writes нет per-chunk
+  before/after stat; refreshFile в managed mode не опрашивает namespace. Существующие
+  fresh/hashSnapshot/signature maps сохраняются как единственный live trust gate;
+  managed publication проверяет retained identity и internal invalidation, не mtime.
+  **Полученные pieces по-прежнему хешируются**, cache hit не создаёт readiness.
+- Все overlapping writes по-прежнему revoke persisted subset **до mutation**,
+  стирают hash snapshot/fresh trust и держат payload/lifecycle leases. Независимые
+  writes не аннулируют соседний hash только изменением общей mtime. Managed ReadAt
+  требует cached completion даже без resume hooks; WriteTo — explicit hashing path
+  для untrusted bytes. Short hash reads и non-cancel errors отзывают file trust.
+- Mandatory completion sync не отменён; Windows FlushFileBuffers получает writable
+  cached handle, включая upgrade после hashing existing file через readonly fd.
+  Checkpoint по-прежнему joins mutation/publication, читает rooted current evidence,
+  проверяет retained inode, синхронизирует и сверяет evidence повторно. Expected
+  internal writes больше не отбрасывают subset по acquisition mtime. Strict
+  PrepareRestore/RestoreCheckpoint metadata/volume validation не ослаблена.
+- `storage/interface.go`, `torrent.go`: full VerifyDataContext захватывает
+  ResetManagedPayload callback под Client.rLock, вызывает **вне Client.lock**.
+  Reset берёт lifecycle exclusive и все payload writer leases, joins readers,
+  закрывает live gate, пытается durable revoke и закрывает кеш; failed barrier
+  не разрешает hashing и не оставляет live readiness. Drop/detach/shutdown закрывают
+  дескрипторы до namespace work. Closed parent client отказывает cache access.
+- Pause сохраняет attachment/cache ради streams/seeding; это не обещание release.
+  Внешнюю замену делать при остановленном сервисе или detached attachment, после
+  внешних изменений — full Recheck. Piece-level VerifyData не сбрасывает весь кеш.
+  Активные external edits/replacement/unlink/mount change не поддерживаются и
+  могут остаться незамеченными/попасть в reads. Это **явное изменение модели**,
+  согласованное пользователем, не прежняя гарантия мгновенного обнаружения.
+- BT Health Go/TS DTO и projection/contract tests: `managed_payload`,
+  `file_cache_hits/misses/evictions/open`. Все diagnostics cached. WriteOpen/Close
+  теперь могут означать borrow/release, не syscalls; WriteStat/Account не выполняют
+  managed external-evidence refresh. Root sub-stages показывают реальные writable
+  acquisitions, включая Windows sync upgrades. Добавлены 4 atomic counters:
+  timing state всего 78 int64 = 624 B без padding + bounded cache metadata.
+  В кеше нет payload buffers; hashing использует 32 KiB buffer на bounded worker.
+- README, CONCURRENCY/STATE, phase plan и native CI selection обновлены. Storage
+  namespace workflows, WAL/FULL, ownership, sticky DiskFull, Range, selection,
+  CORS и QoS/refcount/debounce не изменялись. mmap не включён. Сервис не обновлялся.
+
+#### Проверки
+
+- [x] `managed-files_test.go`: 100 writes → один actual descriptor acquisition,
+  ни одного before/after WriteStat; общий fd для hash/flush; successful hash grants
+  completion, overlapping write отвергает stale result; соседние/shared-boundary
+  pieces допускаются. Cached-only readiness polling не делает stat.
+- [x] Checkpoint после внутренних writes сохраняет subset; valid checkpoint
+  restore/read/write-upgrade, failed durable revoke на cache hit не меняет bytes;
+  failed reset closes read gate и сохраняет pending obligation для retry.
+- [x] FD bound/cancelable capacity wait, same-file miss coalescing, LRU eviction
+  и обязательный guard при reacquisition; Reset joins payload readers; Close
+  закрывает retained fd и open gauge; closed parent rejects cached writer.
+- [x] Persistent completion после readonly hashing cache (Windows write-access
+  upgrade scenario); core `TestManagedPayloadExplicitRecheck` v1/v2/hybrid реально
+  хеширует данные, затем обнаруживает external corruption и reacquires handles.
+- [x] Engine/progress/direct-source tests адаптированы к новой модели: не требуем
+  implicit stat на polling, сохраняем direct-open size/type/security gates и
+  проверяем Recheck. `TestProgressSyncCannotRestoreBytesAfterManagedRecheck`
+  по-прежнему доказывает, что stale DB snapshot не возвращает revoked progress.
+- [x] Targeted core/storage race ×10 — PASS (2.242 / 2.050 s,
+  `phase44-managed-targeted-race.log`); engine/models/usecase projection/Recheck
+  race ×3 — PASS (1.363 / 1.029 / 2.740 s). Позднее полный fork race — PASS
+  (8.354 / 2.650 s, `phase44-managed-fork-race.log`).
+- [x] Native Linux arm64 полный storage suite и targeted core selective/hash/
+  checkpoint/managed/Recheck suites ×3 — PASS (`phase44-managed-*-linux.log`).
+  Permission denied/failed commit/context canceled logs — injected scenarios,
+  suites завершены PASS. Windows core/storage cross-compile — PASS.
+- [ ] Новый native Windows CI для descriptor lifetime/reset/Flush upgrade — нужен;
+  предыдущие Windows PASS остаются историческими, это новый runtime revision.
+- [x] Второй `make check` — PASS (`phase44-managed-check-final.log`): root/fork
+  tests/race, frontend, vet/build; usecase race 299.108 s, fork 8.771 / 3.017 s.
+  Первый прогон остановился на старом тесте, требовавшем external-change detection
+  от polling; тест обновлён на explicit Recheck, проверка stale DB fencing сохранена.
+- [x] Повторный `make check` после EOF retirement — PASS
+  (`phase44-managed-check-latest.log`): usecase race 301.416 s, fork 8.823 / 3.070 s,
+  frontend/vet/build. Capacity-wait test дополнительно усилен наблюдаемым waiter
+  barrier (не просто cancellation до admission).
+- [x] Финальная safety-доработка: known IOGuard failure на acquisition/checkpoint
+  latches cache error, clears live trust/hash snapshots и блокирует future hits до
+  detach/reopen. Нет обещания мгновенного external detection, но уже известная
+  unsafe volume не игнорируется. Новый barrier test покрывает обе точки. Targeted
+  core/storage/checkpoint race ×10 — PASS (`phase44-managed-final-guard-race.log`).
+  Linux full storage / targeted core ×3 и Windows cross-compile пересобраны после
+  этой доработки, PASS. Runtime после неё больше не менялся.
+- [x] Дополнительный usecase/engine safety race с package budget 600 s — PASS
+  (198.715 / 1.211 s, `phase44-managed-final-safety-race-long.log`). Исходный 180 s
+  budget истёк на сумме длинных storage/recovery suites; assertion/race failure
+  до timeout не было. Это не исправление deadlock и не замена failed assertion.
+- [x] Guard-fence `make check` обнаружил API regression: после GET symlink conflict
+  повторный HEAD получал generic 500 от сохранённой volume error. Известные
+  payload.ErrVolumeUnavailable/Unregistered теперь явно маппятся в HTTP 409,
+  unexpected I/O errors остаются 500. HEAD/download/ZIP safety race ×10 — PASS
+  (53.318 s, `phase44-managed-api-safety-race.log`), включая repeated requests.
+  Новые API tests добавлены в native CI selection. Storage runtime после guard
+  fence не менялся; это уточнение error mapping, не отключение guard.
+- [x] Core Recheck test усилен actual replacement inode при retained original fd,
+  а не только in-place corruption: v1/v2/hybrid race ×10 — PASS (1.437 s,
+  `phase44-managed-replacement-race.log`).
+- [x] Финальный `make check` после API mapping — PASS
+  (`phase44-managed-acceptance-check.log`): root/fork tests и race, 44 frontend
+  tests/build, vet и application build. Usecase race 293.867 s; fork race
+  8.727 / 2.927 s. Production source после старта не менялся. Предупреждения
+  macOS linker LC_DYSYMTAB не привели к ошибкам. Новый native Windows CI и
+  проверка поведения/скорости на NAS остаются открыты.
+- [ ] NAS deployment/throughput validation не выполнялись. Исходная SQLite
+  persistence error не объявляется исправленной этим изменением.
+
+#### Контролируемый hot-path benchmark
+
+`BenchmarkManagedPayloadChunkWrite`, macOS arm64/temp local FS, cached warm-up,
+перезапись одного 16 KiB chunk, `-benchtime=200x -count=3`. Сравниваются **оба
+реальных** режима текущего backend, без reconstruction старого кода. Volume guard
+— пустой callback, а не NAS marker/device checks. Нет seeder/stream/hash/sync в
+timed loop; высокая MB/s — скорость overwrite page cache, не download throughput.
+
+| Mode | ns/op ×3 | Guards/chunk | Descriptor stats/chunk | B/op / allocs |
+| --- | --- | --- | --- | --- |
+| strict | 42490 / 38074 / 38659 | 1 | 2 | 2512 / 46 |
+| managed | 2528 / 2754 / 2279 | 0 | 0 | 624 / 19 |
+
+Hot-path setup cost существенно меньше; обязательные hashing/sync намеренно не
+сравнивались как отключённые. На NAS эффект и остаточные write/fsync/SQL pauses
+следует измерять отдельно после авторизованного обновления. F44-01/F44-07 остаются
+частично непринятыми до всех comparative/native/runtime gates.

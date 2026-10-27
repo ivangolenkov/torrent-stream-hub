@@ -121,6 +121,30 @@ are removed. A file disappearing after validation is not recreated. All ownershi
 volume/recovery and revoke-before-mutation rules remain unchanged. NAS attribution
 inside the open stage still requires the new counters from an updated service.
 
+Managed-payload ownership revision: the normal engine backend now retains at most
+16 payload descriptors per attachment. Actual acquisitions/upgrades still perform
+the rooted and volume guards; hits no longer check the marker/path or run stat
+before/after each chunk. There is no immediate external-change detection promise.
+Cached progress is historical verified/restored attachment state, not a live
+filesystem assertion. Both fast and verify use this active model; verify still
+hashes on open. Explicit full Recheck resets cached handles and live/persistent
+trust before hashing, outside the library client lock. Failed durable reset closes
+the live gate and prevents verification from proceeding. Stale DB observations
+cannot restore bytes revoked by Recheck/internal mutation. Restore admission and
+checkpoint boundary validation remain enabled; cached descriptors grant no trust.
+
+Pause keeps the attachment for seeding/streams and does not guarantee handle
+release. Stop the service or detach before external replacement, then Recheck;
+use application move/locate/delete workflows for managed namespace changes. Drop/
+detach/shutdown join I/O before cache close and namespace work. Existing coordinator,
+ownership, DiskFull, selection, Range and QoS/refcount/debounce gates are unchanged.
+Default fork/offline backends remain strict. BT Health exposes managed_payload and
+file_cache_hits/misses/evictions/open from cached counters only.
+
+Known guard failure at acquisition/checkpoint fences cached I/O and revokes live
+readiness until detach/reopen via recovery. Retained descriptors do not allow a
+future hit to bypass an already observed unsafe volume boundary.
+
 In fast mode FileResumeHooks.Restore runs only on a remaining restore candidate,
 after namespace preflight/native initialization but BEFORE library publication.
 The library's tracked closedCtx/open generation is the attachment fence when no

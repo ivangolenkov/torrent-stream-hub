@@ -131,6 +131,11 @@ export interface StorageIOStageTimings {
 }
 
 export interface StorageIOTimings {
+  managed_payload: boolean;
+  file_cache_hits: number;
+  file_cache_misses: number;
+  file_cache_evictions: number;
+  file_cache_open: number;
   completion_sync_count: number;
   completion_sync_errors: number;
   completion_sync_active: number;

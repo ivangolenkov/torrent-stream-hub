@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"context"
 	"errors"
 	"expvar"
 	"fmt"
@@ -9,6 +10,7 @@ import (
 	"iter"
 	"log/slog"
 	"os"
+	"runtime"
 
 	g "github.com/anacrolix/generics"
 	"github.com/anacrolix/missinggo/v2/panicif"
@@ -33,6 +35,22 @@ var _ interface {
 
 func (me *filePieceImpl) Flush() (err error) {
 	for fileIndex, extent := range me.fileExtents() {
+		if me.t.managedPayload() {
+			// Windows FlushFileBuffers requires write access, even when hashing
+			// existing data populated the pool through a read-only descriptor.
+			lease, e := me.t.acquireManagedFile(fileIndex, runtime.GOOS == "windows")
+			if e != nil {
+				return e
+			}
+			e = lease.entry.file.Sync()
+			if e != nil {
+				lease.invalidate()
+			}
+			if e = errors.Join(e, lease.Close()); e != nil {
+				return e
+			}
+			continue
+		}
 		file := me.t.file(fileIndex)
 		file.mu.RLock()
 		name := me.t.pathForWrite(&file)
@@ -265,7 +283,11 @@ func (me *filePieceImpl) commitCompletion() error {
 		for i, st := range before {
 			now := current[i]
 			sig, typed := st.(*verifiedFileSignature)
-			if typed && !sig.valid || !sameSignature(st, now) {
+			matches := sameSignature(st, now)
+			if me.t.managedPayload() && typed {
+				matches = os.SameFile(sig.FileInfo, now)
+			}
+			if typed && !sig.valid || !matches {
 				me.t.freshMu.Unlock()
 				return fmt.Errorf("storage changed during verification")
 			}
@@ -512,6 +534,21 @@ func (me *limitWriter) Write(p []byte) (n int, err error) {
 func (me *filePieceImpl) writeFileTo(w io.Writer, fileIndex int, extent segments.Extent) (written int64, err error) {
 	if extent.Length == 0 {
 		return
+	}
+	if me.t.managedPayload() {
+		lease, err := me.t.acquireManagedFile(fileIndex, false)
+		if err != nil {
+			return 0, err
+		}
+		n, err := io.CopyBuffer(w, io.NewSectionReader(lease, extent.Start, extent.Length), make([]byte, 32<<10))
+		if err == nil && n != extent.Length {
+			err = io.ErrUnexpectedEOF
+		}
+		if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+			lease.invalidate()
+			err = errors.Join(err, me.t.revokeResumeFile(fileIndex))
+		}
+		return n, errors.Join(err, lease.Close())
 	}
 	file := me.t.file(fileIndex)
 	// Do we want io.WriterTo here, or are we happy to let that be type asserted in io.CopyN?

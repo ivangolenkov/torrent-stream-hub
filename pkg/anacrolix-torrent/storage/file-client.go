@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 
 	g "github.com/anacrolix/generics"
 	"github.com/anacrolix/log"
@@ -18,7 +19,8 @@ import (
 
 // File-based storage for torrents, that isn't yet bound to a particular torrent.
 type fileClientImpl struct {
-	opts NewFileClientOpts
+	opts   NewFileClientOpts
+	closed atomic.Bool
 }
 
 // ErrStoragePending retains validated metadata while an application prepares
@@ -70,6 +72,10 @@ type NewFileClientOpts struct {
 	// IOGuard checks the enrolled volume before rooted access/mutation. Paths
 	// are relative to RootFS. It never grants piece completion.
 	IOGuard func(string) error
+	// ManagedPayload assumes no external changes while attached. Rooted opens
+	// and volume checks run on descriptor acquisition, not on each chunk. Only
+	// writable VerifyOnOpen storage without part files supports this mode.
+	ManagedPayload bool
 	// ResumeHooks is called once per open before namespace mutations. A nil
 	// factory keeps the historical verified-only backend, never writable trust.
 	ResumeHooks FileResumeFactory
@@ -98,10 +104,13 @@ func NewFileOpts(opts NewFileClientOpts) ClientImplCloser {
 	if opts.Logger == nil {
 		opts.Logger = slog.Default()
 	}
-	return &fileClientImpl{opts}
+	return &fileClientImpl{opts: opts}
 }
 
 func (me *fileClientImpl) Close() error {
+	if me.closed.Swap(true) {
+		return nil
+	}
 	err := me.opts.PieceCompletion.Close()
 	if me.opts.RootFS != nil {
 		err = errors.Join(err, me.opts.RootFS.Close())
@@ -118,6 +127,12 @@ func (fs *fileClientImpl) OpenTorrent(
 	info *metainfo.Info,
 	infoHash metainfo.Hash,
 ) (_ TorrentImpl, err error) {
+	if fs.closed.Load() {
+		return TorrentImpl{}, os.ErrClosed
+	}
+	if fs.opts.ManagedPayload && (fs.opts.RootFS == nil || !fs.opts.VerifyOnOpen || fs.opts.ReadOnly || fs.opts.partFiles()) {
+		return TorrentImpl{}, fmt.Errorf("managed payload requires writable rooted verified storage without part files")
+	}
 	if fs.opts.ReadOnly && (fs.opts.RootFS == nil || fs.opts.ImportPartFiles || fs.opts.partFiles() || !fs.opts.NoCompletionRename || pieceCompletionIsPersistent(fs.opts.PieceCompletion)) {
 		return TorrentImpl{}, fmt.Errorf("read-only analysis requires rooted plain-name nonpersistent storage")
 	}
@@ -282,7 +297,7 @@ func (fs *fileClientImpl) OpenTorrent(
 		t.resume.pending = append([]byte(nil), resume.Pending...)
 	}
 	if fs.opts.RootFS != nil {
-		t.io = rootFileIo{root: fs.opts.RootFS, ctx: fs.opts.IOContext, readOnly: fs.opts.ReadOnly, onRead: fs.opts.IORead, guard: fs.opts.IOGuard, onEvent: fs.opts.IOEvent, timings: &t.ioTimings}
+		t.io = rootFileIo{root: fs.opts.RootFS, ctx: fs.opts.IOContext, readOnly: fs.opts.ReadOnly, onRead: fs.opts.IORead, guard: t.ioGuard(), onEvent: fs.opts.IOEvent, timings: &t.ioTimings}
 	}
 	if fs.opts.VerifyOnOpen {
 		t.fresh = make(map[int]pieceEvidence)
@@ -326,6 +341,9 @@ func (fs *fileClientImpl) OpenTorrent(
 		result.PrepareRestore = t.prepareRestore
 		result.RestoreCheckpoint = t.restoreCheckpoint
 		result.RevokeCheckpoint = t.revokeCheckpoint
+		if t.managedPayload() {
+			result.ResetManagedPayload = t.resetManagedPayload
+		}
 		if fs.opts.RootFS != nil {
 			result.RefreshEmptyFile = t.refreshEmptyFile
 			result.CachedEmptyFile = t.cachedEmptyFile
@@ -342,6 +360,10 @@ func (fs *fileClientImpl) OpenTorrent(
 			return TorrentImpl{}, errors.Join(err, t.Close())
 		}
 	}
-	result.IOTimings = t.ioTimings.snapshot
+	result.IOTimings = func() IOTimings {
+		s := t.ioTimings.snapshot()
+		s.ManagedPayload = t.managedPayload()
+		return s
+	}
 	return result, nil
 }

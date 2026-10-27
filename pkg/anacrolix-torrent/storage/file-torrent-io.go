@@ -21,7 +21,12 @@ type fileTorrentImplIO struct {
 // Returns EOF on short or missing file.
 func (fst fileTorrentImplIO) readFileAt(file file, b []byte, off int64) (n int, err error) {
 	fst.fts.logger().Debug("readFileAt", "file.safeOsPath", file.safeOsPath)
-	f, err := fst.fts.openSharedFile(file)
+	var f sharedFileIf
+	if fst.fts.managedPayload() {
+		f, err = fst.fts.acquireManagedFile(file.index, false)
+	} else {
+		f, err = fst.fts.openSharedFile(file)
+	}
 	if errors.Is(err, fs.ErrNotExist) {
 		// File missing is treated the same as a short file. Should we propagate this through the
 		// interface now that fs.ErrNotExist is a thing?
@@ -62,7 +67,7 @@ func (fst fileTorrentImplIO) ReadAt(b []byte, off int64) (n int, err error) {
 	if fst.fts.readClosed.Load() {
 		return 0, os.ErrClosed
 	}
-	if fst.fts.resume.hooks != nil && len(b) != 0 {
+	if (fst.fts.resume.hooks != nil || fst.fts.managedPayload()) && len(b) != 0 {
 		if off < 0 || int64(len(b)) > math.MaxInt64-off || fst.fts.info.PieceLength <= 0 || (off+int64(len(b))-1)/fst.fts.info.PieceLength >= int64(fst.fts.info.NumPieces()) {
 			return 0, io.EOF
 		}
@@ -142,6 +147,33 @@ func (fst fileTorrentImplIO) WriteAt(p []byte, off int64) (n int, err error) {
 	for i, e := range fst.fts.segmentLocater.LocateIter(
 		segments.Extent{Start: off, Length: int64(len(p))},
 	) {
+		if fst.fts.managedPayload() {
+			start := timings.writeOpen.begin()
+			lease, openErr := fst.fts.acquireManagedFile(i, true)
+			timings.writeOpen.end(start, openErr)
+			if openErr != nil {
+				return n, openErr
+			}
+			start = timings.writePayload.begin()
+			n1, writeErr := lease.entry.file.WriteAt(p[:e.Length], e.Start)
+			if writeErr == nil && int64(n1) != e.Length {
+				writeErr = io.ErrShortWrite
+			}
+			timings.writePayload.end(start, writeErr)
+			if writeErr != nil {
+				lease.invalidate()
+				writeErr = errors.Join(writeErr, fst.fts.revokeResumeFile(i))
+			}
+			start = timings.writeClose.begin()
+			closeErr := lease.Close()
+			timings.writeClose.end(start, closeErr)
+			n += n1
+			p = p[n1:]
+			if err := errors.Join(writeErr, closeErr); err != nil {
+				return n, err
+			}
+			continue
+		}
 		start := timings.writeGuard.begin()
 		guardErr := fst.fts.guardResumeFileWrite(i)
 		timings.writeGuard.end(start, guardErr)

@@ -115,6 +115,68 @@ or trusted by normal sessions; no worker is installed by default yet.
 
 ## Phase 42 verification and storage open
 
+### Current managed payload model (phase 44 ownership revision)
+
+The application opts into ManagedPayload on writable rooted VerifyOnOpen storage
+without part files. Default fork backends and offline analysis remain strict.
+External modification of an active attachment is unsupported; no immediate
+path/mtime/volume-change detection is promised. Full Recheck is required after
+external edits. Cached readiness is attachment-local historical verification,
+not current namespace evidence. Rooted security checks remain at acquisition.
+
+The attachment-local LRU holds at most 16 payload descriptors, including reserved
+opening/closing slots. Cache metadata is protected by its own short mutex; no
+open/close/guard/stat/sync/SQL runs under it. Acquisition occurs under an existing
+payload lease or lifecycle lease (completion sync). Same-file openings coalesce;
+read-to-write upgrade waits for outstanding leases, closes the old descriptor,
+and revalidates the rooted/volume boundary. No unbounded overflow handles or
+per-file goroutines are created; a full borrowed pool waits on a cancelable state
+notification. Cache errors propagate; a closed parent client rejects cache hits.
+
+A known application guard failure at acquisition or checkpoint latches a cache
+error, wakes capacity waiters and clears fresh/hashSnapshot/signature validity.
+Future hits fail, even for a previously open descriptor. Already admitted I/O is
+joined by the existing lifecycle barriers; it cannot be forcibly canceled inside
+an OS syscall. The attachment must detach/reopen for recovery. This distinguishes
+unsupported immediate external detection from ignoring an observed unsafe volume.
+
+Reads/hashing/completion sync use the same retained inode. Chunk writes do not
+capture before/after stat and do not refresh file-wide mtime evidence. Internal
+overlapping writes still erase hashSnapshot and revoke live/persisted trust before
+mutation; independent pieces retain their shared valid signature. Managed hash
+publication compares retained identity and invalidation state, not filesystem
+mtime/size after each chunk. No size/name/cache-hit creates completion authority.
+ReadAt in managed mode requires cached verified completion; hash WriteTo is the
+existing explicit verification path and may read untrusted data. Hash short reads
+and non-cancellation I/O failures revoke file trust and retire the affected handle.
+Mandatory sync remains, including write-access upgrades for Windows FlushFileBuffers.
+
+Close/reset acquire lifecycle exclusively, then all payload writer leases,
+joining read leases too, before closing retained descriptors. Full VerifyDataContext
+captures ResetManagedPayload under Client.rLock then calls it OUTSIDE Client.lock.
+Reset closes the live gate first, then attempts durable revocation and cache
+release; failure prevents Recheck from proceeding. A callback from an old hash
+cannot restore its erased/revoked snapshot. Pause does not detach storage: handles
+may remain for seeding/streams. Application namespace mutations detach/Drop first;
+part-file promotion is not supported by managed mode. Public piece-level VerifyData
+does not reset the entire cache; use full Recheck for external changes.
+
+Checkpoint still excludes active hashes, takes rooted current evidence under the
+lifecycle barrier, syncs and checks evidence again before publish. Managed mode
+compares retained file identity at this boundary, not stale acquisition mtime
+against expected internal writes. PrepareRestore/RestoreCheckpoint retain strict
+size/mtime/identity/volume checks. External same-inode changes while attached can
+invalidate historical trust without being noticed; this is explicitly outside
+the ownership model, not a claim of filesystem scrubbing.
+
+BT Health adds managed_payload and cached hit/miss/eviction/open counters. Open
+sub-stages measure real acquisition misses; WriteOpen/WriteClose may merely borrow/
+return a lease. The 16-descriptor cap is per attachment, not global. Fixed timing
+state is 78 atomic int64 fields (624 B excluding padding), plus bounded cache
+metadata/retained file objects; no payload buffers are held in the cache. Hashing
+uses a 32 KiB copy buffer per existing bounded worker. Earlier strict-mode lock
+and signature notes below apply where not superseded by this managed model.
+
 ### Phase 44 selective startup and signature publication
 
 Rooted VerifyOnOpen backends collect ordered, merged `InitialIncomplete` piece

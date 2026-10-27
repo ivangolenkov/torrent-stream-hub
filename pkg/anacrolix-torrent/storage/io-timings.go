@@ -11,14 +11,16 @@ import (
 // A completed operation may measure zero nanoseconds at platform clock resolution;
 // counts/activity, not strictly positive duration, identify observed operations.
 type IOTimings struct {
-	CompletionSyncCount, CompletionSyncErrors, CompletionSyncActive int64
-	CompletionSyncNS, CompletionSyncMaxNS                           int64
-	WriteLeaseWaitCount, WriteLeaseWaitActive                       int64
-	WriteLeaseWaitNS, WriteLeaseWaitMaxNS                           int64
-	WriteLeaseHold, WritePrepare, WriteGuard, WriteOpen             IOStageTimings
-	WriteStat, WritePayload, WriteAccount, WriteClose               IOStageTimings
-	WriteOpenGuard, WriteOpenPath, WriteOpenMkdir                   IOStageTimings
-	WriteOpenDescriptor, WriteOpenIdentity                          IOStageTimings
+	ManagedPayload                                                    bool
+	FileCacheHits, FileCacheMisses, FileCacheEvictions, FileCacheOpen int64
+	CompletionSyncCount, CompletionSyncErrors, CompletionSyncActive   int64
+	CompletionSyncNS, CompletionSyncMaxNS                             int64
+	WriteLeaseWaitCount, WriteLeaseWaitActive                         int64
+	WriteLeaseWaitNS, WriteLeaseWaitMaxNS                             int64
+	WriteLeaseHold, WritePrepare, WriteGuard, WriteOpen               IOStageTimings
+	WriteStat, WritePayload, WriteAccount, WriteClose                 IOStageTimings
+	WriteOpenGuard, WriteOpenPath, WriteOpenMkdir                     IOStageTimings
+	WriteOpenDescriptor, WriteOpenIdentity                            IOStageTimings
 }
 
 // Fixed-size per-stage diagnostics. Counts are stage invocations, not chunks;
@@ -58,6 +60,7 @@ func (s *ioStageTimings) snapshot() IOStageTimings {
 }
 
 type ioTimings struct {
+	cacheHits, cacheMisses, cacheEvictions, cacheOpen            atomic.Int64
 	syncCount, syncErrors, syncActive, syncNS, syncMaxNS         atomic.Int64
 	writeWaitCount, writeWaitActive, writeWaitNS, writeWaitMaxNS atomic.Int64
 	writeLeaseHold, writePrepare, writeGuard, writeOpen          ioStageTimings
@@ -68,6 +71,8 @@ type ioTimings struct {
 
 func (s *ioTimings) snapshot() IOTimings {
 	return IOTimings{
+		FileCacheHits: s.cacheHits.Load(), FileCacheMisses: s.cacheMisses.Load(),
+		FileCacheEvictions: s.cacheEvictions.Load(), FileCacheOpen: s.cacheOpen.Load(),
 		CompletionSyncCount: s.syncCount.Load(), CompletionSyncErrors: s.syncErrors.Load(),
 		CompletionSyncActive: s.syncActive.Load(), CompletionSyncNS: s.syncNS.Load(), CompletionSyncMaxNS: s.syncMaxNS.Load(),
 		WriteLeaseWaitCount: s.writeWaitCount.Load(), WriteLeaseWaitActive: s.writeWaitActive.Load(),

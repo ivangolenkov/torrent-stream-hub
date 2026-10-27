@@ -303,8 +303,8 @@ func TestStreamSource_SizeMismatchBlocksDisk(t *testing.T) {
 	if source.Type != StreamSourceTorrent {
 		t.Fatalf("expected StreamSourceTorrent, got %s", source.Type)
 	}
-	if source.FallbackReason != FallbackReasonNotReady {
-		t.Fatalf("expected revoked verified readiness, got %s", source.FallbackReason)
+	if source.FallbackReason != FallbackReasonSizeMismatch {
+		t.Fatalf("expected direct-open size gate, got %s", source.FallbackReason)
 	}
 }
 
@@ -345,8 +345,8 @@ func TestStreamSource_DirectoryInsteadOfFile(t *testing.T) {
 	if source.Type != StreamSourceTorrent {
 		t.Fatalf("expected StreamSourceTorrent, got %s", source.Type)
 	}
-	if source.FallbackReason != FallbackReasonNotReady {
-		t.Fatalf("expected revoked verified readiness, got %s", source.FallbackReason)
+	if source.FallbackReason != FallbackReasonNotRegularFile {
+		t.Fatalf("expected direct-open regular-file gate, got %s", source.FallbackReason)
 	}
 }
 

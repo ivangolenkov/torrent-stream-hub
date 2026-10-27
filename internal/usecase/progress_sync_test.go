@@ -2,11 +2,12 @@ package usecase
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"testing"
 )
 
-func TestProgressSyncCannotRestoreReplacedPayloadBytes(t *testing.T) {
+func TestProgressSyncCannotRestoreBytesAfterManagedRecheck(t *testing.T) {
 	uc, repo, cleanup := setupTorrentUseCase(t)
 	defer cleanup()
 	tor, path := completedSafetyFile(t, uc, "sync-replaced", true)
@@ -21,10 +22,12 @@ func TestProgressSyncCannotRestoreReplacedPayloadBytes(t *testing.T) {
 	if stale.Progress != 100 || stale.ProgressSource != "verified" {
 		t.Fatal("fixture not verified")
 	}
-	if err := os.Remove(path); err != nil {
+	if err := os.WriteFile(path, bytes.Repeat([]byte("X"), 1024), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(path, bytes.Repeat([]byte("X"), 1024), 0600); err != nil {
+	// Managed payload no longer promises mutation detection during polling.
+	// Explicit Recheck revokes trust; a stale DB snapshot must not restore it.
+	if err := uc.engine.GetRawTorrent(tor.Hash).VerifyDataContext(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	persistForTest(t, uc, tor.Hash)

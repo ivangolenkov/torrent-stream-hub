@@ -26,8 +26,8 @@ func TestBTHealthStorageIOTimings(t *testing.T) {
 		if io.CompletionSyncCount != before.CompletionSyncCount || io.CompletionSyncNS != before.CompletionSyncNS || io.WriteLeaseWaitNS != before.WriteLeaseWaitNS {
 			t.Fatal("incorrect timing projection", io, before)
 		}
-		gotStages := []models.StorageIOStageTimings{io.WriteLeaseHold, io.WritePrepare, io.WriteGuard, io.WriteOpen, io.WriteStat, io.WritePayload, io.WriteAccount, io.WriteClose}
-		stages := []storage.IOStageTimings{before.WriteLeaseHold, before.WritePrepare, before.WriteGuard, before.WriteOpen, before.WriteStat, before.WritePayload, before.WriteAccount, before.WriteClose}
+		gotStages := []models.StorageIOStageTimings{io.WriteLeaseHold, io.WritePrepare, io.WriteGuard, io.WriteOpen, io.WriteStat, io.WritePayload, io.WriteAccount, io.WriteClose, io.WriteOpenGuard, io.WriteOpenPath, io.WriteOpenMkdir, io.WriteOpenDescriptor, io.WriteOpenIdentity}
+		stages := []storage.IOStageTimings{before.WriteLeaseHold, before.WritePrepare, before.WriteGuard, before.WriteOpen, before.WriteStat, before.WritePayload, before.WriteAccount, before.WriteClose, before.WriteOpenGuard, before.WriteOpenPath, before.WriteOpenMkdir, before.WriteOpenDescriptor, before.WriteOpenIdentity}
 		for i, stage := range stages {
 			if gotStages[i] != storageIOStage(stage) {
 				t.Fatalf("stage %d projection differs", i)

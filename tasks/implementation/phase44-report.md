@@ -2,6 +2,15 @@
 
 Статус: **основной runtime реализован; финальная приёмка/measurements не завершены**. Основание: [план](../phase44-selective-verification-and-download-concurrency.md). Пользовательский сервер не изменяется; все fixtures — временные.
 
+## Актуализация platform gate
+
+- [x] Native Windows CI gate **закрыт**: пользователь сообщил «CI прошел» и
+  поручил отметить gate завершённым. Результат принят по подтверждению
+  пользователя; агент независимо CI run не проверял.
+- Открытые упоминания Windows ниже отражают состояние на момент соответствующих
+  проверок и этим подтверждением заменены. Сравнительные measurements и NAS
+  validation остаются незавершёнными; F44-01/F44-07 и фаза целиком не закрываются.
+
 ## Блок 1 — воспроизведение и контракт до runtime-изменений
 
 `storage/verification_concurrency_test.go` детерминированно воспроизвёл `storage changed during verification` без внешнего writer: piece 1 пересекает a/b, после stat a и до stat b обычная запись piece 0 обновляет общую подпись a. Captured current[] оказывается старее mutable hashSnapshot. Baseline test PASS с ожидаемым конфликтом; после исправления он должен стать regression test, требующим успешной публикации.
@@ -301,3 +310,147 @@ lease scope (не старый бинарник). Neighbor latency:
 
 Общий call всё ещё ждёт Close, lifecycle barrier не сокращён. Это не swarm
 throughput benchmark, не оценка настоящего NAS Close и не закрытие F44-01/F44-07.
+
+### Read-only анализ после пользовательского рестарта 17:29 UTC
+
+По запросу «Проанализируй логи после рестарта» выполнены GET logs/health/torrents,
+без runtime/config/payload изменений. Логи подтверждают новый запуск
+2026-10-27 17:29:04 UTC, restore 116 ms, negative startup skips=5258 pieces,
+Resume в 17:29:14. Новые per-stage records присутствуют; точный build ID не получен.
+На предыдущем shutdown в 17:28:59 есть `failed to close torrent storage: context
+deadline exceeded` — отдельная нерешённая проблема shutdown, не доказанная причина
+текущих скачков. После запуска в полученных логах только четыре malformed peer
+extended-handshake WARN, без signature conflict/ENOENT flood/storage errors.
+Ошибки отдельных peer handshakes не объясняют очередь локальных writers.
+
+31 BT Health snapshot через 2 s, 17:31:38.240–17:32:38.332 UTC (60.09 s):
+
+- Useful reception average 1.883 MiB/s; двухсекундные rates 0.05–10.41 MiB/s,
+  displayed 0–14.14 MiB/s, connected peers 31–35. Провалы реального приёма остались;
+  UI sampler дополнительно подчёркивает их: в одном интервале useful rate
+  7.89 MiB/s при displayed 0.27 MiB/s.
+- Payload writer wait active=16–20 во всех snapshots; 7201 completed contention
+  events и 1045.64 accumulated wait seconds. Это сумма параллельных ожиданий,
+  не wall time. Mean завершившихся waits в слабых интервалах до 1.89 s.
+- 7239 completed write-range holds, 61.843 accumulated seconds. WriteOpen:
+  7239 calls / 52.109 s, около 84% measured completed hold total; mean 7.20 ms,
+  максимум с attachment 1.726 s. На большинстве sampling points активна именно
+  стадия open. Значения completed counters могут включать операции, начавшиеся
+  до окна, а stages перекрываются с hold; это не disk-utilization estimate.
+- WritePayload 8.064 s (max с attachment 1.366 s), descriptor Stat 1.639 s
+  (max 1.356 s), Close 0.041 s (mean 5.67 µs, max 182 µs). Prepare/guard/accounting
+  суммарно ~0.017 s. Новых stage errors=0. Close в этом окне не bottleneck.
+- Completion sync: +53 calls / 24.067 accumulated seconds, errors=0.
+  Дисковая конкуренция sync с open/write возможна, но этими counters не доказана.
+- Completion persistence error отсутствует, pending/dropped=0 в начале/конце.
+  Это отсутствие ошибки в данном запуске/окне, не доказательство её исправления.
+- Отдельные GET torrents после sampling: fast partial restore поколения 38,
+  restored_bytes=3036676096, verification status=completed, queue/active=0,
+  freshly_verified_bytes ~1.79 GB. Отсутствие backlog подтверждено после окна,
+  verification queue внутри каждого BT Health snapshot не измерялась.
+
+Вывод: основная измеренная задержка держателя file-wide write lease сейчас
+**в rooted open path**, не в descriptor Close или durable revoke. По коду
+rootFileIo.open включает relative path checks, application IOGuard, затем
+openRootFileObserved с повторными rooted checks и open/fstat. Application guard
+`guardPayloadIO → checkVolume` открывает DownloadDir root, читает volume marker
+через `payload.CheckVolume`, проверяет device ancestry через FindVolumeRoot.
+Эта работа выполняется при каждом open, включая сетевые chunks. Это установленная
+I/O amplification по коду и кандидат внутри медленной стадии, но counters пока
+не разделяют guard/pathwalk/syscall; объявлять виновным именно marker или fsync
+преждевременно. Следующий локальный блок — детерминированное воспроизведение
+задержки guard/open и разделение подстадий, затем сокращение лишних повторных
+проверок без отключения volume/containment/revoke/signature safety gates.
+
+Сравнение с прежними 30–35 waiters не является controlled before/after: peers,
+payload и стартовое состояние различаются. Уменьшение скачков, отмеченное
+пользователем, не превращается в доказанный end-to-end throughput gain.
+Evidence: временные файлы OpenCode `phase44-restart-health.json`,
+`phase44-restart-logs.txt`, `phase44-restart-logs-latest.txt`,
+`phase44-restart-samples.jsonl`, `phase44-restart-torrents.json`.
+
+### Root-open follow-up: подстадии и устранение лишних операций
+
+Команда пользователя: «Приступай к поиску точной причины и оптимизации».
+Работа локальная, без deploy/restart/config/payload изменений на сервере.
+
+**Установлено по коду и локальным probe-budget tests:** прежний writer open
+выполнял `relative` (полный rooted pathwalk), затем application guard, затем
+`openRootFileObserved` с повторным полным pathwalk и leaf identity snapshot.
+При каждом O_CREATE, включая существующий файл каждого network chunk, также
+вызывался MkdirAll. Это повторная metadata-работа под exclusive file payload
+lease; данные предыдущего sampling показывают, что именно родительская стадия
+open доминирует, но **не доказывают**, какая из её подстадий давала секундные
+задержки на NAS. Это ограничение остаётся явным.
+
+#### Изменения
+
+- `storage/file-io-root.go`: начальное преобразование пути теперь только
+  lexical/root-relative. Application IOGuard выполняется каждый раз, без TTL и
+  cached positive approval. **После** callback остаются полная filesystem
+  validation всех компонентов, pre-open leaf stat и post-open descriptor identity/
+  regular-file/hardlink checks. Callback-installed symlink отвергается; прежний
+  двойной pathwalk заменён одним, а не переносом проверки до callback.
+- MkdirAll только для отсутствующего entry; существующий файл не требует
+  повторного создания каталогов. Для existing non-exclusive open снимается
+  O_CREATE: исчезновение между stat и open приводит к ошибке, а не созданию
+  пустого replacement перед обнаружением identity mismatch. O_EXCL enrollment
+  semantics сохранены. Context повторно проверяется после задержанного guard.
+- `storage/io-timings.go`, `file-client.go`: attachment-local write-only
+  `write_open_guard/path/mkdir/descriptor/identity` records. Guard включает
+  application volume validation; path — полный walk + pre-open leaf identity;
+  descriptor — Root.OpenFile; identity — fstat и проверки открытого файла.
+  Reads/syncs не увеличивают writer-open sub-stages. Public/unattached helper
+  с nil timing pointer не читает часы. Expected ENOENT при create не stage error.
+- Engine/models/TS и projection/contract tests расширены на пять nested records.
+  Polling по-прежнему только atomic snapshot. Пять дополнительных fixed records,
+  всего 74 atomic int64 = 592 B без padding на attachment, без queues/workers/cache.
+- Добавлен `storage/root_open_test.go`; README, CONCURRENCY/STATE и phase plan
+  обновлены. Durable revoke, payload/lifecycle leases, hash/snapshot публикация,
+  volume markers/device ancestry, ownership, fsync и recovery gates не отключены.
+
+#### Детерминированные тесты и benchmark
+
+- [x] Барьеры каждой open-подстадии: guard/path/mkdir/descriptor/identity видны
+  одновременно с parent WriteOpen и lease hold; до завершения writer сохраняет
+  исключение; polling не изменяет counters; после завершения gauges очищены.
+- [x] Три opening существующего fixture a/b/data: 12 Lstat attempts, ноль
+  MkdirAll, три guard calls, open/fstat по три. Missing-file fixture создаёт
+  parents только при первом open; повторный open не вызывает mkdir.
+- [x] Guard failure, cancellation внутри guard, symlink installation callback,
+  outside-root и read-only access, replace/removal между snapshot и actual open.
+  Disappeared entry не создаётся заново; O_EXCL не перезаписывает existing file.
+- [x] Test-only reconstruction прежнего existing-file пути: a/b/data требует
+  7 Lstat attempts + 1 MkdirAll против 4 + 0 теперь, guard остаётся 1 в обоих.
+  Это observed logical attempts, не полный kernel syscall count os.Root/guard.
+- [x] Полный macOS storage race — PASS (2.566 s); targeted root-open race ×30 —
+  PASS (1.545 s, `phase44-root-open-race.log`). Engine/models race ×3 — PASS
+  (1.234 / 1.029 s). `git diff --check` — PASS.
+- [x] Native Linux arm64 полный storage suite — PASS (`phase44-root-open-linux.log`).
+  WARN permission denied — injected storage-guard scenario, suite завершён PASS.
+- [x] Native Linux arm64 полный internal/payload suite — PASS
+  (`phase44-root-open-payload-linux.log`), включая общий rooted boundary и volume checks.
+- [x] Windows amd64 storage/internal-payload cross-compile — PASS. Это новые rooted path/create
+  изменения: **нужен повторный native Windows CI**, прежнее подтверждение
+  пользователя принято для предыдущего writer-path revision и не отменяется.
+- [ ] Новый `make check` выполняется, лог `phase44-root-open-check.log`.
+- [ ] NAS attribution/validation для новых sub-stages: не выполнялась; сервис
+  не обновлялся агентом. Фаза и comparative acceptance остаются открыты.
+
+Benchmark `BenchmarkRootWriteOpenExisting`, macOS arm64/local temp FS,
+existing 4 B file a/b/data, `-benchtime=200x -count=3`, includes descriptor Close.
+Guard — пустой callback, **не настоящий NAS volume guard**. Legacy test-only
+helper реконструирует прежний existing-case path без новых counters; optimized
+вариант включает новые timing atomics. Это не старый бинарник и не swarm test.
+
+| Path | ns/op ×3 | B/op | allocs/op | Lstat attempts / MkdirAll calls |
+| --- | --- | --- | --- | --- |
+| legacy reconstruction | 73734 / 71840 / 71970 | 3097 | 64 | 7 / 1 |
+| optimized | 47752 / 46316 / 48664 | 1897 | 38 | 4 / 0 |
+
+Локальный hot-path open ускорен примерно на треть, metadata probes/allocations
+снижены. Переносить это число на NAS нельзя: настоящий volume guard всё ещё
+читает marker и проверяет ancestry. Для точной атрибуции секундных NAS pauses
+нужны новые write_open_* deltas; без separately authorized deployment они
+недоступны. Кэшировать положительный результат проверки тома ради скорости
+не стали, поскольку это ослабило бы обнаружение смены/исчезновения volume.

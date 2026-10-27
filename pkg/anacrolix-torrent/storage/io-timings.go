@@ -17,6 +17,8 @@ type IOTimings struct {
 	WriteLeaseWaitNS, WriteLeaseWaitMaxNS                           int64
 	WriteLeaseHold, WritePrepare, WriteGuard, WriteOpen             IOStageTimings
 	WriteStat, WritePayload, WriteAccount, WriteClose               IOStageTimings
+	WriteOpenGuard, WriteOpenPath, WriteOpenMkdir                   IOStageTimings
+	WriteOpenDescriptor, WriteOpenIdentity                          IOStageTimings
 }
 
 // Fixed-size per-stage diagnostics. Counts are stage invocations, not chunks;
@@ -30,11 +32,17 @@ type ioStageTimings struct {
 }
 
 func (s *ioStageTimings) begin() time.Time {
+	if s == nil {
+		return time.Time{}
+	}
 	s.active.Add(1)
 	return time.Now()
 }
 
 func (s *ioStageTimings) end(start time.Time, err error) {
+	if s == nil {
+		return
+	}
 	ns := time.Since(start).Nanoseconds()
 	s.ns.Add(ns)
 	recordIOMax(&s.maxNS, ns)
@@ -54,6 +62,8 @@ type ioTimings struct {
 	writeWaitCount, writeWaitActive, writeWaitNS, writeWaitMaxNS atomic.Int64
 	writeLeaseHold, writePrepare, writeGuard, writeOpen          ioStageTimings
 	writeStat, writePayload, writeAccount, writeClose            ioStageTimings
+	writeOpenGuard, writeOpenPath, writeOpenMkdir                ioStageTimings
+	writeOpenDescriptor, writeOpenIdentity                       ioStageTimings
 }
 
 func (s *ioTimings) snapshot() IOTimings {
@@ -66,6 +76,9 @@ func (s *ioTimings) snapshot() IOTimings {
 		WriteGuard: s.writeGuard.snapshot(), WriteOpen: s.writeOpen.snapshot(),
 		WriteStat: s.writeStat.snapshot(), WritePayload: s.writePayload.snapshot(),
 		WriteAccount: s.writeAccount.snapshot(), WriteClose: s.writeClose.snapshot(),
+		WriteOpenGuard: s.writeOpenGuard.snapshot(), WriteOpenPath: s.writeOpenPath.snapshot(),
+		WriteOpenMkdir: s.writeOpenMkdir.snapshot(), WriteOpenDescriptor: s.writeOpenDescriptor.snapshot(),
+		WriteOpenIdentity: s.writeOpenIdentity.snapshot(),
 	}
 }
 

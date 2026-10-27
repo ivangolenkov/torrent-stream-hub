@@ -19,6 +19,7 @@ type rootFileIo struct {
 	readOnly bool
 	onRead   func(string, int64)
 	guard    func(string) error
+	timings  *ioTimings // write opens only; reads/syncs do not enter write sub-stages
 }
 
 var ErrUnsafeFile = errors.New("unsafe storage file")
@@ -31,39 +32,81 @@ func OpenRootFile(root *os.Root, name string, flags int) (*os.File, error) {
 }
 
 func openRootFileObserved(root *os.Root, name string, flags int, observe func(string, string)) (*os.File, error) {
+	return openRootFileMeasured(root, name, flags, observe, nil)
+}
+
+func openRootFileMeasured(root *os.Root, name string, flags int, observe func(string, string), timings *ioTimings) (*os.File, error) {
 	if !filepath.IsLocal(name) || filepath.Clean(name) == "." {
 		return nil, ErrUnsafeFile
 	}
 	r := rootFileIo{root: root, onEvent: observe}
+	var path, mkdir, descriptor, identity *ioStageTimings
+	if timings != nil {
+		path, mkdir = &timings.writeOpenPath, &timings.writeOpenMkdir
+		descriptor, identity = &timings.writeOpenDescriptor, &timings.writeOpenIdentity
+	}
+	start := path.begin()
 	rel, err := r.relative(filepath.Join(root.Name(), name))
 	if err != nil {
+		path.end(start, err)
 		return nil, err
 	}
 	r.event("lstat", rel)
 	expected, err := root.Lstat(rel)
+	pathErr := err
+	if flags&os.O_CREATE != 0 && errors.Is(err, os.ErrNotExist) {
+		pathErr = nil
+	}
+	path.end(start, pathErr)
 	if err != nil && !(flags&os.O_CREATE != 0 && errors.Is(err, os.ErrNotExist)) {
 		return nil, err
 	}
-	if flags&os.O_CREATE != 0 {
-		if err := root.MkdirAll(filepath.Dir(rel), dirPerm); err != nil {
+	if flags&os.O_CREATE != 0 && expected == nil {
+		start = mkdir.begin()
+		r.event("mkdir", filepath.Dir(rel))
+		err := root.MkdirAll(filepath.Dir(rel), dirPerm)
+		mkdir.end(start, err)
+		if err != nil {
 			return nil, err
 		}
 	}
+	// Existing payload needs an open, not a create operation. If it disappears
+	// after validation, fail closed instead of recreating an empty replacement
+	// and discovering the identity mismatch only after that mutation. Preserve
+	// O_EXCL semantics for enrollment/public callers.
+	if expected != nil && flags&os.O_EXCL == 0 {
+		flags &^= os.O_CREATE
+	}
+	start = descriptor.begin()
 	r.event("open", rel)
 	f, err := root.OpenFile(rel, flags, filePerm)
+	descriptor.end(start, err)
 	if err != nil {
 		return nil, err
 	}
+	start = identity.begin()
 	r.event("fstat", rel)
 	st, err := f.Stat()
 	if err != nil || !st.Mode().IsRegular() || FileHasMultipleLinks(f, st) || expected != nil && !os.SameFile(expected, st) {
+		identity.end(start, ErrUnsafeFile)
 		f.Close()
 		return nil, ErrUnsafeFile
 	}
+	identity.end(start, nil)
 	return f, nil
 }
 
 func (r rootFileIo) relative(name string) (string, error) {
+	rel, err := r.relativeName(name)
+	if err != nil {
+		return "", err
+	}
+	return r.validateRelative(rel)
+}
+
+// Lexical conversion only. The full rooted path check must still run after
+// application guard callbacks and before opening or creating payload.
+func (r rootFileIo) relativeName(name string) (string, error) {
 	base, err := filepath.Abs(r.root.Name())
 	if err != nil {
 		return "", err
@@ -76,6 +119,10 @@ func (r rootFileIo) relative(name string) (string, error) {
 	if err != nil || !filepath.IsLocal(rel) || rel == "." {
 		return "", fmt.Errorf("storage path outside root")
 	}
+	return rel, nil
+}
+
+func (r rootFileIo) validateRelative(rel string) (string, error) {
 	parts := strings.Split(rel, string(os.PathSeparator))
 	for i := range parts {
 		r.event("lstat", filepath.Join(parts[:i+1]...))
@@ -97,22 +144,36 @@ func (r rootFileIo) relative(name string) (string, error) {
 }
 
 func (r rootFileIo) open(name string, flags int) (*os.File, error) {
+	return r.openMeasured(name, flags, nil)
+}
+
+func (r rootFileIo) openMeasured(name string, flags int, timings *ioTimings) (*os.File, error) {
 	if r.readOnly && flags != os.O_RDONLY {
 		return nil, os.ErrPermission
 	}
 	if r.ctx != nil && r.ctx.Err() != nil {
 		return nil, r.ctx.Err()
 	}
-	rel, err := r.relative(name)
+	rel, err := r.relativeName(name)
 	if err != nil {
 		return nil, err
 	}
 	if r.guard != nil {
-		if err := r.guard(rel); err != nil {
+		var stage *ioStageTimings
+		if timings != nil {
+			stage = &timings.writeOpenGuard
+		}
+		start := stage.begin()
+		err := r.guard(rel)
+		stage.end(start, err)
+		if err != nil {
 			return nil, err
 		}
 	}
-	return openRootFileObserved(r.root, rel, flags, r.onEvent)
+	if r.ctx != nil && r.ctx.Err() != nil {
+		return nil, r.ctx.Err()
+	}
+	return openRootFileMeasured(r.root, rel, flags, r.onEvent, timings)
 }
 
 func (r rootFileIo) event(operation, path string) {
@@ -171,7 +232,7 @@ func (r rootFileIo) openForRead(name string) (fileReader, error) {
 	return rootReader{classicFileReader: classicFileReader{f}, ctx: r.ctx, onRead: r.onRead, path: name}, err
 }
 func (r rootFileIo) openForWrite(name string, _ int64) (fileWriter, error) {
-	f, err := r.open(name, os.O_WRONLY|os.O_CREATE)
+	f, err := r.openMeasured(name, os.O_WRONLY|os.O_CREATE, r.timings)
 	if err != nil {
 		return nil, err
 	}

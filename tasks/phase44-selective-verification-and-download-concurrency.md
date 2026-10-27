@@ -2,7 +2,9 @@
 
 ## Статус и зависимости
 
-- Статус: **основной runtime реализован, локальный `make check` пройден**. Negative startup planning, signature/write publication, received-piece priority и cached диагностика проверены локально. Отдельные measurements и native Windows gate остаются открыты; подробности в [отчёте](implementation/phase44-report.md). Фаза не объявляется завершённой.
+- Статус: **основной runtime реализован, локальный `make check` пройден; native Windows CI gate закрыт по подтверждению пользователя**. Negative startup planning, signature/write publication, received-piece priority и cached диагностика проверены локально. Отдельные measurements остаются открыты; подробности в [отчёте](implementation/phase44-report.md). Фаза не объявляется завершённой.
+- [x] Native Windows CI gate: пользователь подтвердил успешный CI после исправлений; результат принят с его слов, без независимой проверки CI run агентом.
+- [ ] Повторная native Windows проверка последующего root-open follow-up: изменения pathwalk/create требуют нового CI; прежний успешный gate выше относится к предыдущей версии.
 - Зависимость: фаза 43 завершена; сохраняются [контракт fast resume](phase43-fast-resume-contract.md), гарантии хранения фаз 41–42 и действующий lifecycle/coordinator.
 - Этот файл — план, не команда на изменение runtime или развёрнутого сервиса. Начинать реализацию по отдельной команде пользователя; блоки выполнять последовательно после проверки приёмки предыдущего.
 - После каждого значимого блока создавать/обновлять `tasks/implementation/phase44-report.md`: изменения, команды, измерения, DoD и отклонения. Следующую фазу автоматически не начинать.
@@ -22,6 +24,12 @@ sync сохраняются. Добавлены cached `BT Health → storage_io
 descriptor-only final Close из payload lease (rooted VerifyOnOpen без part-files),
 с сохранением lifecycle/revoke/signature fencing. Open/stat/payload write остаются
 сериализованными; устранение всех скачков на NAS этим не заявляется.
+
+Root-open follow-up по следующей команде пользователя: добавлены write-only
+guard/path/mkdir/descriptor/identity sub-stages, убраны duplicate pathwalk и
+MkdirAll/O_CREATE для существующего payload. Полная rooted validation остаётся
+после application guard; volume approval не кэшируется. Локальный benchmark и
+точные ограничения атрибуции на NAS отражены в отчёте.
 
 ## Проблема и исходные наблюдения
 

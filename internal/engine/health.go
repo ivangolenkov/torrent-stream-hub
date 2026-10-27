@@ -109,6 +109,9 @@ func (e *Engine) BTHealth() *models.BTHealth {
 				WriteGuard: storageIOStage(io.WriteGuard), WriteOpen: storageIOStage(io.WriteOpen),
 				WriteStat: storageIOStage(io.WriteStat), WritePayload: storageIOStage(io.WritePayload),
 				WriteAccount: storageIOStage(io.WriteAccount), WriteClose: storageIOStage(io.WriteClose),
+				WriteOpenGuard: storageIOStage(io.WriteOpenGuard), WriteOpenPath: storageIOStage(io.WriteOpenPath),
+				WriteOpenMkdir: storageIOStage(io.WriteOpenMkdir), WriteOpenDescriptor: storageIOStage(io.WriteOpenDescriptor),
+				WriteOpenIdentity: storageIOStage(io.WriteOpenIdentity),
 			}
 		}
 

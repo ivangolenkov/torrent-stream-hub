@@ -904,6 +904,25 @@ files, unknown/buffered backends, part-files and legacy verification retain the
 old close exclusion. Open/stat/write/signature accounting remain serialized;
 this change does not claim to eliminate every source of bursty download speed.
 
+Rooted writer opens additionally split `write_open` into cached sub-stage records:
+`write_open_guard` (application volume guard), `write_open_path` (rooted pathwalk
+and pre-open identity snapshot), `write_open_mkdir` (missing-parent creation),
+`write_open_descriptor` (`Root.OpenFile`) and `write_open_identity` (descriptor
+stat, regular-file/hardlink checks and comparison with the pre-open identity).
+These records use the same count/errors/active/ns/max_ns shape and cover writer
+opens only, not reads or completion sync. The sub-stages nest inside `write_open`;
+do not add their totals to the parent. Expected missing data for a create is not
+a path-check error. The application guard is still called on every write open;
+there is no cached or time-limited volume approval.
+
+Writer opens now convert the path lexically, run the volume guard and perform
+one full rooted validation **after** the guard. This removes a duplicate pathwalk
+without trusting a path that a callback could have changed. Existing files no
+longer call `MkdirAll` or request `O_CREATE` (exclusive-create semantics are
+preserved). If an existing file disappears after validation, opening fails rather
+than recreating an empty replacement. New-file creation and all rooted identity,
+symlink/hardlink, volume and durable mutation gates remain in force.
+
 For backups, stop the service and take a consistent snapshot of database/WAL and
 payload together (or use a coordinated read-only snapshot of both). Restoring a
 backup is an external mutation: use `verify` on its first open and recheck before

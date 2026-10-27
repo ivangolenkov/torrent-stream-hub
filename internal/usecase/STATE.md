@@ -113,6 +113,14 @@ No volume/recovery/DiskFull gates or durable revoke checks are bypassed. Other
 write stages and intermediate/legacy/part-file closes retain exclusion. These
 diagnostics locate residual queue holders; they do not establish a NAS fix.
 
+Rooted writer opens now expose guard/path/mkdir/descriptor/identity sub-stages.
+The usecase's volume marker and device-ancestry check still runs on every guarded
+open (no TTL or cached approval). A single full rooted pathwalk follows the guard;
+duplicate pre-guard filesystem traversal and existing-file MkdirAll/O_CREATE work
+are removed. A file disappearing after validation is not recreated. All ownership,
+volume/recovery and revoke-before-mutation rules remain unchanged. NAS attribution
+inside the open stage still requires the new counters from an updated service.
+
 In fast mode FileResumeHooks.Restore runs only on a remaining restore candidate,
 after namespace preflight/native initialization but BEFORE library publication.
 The library's tracked closedCtx/open generation is the attachment fence when no

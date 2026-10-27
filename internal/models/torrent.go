@@ -233,6 +233,11 @@ type StorageIOTimings struct {
 	WritePayload         StorageIOStageTimings `json:"write_payload"`
 	WriteAccount         StorageIOStageTimings `json:"write_account"`
 	WriteClose           StorageIOStageTimings `json:"write_close"`
+	WriteOpenGuard       StorageIOStageTimings `json:"write_open_guard"`
+	WriteOpenPath        StorageIOStageTimings `json:"write_open_path"`
+	WriteOpenMkdir       StorageIOStageTimings `json:"write_open_mkdir"`
+	WriteOpenDescriptor  StorageIOStageTimings `json:"write_open_descriptor"`
+	WriteOpenIdentity    StorageIOStageTimings `json:"write_open_identity"`
 }
 
 type StorageIOStageTimings struct {

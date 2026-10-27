@@ -199,6 +199,25 @@ legacy publication races. Intermediate extent Close remains under the original
 whole-range lease. This is a bounded narrowing, not concurrent same-file writes:
 open/stat/write/accounting still serialize to preserve shared signature evidence.
 
+Root-open follow-up adds five write-only sub-stages: application guard, rooted
+path check/pre-open identity, mkdir, descriptor open and descriptor identity
+validation. They are children of write_open; read/sync opens do not increment
+them. Expected ENOENT for create is not an error. Optional instrumentation is nil
+for public OpenRootFile/non-attached callers. Five additional fixed records bring
+the total to 74 atomic int64 fields (592 bytes excluding padding) per attachment.
+
+Rooted open now performs lexical conversion before the application guard, then
+one complete filesystem path validation after it; it no longer walks the same
+path before AND after the callback. Guard input is a lexically safe root-relative
+name, not filesystem trust. The guard still executes for every open, without TTL
+or cached positive volume evidence. Any callback-installed symlink is rejected by
+the subsequent validation; descriptor identity is still compared with the captured
+pre-open identity. MkdirAll runs only for missing entries. Existing non-exclusive
+opens drop O_CREATE, so a disappearance after validation cannot synthesize an empty
+replacement before rejecting identity. O_EXCL behavior is unchanged. Cancellation
+is rechecked after a delayed guard and before payload open/create. No write lease,
+durable revoke, lifecycle fence or required sync was removed.
+
 FileObservations derives skipped_missing_bytes only for initially skipped pieces
 with no subsequent hash attempt and no queued/active work. REST/SSE copies those
 cached facts, without filesystem work. Skips neither grant readiness nor advance

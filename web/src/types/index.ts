@@ -148,6 +148,11 @@ export interface StorageIOTimings {
   write_payload: StorageIOStageTimings;
   write_account: StorageIOStageTimings;
   write_close: StorageIOStageTimings;
+  write_open_guard: StorageIOStageTimings;
+  write_open_path: StorageIOStageTimings;
+  write_open_mkdir: StorageIOStageTimings;
+  write_open_descriptor: StorageIOStageTimings;
+  write_open_identity: StorageIOStageTimings;
 }
 
 export interface BTTorrentHealth {

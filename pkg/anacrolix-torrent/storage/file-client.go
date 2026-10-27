@@ -282,7 +282,7 @@ func (fs *fileClientImpl) OpenTorrent(
 		t.resume.pending = append([]byte(nil), resume.Pending...)
 	}
 	if fs.opts.RootFS != nil {
-		t.io = rootFileIo{root: fs.opts.RootFS, ctx: fs.opts.IOContext, readOnly: fs.opts.ReadOnly, onRead: fs.opts.IORead, guard: fs.opts.IOGuard, onEvent: fs.opts.IOEvent}
+		t.io = rootFileIo{root: fs.opts.RootFS, ctx: fs.opts.IOContext, readOnly: fs.opts.ReadOnly, onRead: fs.opts.IORead, guard: fs.opts.IOGuard, onEvent: fs.opts.IOEvent, timings: &t.ioTimings}
 	}
 	if fs.opts.VerifyOnOpen {
 		t.fresh = make(map[int]pieceEvidence)

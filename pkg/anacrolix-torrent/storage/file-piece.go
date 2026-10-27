@@ -235,6 +235,18 @@ func (me *filePieceImpl) MarkComplete() (err error) {
 }
 
 func (me *filePieceImpl) commitCompletion() error {
+	// Sync may wait on the whole file/device. Do not hold a file-wide payload
+	// lease across it: peer receive loops write neighboring pieces inline.
+	// The lifecycle lease still fences Close/seal. After Sync, acquire the
+	// payload lease and validate the original hash snapshot against current
+	// evidence before publishing. Same-piece writes erase that snapshot;
+	// disjoint writes only update the accounted shared file signature.
+	persistent := pieceCompletionIsPersistent(me.pieceCompletion())
+	if persistent && me.t.client.opts.VerifyOnOpen {
+		if err := me.syncCompletion(); err != nil {
+			return err
+		}
+	}
 	unlock := me.t.lockPayloadRange(me.p.Offset(), me.p.Length(), false)
 	defer unlock()
 	var verifiedSignature []os.FileInfo
@@ -261,8 +273,10 @@ func (me *filePieceImpl) commitCompletion() error {
 		verifiedSignature = before
 		me.t.freshMu.Unlock()
 	}
-	if pieceCompletionIsPersistent(me.pieceCompletion()) {
-		if err := me.Flush(); err != nil {
+	// Legacy backends have no hash snapshot fencing. Preserve their historical
+	// exclusion instead of allowing unvalidated writes during Sync.
+	if persistent && !me.t.client.opts.VerifyOnOpen {
+		if err := me.syncCompletion(); err != nil {
 			return err
 		}
 	}

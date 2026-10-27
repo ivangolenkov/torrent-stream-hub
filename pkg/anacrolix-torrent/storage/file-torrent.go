@@ -23,6 +23,7 @@ type fileTorrentImpl struct {
 	// after Torrent.Drop; it must not rename payload after application cleanup.
 	lifecycle         sync.RWMutex
 	resume            resumeMutationState
+	ioTimings         ioTimings
 	closed            bool
 	readClosed        atomic.Bool // reads use payload leases, not the seal mutation gate
 	directory         string

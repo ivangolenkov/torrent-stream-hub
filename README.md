@@ -858,6 +858,26 @@ Accounting follows whole pieces: at a shared file boundary, present bytes can
 also be excluded because another contributing file is missing/short. The counter
 is therefore not a measurement of the physically absent byte count.
 
+For diagnosing bursty downloads, `GET /api/v1/health/bt` includes optional
+`torrents[].storage_io` counters for the current backend attachment:
+
+- `completion_sync_count`, `completion_sync_errors`, `completion_sync_active`,
+  `completion_sync_ns`, `completion_sync_max_ns`: completed attempts, errors,
+  in-flight calls, cumulative and maximum duration of piece completion Flush.
+  This includes path/open/name-lock work and sync of all contributing files,
+  not just the time inside the operating system's `fsync`.
+- `write_lease_wait_count`, `write_lease_wait_active`, `write_lease_wait_ns`,
+  `write_lease_wait_max_ns`: contended file-payload write-lock acquisitions,
+  currently waiting acquisitions, cumulative and maximum wait duration.
+
+Compare counter deltas alongside useful received bytes and speed; nanoseconds
+are cumulative, concurrent waits can overlap, and counters reset on reattachment.
+They do not cover every disk/SQLite/lifecycle wait or prove which resource limits
+throughput. Reading them performs no disk I/O. Verified storage no longer holds
+the file-wide payload lease through completion sync: neighboring writes may
+proceed, then the original hash evidence is revalidated before publication.
+Hashing, required sync and Close/checkpoint barriers remain enabled.
+
 For backups, stop the service and take a consistent snapshot of database/WAL and
 payload together (or use a coordinated read-only snapshot of both). Restoring a
 backup is an external mutation: use `verify` on its first open and recheck before

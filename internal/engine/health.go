@@ -96,8 +96,19 @@ func (e *Engine) BTHealth() *models.BTHealth {
 		info := mt.t.Info()
 		trackerTiers, trackerURLs := trackerCounts(mt)
 		activeStreams := e.streamManager.ActiveStreamsForTorrent(mt.t.InfoHash().HexString())
+		var storageIO *models.StorageIOTimings
+		if io, ok := mt.t.StorageIOTimings(); ok {
+			storageIO = &models.StorageIOTimings{
+				CompletionSyncCount: io.CompletionSyncCount, CompletionSyncErrors: io.CompletionSyncErrors,
+				CompletionSyncActive: io.CompletionSyncActive, CompletionSyncNS: io.CompletionSyncNS,
+				CompletionSyncMaxNS: io.CompletionSyncMaxNS, WriteLeaseWaitCount: io.WriteLeaseWaitCount,
+				WriteLeaseWaitActive: io.WriteLeaseWaitActive, WriteLeaseWaitNS: io.WriteLeaseWaitNS,
+				WriteLeaseWaitMaxNS: io.WriteLeaseWaitMaxNS,
+			}
+		}
 
 		health.Torrents = append(health.Torrents, models.BTTorrentHealth{
+			StorageIO:             storageIO,
 			Hash:                  mt.hash,
 			Name:                  mt.t.Name(),
 			State:                 mtState,

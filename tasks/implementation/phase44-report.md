@@ -105,3 +105,60 @@ Hash volume и actual Range (16 B) сохранены; +16 metadata events в ro
 Повторный общий `make check` **завершился успешно** (`phase44-final-check.log`): root tests/race, fork tests/race, 44 frontend tests, vet и application build. Root usecase race — 304.718 s, repository race — 137.934 s; финальный fork race — 8.656/2.821 s. Latest-code root unit suite дополнительно выполнен после последней scheduler правки, как указано выше. macOS LC_DYSYMTAB linker warnings не привели к ошибкам тестов/сборки.
 
 Не закрыты native Windows CI, invalid-checkpoint comparative measurements и controlled download-throughput baseline/result; к следующей фазе не переходить. Фаза остаётся частично принятой, несмотря на успешные локальные checks.
+
+## Follow-up 27 октября: completion sync и просадки download
+
+Команда пользователя после read-only диагностики: «Приступай к следующему шагу» — воспроизвести ожидание sync/lease, сузить критическую секцию без ослабления проверки и добавить измеримость. Это продолжение фазы 44, **не деплой и не разрешение менять NAS**.
+
+### Наблюдения работающего сервиса
+
+- В новом запуске `00:06:23` — `initial verification skipped absent data ... incomplete_pieces=7233`; прежних массовых ENOENT и signature-conflicts в полученных логах нет.
+- GET sampling 24 раза за 69.08 s (`00:11:27–00:12:36 UTC`): 41–44 connected, 39–42 seeds, UI speed 0–12.55 MiB/s, useful counter average 1.91 MiB/s, wire payload average 2.26 MiB/s, verified bytes +150 MiB. Hash queue 0–1; не повторение initial backlog.
+- BT Health сообщает `completion persistence failed`, dropped=4; за sampling dropped не растёт. Это не доказанная причина просадок и отдельное наблюдение, а не скрытая/исправленная данным патчем ошибка SQLite.
+- Секундный sampler без сглаживания усиливает видимость кратких пауз; наличие сидов не доказывает доступную отдачу. Причинность всех провалов на NAS **не установлена** без профиля реального sync/locks.
+
+### Детерминированное воспроизведение и исправление
+
+Новый `storage/completion_sync_test.go::TestCompletionSyncDoesNotLeasePayload` останавливает настоящий путь completion Flush барьером и проверяет возможность file payload writer lease. До изменения runtime тест **FAIL**: `completion fsync holds the file payload lease and blocks all neighboring writes`. Это воспроизводит механизм регрессии без случайного sleep/скоростного CI threshold.
+
+`storage/file-piece.go::commitCompletion` для VerifyOnOpen теперь:
+
+1. Сохраняет lifecycle read lease, синхронно выполняет обязательный Flush **без file payload lease**.
+2. После Flush получает прежние contributing-file payload read leases, снимает current signature и сравнивает с исходным hashSnapshot.
+3. Публикует hint и повторно проверяет snapshot под freshMu перед trust; затем освобождает payload lease до promotion/refresh, как прежде.
+
+Сам Flush не меняет bytes. Проверяемые данные получены до его начала; same-piece writer до/во время/после sync удаляет snapshot и запрещает старый commit. Neighbor writer обновляет только учтённую общую подпись и не аннулирует неизменённый piece. External replace/truncate меняет signature и отклоняется. После получения publication lease ни один внутренний writer не может пройти между stat и publication. Close/seal по-прежнему ждут lifecycle lease. Для legacy non-VerifyOnOpen сохранена прежняя payload-lease область sync: у них нет snapshot fencing. Обязательный fsync не удалён, не отложен в фон и не заменён размером/именем файла.
+
+### Измеримость и затронутые файлы
+
+- `storage/io-timings.go`, `file-torrent.go`, `resume-mutation.go`: девять int64 atomics на backend open (72 B без padding), фиксированная память, без очередей/новых workers. Completion Flush attempts/errors/in-flight/total ns/max ns; contended payload writer lease count/in-flight/total ns/max ns. В uncontended write path — TryLock без чтения часов; часы используются только при contention и при completion Flush.
+- `storage/interface.go`, `file-client.go`, `storage-io.go`: callback/публичный accessor только cached atomics, nil/closed/unsupported не выдают данные старого attachment.
+- Engine `health.go`, models и TS: additive `GET /api/v1/health/bt → torrents[].storage_io`. Polling не делает stat/hash/sync/SQL и не ждёт payload/lifecycle locks. Общий Go/TS health-contract test расширен на именованный `StorageIOTimings`, не ослаблен; inline TS object заменён на отдельный interface после обнаруженного contract-test failure.
+- Completion sync time — **весь piece Flush**, включая file opens/name-lock waits и contributing files, не изолированное kernel fsync. Write waits — contended file leases, не write syscall, lifecycle/seal или SQLite. Concurrent totals могут превышать wall time. Count/total/max обновляются после завершения; active виден во время задержки. Это диагностика, не authority/readiness.
+- README, CONCURRENCY/STATE и native CI selection обновлены. Ошибки остаются видимыми, не добавлены per-piece WARN/INFO.
+
+### Контролируемые измерения ×3
+
+`go test ./storage -run '^$' -bench '^BenchmarkCompletionSyncNeighborWrite$' -benchtime=1x -count=3` (`phase44-sync-bench.log`), macOS arm64/local temp FS, payload 8 B, один neighbor write 4 B. Benchmark-only wrapper **реконструирует старую область read lease на время Flush**; runtime содержит только новое поведение. В обоих вариантах искусственно добавлены 20 ms задержки и сохранён настоящий file sync. Это не запуск старого бинарника, не end-to-end swarm throughput и не оценка задержек NAS.
+
+| Scope | Neighbor write, µs (3 runs) | Completion Flush, µs | Payload writer wait, µs |
+| --- | --- | --- | --- |
+| legacy sync lease (test-only) | 30626 / 27670 / 28037 | 30483 / 27593 / 27971 | 30453 / 27592 / 27968 |
+| narrowed runtime scope | 32.67 / 33.50 / 31.29 | 26254 / 25949 / 25153 | 0 / 0 / 0 |
+
+Sync остался медленным; соседняя запись перестала зависеть от его задержки. Корректность доказывают barrier tests, не нестабильный performance threshold. Общую скорость скачивания на сервере можно оценить только после отдельно разрешённого обновления и sampling новых counters.
+
+### Проверки follow-up и DoD
+
+- [x] Baseline barrier failure на старом runtime и PASS после сужения lease.
+- [x] Тесты во время и после actual sync: same-piece write, external replace/truncate, revoke, sync error, independent neighbor и shared-file boundary. Invalid cases не публикуют completion; sync error остаётся error; sync сохраняет lifecycle fence.
+- [x] Tests наблюдают in-flight sync и contention, completed count/total/max/errors, отсутствие изменения counters при polling и закрытый attachment. Engine projection и Go/TS wire contract проверены.
+- [x] Targeted macOS race ×3: fork 2.079 s / storage 2.414 s (`phase44-sync-targeted.log`); расширенная latest storage matrix ×3 — PASS. Engine health race ×3 — PASS.
+- [x] Latest полный fork `go test -race -count=1 . ./storage` — PASS: 9.050 / 3.033 s (`phase44-sync-fork-race.log`). Frontend — 44 tests PASS. `git diff --check` — PASS.
+- [x] Native Linux arm64 storage selective/signature/sync/checkpoint/mutation suites ×3 — PASS (`phase44-sync-linux.log`); binary собран Go 1.25.8 CGO=0 и исполнен в Docker native Linux FS, не NAS.
+- [x] Native Linux arm64 core selective/verification/checkpoint/cached-timings suites ×3 — PASS (`phase44-sync-linux-core.log`).
+- [x] Windows amd64 core/storage cross-compile — PASS; **native Windows execution остаётся открытым gate**, не заменяется сборкой.
+- [ ] Полный follow-up `make check` — повторный прогон выполняется (`phase44-sync-check.log`); первый остановился на несовпадении Go/TS health contract, исправление и targeted contract test прошли.
+- [ ] Подтверждение улучшения публичного swarm на NAS и разбор отдельной persistence-ошибки не выполнены. Сервис, его конфигурация и payload не менялись.
+
+Открытые F44-01/F44-07 (invalid-checkpoint comparative measurements, controlled swarm baseline/result, Windows native) не закрываются этим локальным microbenchmark. Фаза 44 остаётся частично принятой.

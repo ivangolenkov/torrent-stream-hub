@@ -96,6 +96,14 @@ startup skip, not current physical absence. They never increase checked, restore
 freshly-verified or downloaded bytes. An idle/completed check queue is not payload
 readiness. MissingFiles, storage workflow, volume and DiskFull gates are unchanged.
 
+Phase-44 completion-sync follow-up: verified storage syncs before the short
+publication payload lease, then revalidates the original hash snapshot under that
+lease. Neighbor writes may continue during sync; same-piece mutation, revocation
+or changed external evidence cannot install stale trust. Sync failure cannot
+publish completion. Lifecycle fencing through sync/commit remains unchanged.
+Additive BT Health `storage_io` timings are cached, backend-open-local diagnostics,
+not persisted observations or completion authority; API sampling does no I/O.
+
 In fast mode FileResumeHooks.Restore runs only on a remaining restore candidate,
 after namespace preflight/native initialization but BEFORE library publication.
 The library's tracked closedCtx/open generation is the attachment fence when no

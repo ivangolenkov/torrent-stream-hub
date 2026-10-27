@@ -15,7 +15,7 @@ func TestFrontendHealthContract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, typ := range []reflect.Type{reflect.TypeOf(BTHealth{}), reflect.TypeOf(BTTorrentHealth{})} {
+	for _, typ := range []reflect.Type{reflect.TypeOf(BTHealth{}), reflect.TypeOf(BTTorrentHealth{}), reflect.TypeOf(StorageIOTimings{})} {
 		body := regexp.MustCompile(`(?s)export interface ` + typ.Name() + ` \{(.*?)\n}`).FindSubmatch(source)
 		if body == nil {
 			t.Fatal("missing interface", typ.Name())
@@ -43,6 +43,11 @@ func TestFrontendHealthContract(t *testing.T) {
 				}
 			case reflect.Slice:
 				ts = field.Type.Elem().Name() + "[]"
+			case reflect.Pointer:
+				if field.Type.Elem().Kind() != reflect.Struct {
+					t.Fatalf("unsupported pointer field %s", field.Name)
+				}
+				ts = field.Type.Elem().Name()
 			default:
 				ts = "number"
 			}

@@ -26,6 +26,9 @@ type TorrentCapacity *func() (cap int64, capped bool)
 
 // Data storage bound to a torrent.
 type TorrentImpl struct {
+	// IOTimings returns cached counters only; it must not perform I/O or wait
+	// on payload/lifecycle locks. Nil means unsupported storage.
+	IOTimings func() IOTimings
 	// InitialIncomplete contains ordered, disjoint half-open piece ranges found
 	// missing/short during this backend open. Initial admission only: never reuse
 	// it for download verification, refresh or explicit recheck. It grants no trust.

@@ -174,43 +174,57 @@ type BTHealth struct {
 }
 
 type BTTorrentHealth struct {
-	Hash                  string       `json:"hash"`
-	Name                  string       `json:"name"`
-	State                 TorrentState `json:"state"`
-	Known                 int          `json:"known"`
-	Connected             int          `json:"connected"`
-	Pending               int          `json:"pending"`
-	HalfOpen              int          `json:"half_open"`
-	Seeds                 int          `json:"seeds"`
-	BytesRead             int64        `json:"bytes_read"`
-	BytesReadData         int64        `json:"bytes_read_data"`
-	BytesReadUsefulData   int64        `json:"bytes_read_useful_data"`
-	BytesWritten          int64        `json:"bytes_written"`
-	BytesWrittenData      int64        `json:"bytes_written_data"`
-	ChunksRead            int64        `json:"chunks_read"`
-	ChunksReadUseful      int64        `json:"chunks_read_useful"`
-	ChunksReadWasted      int64        `json:"chunks_read_wasted"`
-	PiecesDirtiedGood     int64        `json:"pieces_dirtied_good"`
-	PiecesDirtiedBad      int64        `json:"pieces_dirtied_bad"`
-	WasteRatio            float64      `json:"waste_ratio"`
-	TrackerTiersCount     int          `json:"tracker_tiers_count"`
-	TrackerURLsCount      int          `json:"tracker_urls_count"`
-	MetadataReady         bool         `json:"metadata_ready"`
-	TrackerStatus         string       `json:"tracker_status,omitempty"`
-	TrackerError          string       `json:"tracker_error,omitempty"`
-	DownloadSpeed         int64        `json:"download_speed"`
-	UploadSpeed           int64        `json:"upload_speed"`
-	Degraded              bool         `json:"degraded"`
-	PeakDownloadSpeed     int64        `json:"peak_download_speed"`
-	PeakUpdatedAt         string       `json:"peak_updated_at,omitempty"`
-	LastRefreshAt         string       `json:"last_refresh_at,omitempty"`
-	LastRefreshReason     string       `json:"last_refresh_reason,omitempty"`
-	LastPeerRefreshAt     string       `json:"last_peer_refresh_at,omitempty"`
-	LastPeerRefreshReason string       `json:"last_peer_refresh_reason,omitempty"`
-	LastHealthyAt         string       `json:"last_healthy_at,omitempty"`
-	BoostedUntil          string       `json:"boosted_until,omitempty"`
-	MaxEstablishedConns   int          `json:"max_established_conns"`
-	ActiveStreams         int          `json:"active_streams"`
+	StorageIO             *StorageIOTimings `json:"storage_io,omitempty"`
+	Hash                  string            `json:"hash"`
+	Name                  string            `json:"name"`
+	State                 TorrentState      `json:"state"`
+	Known                 int               `json:"known"`
+	Connected             int               `json:"connected"`
+	Pending               int               `json:"pending"`
+	HalfOpen              int               `json:"half_open"`
+	Seeds                 int               `json:"seeds"`
+	BytesRead             int64             `json:"bytes_read"`
+	BytesReadData         int64             `json:"bytes_read_data"`
+	BytesReadUsefulData   int64             `json:"bytes_read_useful_data"`
+	BytesWritten          int64             `json:"bytes_written"`
+	BytesWrittenData      int64             `json:"bytes_written_data"`
+	ChunksRead            int64             `json:"chunks_read"`
+	ChunksReadUseful      int64             `json:"chunks_read_useful"`
+	ChunksReadWasted      int64             `json:"chunks_read_wasted"`
+	PiecesDirtiedGood     int64             `json:"pieces_dirtied_good"`
+	PiecesDirtiedBad      int64             `json:"pieces_dirtied_bad"`
+	WasteRatio            float64           `json:"waste_ratio"`
+	TrackerTiersCount     int               `json:"tracker_tiers_count"`
+	TrackerURLsCount      int               `json:"tracker_urls_count"`
+	MetadataReady         bool              `json:"metadata_ready"`
+	TrackerStatus         string            `json:"tracker_status,omitempty"`
+	TrackerError          string            `json:"tracker_error,omitempty"`
+	DownloadSpeed         int64             `json:"download_speed"`
+	UploadSpeed           int64             `json:"upload_speed"`
+	Degraded              bool              `json:"degraded"`
+	PeakDownloadSpeed     int64             `json:"peak_download_speed"`
+	PeakUpdatedAt         string            `json:"peak_updated_at,omitempty"`
+	LastRefreshAt         string            `json:"last_refresh_at,omitempty"`
+	LastRefreshReason     string            `json:"last_refresh_reason,omitempty"`
+	LastPeerRefreshAt     string            `json:"last_peer_refresh_at,omitempty"`
+	LastPeerRefreshReason string            `json:"last_peer_refresh_reason,omitempty"`
+	LastHealthyAt         string            `json:"last_healthy_at,omitempty"`
+	BoostedUntil          string            `json:"boosted_until,omitempty"`
+	MaxEstablishedConns   int               `json:"max_established_conns"`
+	ActiveStreams         int               `json:"active_streams"`
+}
+
+// Attachment-local cumulative counters; nanoseconds include concurrent work.
+type StorageIOTimings struct {
+	CompletionSyncCount  int64 `json:"completion_sync_count"`
+	CompletionSyncErrors int64 `json:"completion_sync_errors"`
+	CompletionSyncActive int64 `json:"completion_sync_active"`
+	CompletionSyncNS     int64 `json:"completion_sync_ns"`
+	CompletionSyncMaxNS  int64 `json:"completion_sync_max_ns"`
+	WriteLeaseWaitCount  int64 `json:"write_lease_wait_count"`
+	WriteLeaseWaitActive int64 `json:"write_lease_wait_active"`
+	WriteLeaseWaitNS     int64 `json:"write_lease_wait_ns"`
+	WriteLeaseWaitMaxNS  int64 `json:"write_lease_wait_max_ns"`
 }
 
 // File represents a single file within a torrent

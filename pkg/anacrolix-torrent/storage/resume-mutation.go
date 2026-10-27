@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"sync"
+	"time"
 
 	"github.com/anacrolix/torrent/metainfo"
 	"github.com/anacrolix/torrent/segments"
@@ -81,7 +82,16 @@ func (t *fileTorrentImpl) lockPayloadRange(off, length int64, write bool) func()
 	}
 	for i := first; i <= last; i++ {
 		if write {
-			t.files[i].payloadMu.Lock()
+			if !t.files[i].payloadMu.TryLock() {
+				start := time.Now()
+				t.ioTimings.writeWaitActive.Add(1)
+				t.files[i].payloadMu.Lock()
+				ns := time.Since(start).Nanoseconds()
+				t.ioTimings.writeWaitNS.Add(ns)
+				recordIOMax(&t.ioTimings.writeWaitMaxNS, ns)
+				t.ioTimings.writeWaitCount.Add(1)
+				t.ioTimings.writeWaitActive.Add(-1)
+			}
 		} else {
 			t.files[i].payloadMu.RLock()
 		}

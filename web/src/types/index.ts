@@ -122,7 +122,20 @@ export interface ResumeProgress {
   freshly_verified_bytes: number;
 }
 
+export interface StorageIOTimings {
+  completion_sync_count: number;
+  completion_sync_errors: number;
+  completion_sync_active: number;
+  completion_sync_ns: number;
+  completion_sync_max_ns: number;
+  write_lease_wait_count: number;
+  write_lease_wait_active: number;
+  write_lease_wait_ns: number;
+  write_lease_wait_max_ns: number;
+}
+
 export interface BTTorrentHealth {
+  storage_io?: StorageIOTimings;
   hash: string;
   name: string;
   state: TorrentState;

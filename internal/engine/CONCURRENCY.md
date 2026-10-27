@@ -140,14 +140,39 @@ the accounted signature within either publication step. The lease is NOT held
 across the entire hash attempt: independent piece writes between steps remain
 valid; same-piece writes erase hashSnapshot and reject the stale result.
 
-Hint persistence/flush runs outside freshMu and Client.lock. The snapshot is
-revalidated under freshMu after persistence, so an intervening revoke/layer
+For VerifyOnOpen storage, completion flush now runs BEFORE taking the publication
+payload lease, still inside the lifecycle lease and outside freshMu/Client.lock.
+The initial phase-44 fix held the file-wide payload lease through fsync and could
+stall all neighboring inline network writers on slow storage. Sync itself does
+not change payload. After it returns, acquire contributing-file read leases,
+capture current stat, validate the original hash snapshot, and publish under the
+existing short freshMu sections. A same-piece write during/after sync erases the
+snapshot; an independent write updates only shared accounted file evidence. A
+replace/truncate is rejected by signature comparison. No newer same-piece write
+can slip between the post-sync validation and publication. Durability of the
+unchanged verified piece precedes publication; unrelated later writes gain no
+trust. Legacy non-VerifyOnOpen backends retain the old sync lease scope because
+they have no hash-snapshot fence. Sync is not disabled, batched or made async.
+
+Hint persistence also runs outside freshMu and Client.lock. The snapshot is
+revalidated under freshMu after hint persistence, so an intervening revoke/layer
 invalidation cannot be resurrected. MarkNotComplete also removes the snapshot.
 Release the publication payload lease before promotion/refresh: recursive RLock
 can deadlock behind a queued writer. Close/checkpoint retain their existing
 lifecycle exclusive fences. A failed MarkComplete never installs library complete
 or announces HAVE; it keeps requests eligible, without busy retry or peer blame.
 Filesystem errors stay visible rather than being downgraded to successful checks.
+
+BT Health `torrents[].storage_io` copies attachment-local atomic counters only:
+completion-sync attempts/errors/active/total ns/max ns and contended payload-write
+lease acquisitions/active/total ns/max ns. Completion sync measures the entire
+piece Flush call (including opens, name-lock waits and all contributing files),
+not isolated kernel fsync duration. Write-wait counters are per contended file
+lease, not per peer or piece; they exclude lifecycle/seal, SQL, device-internal
+waiting and the write syscall itself. Totals can exceed wall time under
+concurrency; snapshots are approximate across fields. No filesystem calls,
+payload/lifecycle lock acquisition, per-piece logs or unbounded samples are added
+by polling. Nine int64 atomics per backend open; no new workers/queues.
 
 FileObservations derives skipped_missing_bytes only for initially skipped pieces
 with no subsequent hash attempt and no queued/active work. REST/SSE copies those

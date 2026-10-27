@@ -342,5 +342,6 @@ func (fs *fileClientImpl) OpenTorrent(
 			return TorrentImpl{}, errors.Join(err, t.Close())
 		}
 	}
+	result.IOTimings = t.ioTimings.snapshot
 	return result, nil
 }

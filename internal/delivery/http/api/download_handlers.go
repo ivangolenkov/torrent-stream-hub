@@ -19,6 +19,7 @@ import (
 	"torrent-stream-hub/internal/delivery/http/response"
 	"torrent-stream-hub/internal/engine"
 	"torrent-stream-hub/internal/logging"
+	"torrent-stream-hub/internal/payload"
 	"torrent-stream-hub/internal/usecase"
 
 	"github.com/go-chi/chi/v5"
@@ -204,7 +205,7 @@ func (h *APIHandler) handleDownloadError(w http.ResponseWriter, hash string, err
 		response.Error(w, http.StatusNotFound, "Torrent not found")
 		return
 	}
-	if errors.Is(err, usecase.ErrDownloadNotReady) || errors.Is(err, usecase.ErrStorageConflict) || errors.Is(err, usecase.ErrMetadataPending) || errors.Is(err, engine.ErrOperationConflict) {
+	if errors.Is(err, usecase.ErrDownloadNotReady) || errors.Is(err, usecase.ErrStorageConflict) || errors.Is(err, usecase.ErrMetadataPending) || errors.Is(err, engine.ErrOperationConflict) || errors.Is(err, payload.ErrVolumeUnavailable) || errors.Is(err, payload.ErrVolumeUnregistered) {
 		response.Error(w, http.StatusConflict, "Download is not ready")
 		return
 	}

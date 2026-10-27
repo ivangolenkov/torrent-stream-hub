@@ -3,6 +3,8 @@ package api
 import (
 	"archive/zip"
 	"bytes"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -11,10 +13,30 @@ import (
 	"testing"
 
 	"torrent-stream-hub/internal/models"
+	"torrent-stream-hub/internal/payload"
 
 	"github.com/anacrolix/torrent/metainfo"
 	"github.com/go-chi/chi/v5"
 )
+
+func TestDownloadKnownVolumeErrorStatus(t *testing.T) {
+	h := &APIHandler{}
+	for _, tc := range []struct {
+		err    error
+		status int
+	}{
+		{payload.ErrVolumeUnavailable, http.StatusConflict},
+		{fmt.Errorf("root guard: %w", payload.ErrVolumeUnregistered), http.StatusConflict},
+		{errors.Join(errors.New("retained cache fenced"), payload.ErrVolumeUnavailable), http.StatusConflict},
+		{errors.New("unexpected storage I/O failure"), http.StatusInternalServerError},
+	} {
+		rr := httptest.NewRecorder()
+		h.handleDownloadError(rr, "", tc.err)
+		if rr.Code != tc.status {
+			t.Fatalf("%v: status=%d want=%d", tc.err, rr.Code, tc.status)
+		}
+	}
+}
 
 func TestDownloadSafetyAndHEAD(t *testing.T) {
 	for _, tc := range []struct {

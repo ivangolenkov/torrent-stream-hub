@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -179,7 +180,9 @@ func TestCompletionSyncRevalidatesAfterUnlockedIO(t *testing.T) {
 					t.Fatalf("stale result/trust after %s: err=%v complete=%v", mode, err, ts.CachedComplete(0))
 				}
 				s := ts.IOTimings()
-				if s.CompletionSyncCount != 1 || s.CompletionSyncActive != 0 || s.CompletionSyncNS <= 0 || s.CompletionSyncMaxNS != s.CompletionSyncNS {
+				// A short operation can fit within one clock tick (notably on
+				// Windows). Count/activity prove it ran; zero duration is valid.
+				if s.CompletionSyncCount != 1 || s.CompletionSyncActive != 0 || s.CompletionSyncNS < 0 || s.CompletionSyncMaxNS != s.CompletionSyncNS {
 					t.Fatalf("sync counters incorrect: %+v", s)
 				}
 				if mode == "sync-error" {
@@ -216,7 +219,9 @@ func TestWriteLeaseWaitTimings(t *testing.T) {
 		t.Fatal("waiting writer not observable", s)
 	}
 	s = ts.IOTimings()
-	if s.WriteLeaseWaitCount != 1 || s.WriteLeaseWaitActive != 0 || s.WriteLeaseWaitNS <= 0 || s.WriteLeaseWaitMaxNS != s.WriteLeaseWaitNS {
+	// The barrier proves contention independently of clock resolution. Do not
+	// require that the observed wait crosses a platform clock tick.
+	if s.WriteLeaseWaitCount != 1 || s.WriteLeaseWaitActive != 0 || s.WriteLeaseWaitNS < 0 || s.WriteLeaseWaitMaxNS != s.WriteLeaseWaitNS {
 		t.Fatal(s)
 	}
 	if _, err := p.WriteAt([]byte("good"), 0); err != nil {
@@ -224,6 +229,16 @@ func TestWriteLeaseWaitTimings(t *testing.T) {
 	}
 	if ts.IOTimings().WriteLeaseWaitCount != 1 {
 		t.Fatal("uncontended write counted as waiting")
+	}
+}
+
+func TestIOTimingMaximumIncludesZeroDuration(t *testing.T) {
+	var maximum atomic.Int64
+	for _, sample := range []struct{ ns, want int64 }{{0, 0}, {7, 7}, {0, 7}, {3, 7}, {11, 11}} {
+		recordIOMax(&maximum, sample.ns)
+		if got := maximum.Load(); got != sample.want {
+			t.Fatalf("recordIOMax(%d) = %d, want %d", sample.ns, got, sample.want)
+		}
 	}
 }
 

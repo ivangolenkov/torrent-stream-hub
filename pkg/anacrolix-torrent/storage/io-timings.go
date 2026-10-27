@@ -8,6 +8,8 @@ import (
 // IOTimings are cumulative, attachment-local diagnostics, not readiness or
 // durability evidence. Totals count concurrent operation time, not wall time.
 // Snapshots are lock-free and approximate across fields. No paths are exposed.
+// A completed operation may measure zero nanoseconds at platform clock resolution;
+// counts/activity, not strictly positive duration, identify observed operations.
 type IOTimings struct {
 	CompletionSyncCount, CompletionSyncErrors, CompletionSyncActive int64
 	CompletionSyncNS, CompletionSyncMaxNS                           int64

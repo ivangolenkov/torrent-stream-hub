@@ -158,7 +158,24 @@ Sync остался медленным; соседняя запись перес
 - [x] Native Linux arm64 storage selective/signature/sync/checkpoint/mutation suites ×3 — PASS (`phase44-sync-linux.log`); binary собран Go 1.25.8 CGO=0 и исполнен в Docker native Linux FS, не NAS.
 - [x] Native Linux arm64 core selective/verification/checkpoint/cached-timings suites ×3 — PASS (`phase44-sync-linux-core.log`).
 - [x] Windows amd64 core/storage cross-compile — PASS; **native Windows execution остаётся открытым gate**, не заменяется сборкой.
-- [ ] Полный follow-up `make check` — повторный прогон выполняется (`phase44-sync-check.log`); первый остановился на несовпадении Go/TS health contract, исправление и targeted contract test прошли.
+- [x] Полный follow-up `make check` — повторный прогон завершился успешно (`phase44-sync-check.log`): root/fork tests и race, 44 frontend tests, vet и application build. Root usecase race — 296.687 s, repository race — 136.604 s; fork race — 8.769 / 2.827 s. Первый прогон остановился на несовпадении Go/TS health contract; исправление и targeted contract test прошли. Предупреждения macOS linker LC_DYSYMTAB не привели к ошибкам тестов/сборки.
 - [ ] Подтверждение улучшения публичного swarm на NAS и разбор отдельной persistence-ошибки не выполнены. Сервис, его конфигурация и payload не менялись.
 
 Открытые F44-01/F44-07 (invalid-checkpoint comparative measurements, controlled swarm baseline/result, Windows native) не закрываются этим локальным microbenchmark. Фаза 44 остаётся частично принятой.
+
+### Исправление Windows CI: нулевая измеренная длительность
+
+Пользователь сообщил native Windows failure `TestWriteLeaseWaitTimings`:
+`WriteLeaseWaitCount=1`, `Active=0`, `NS=0`, `MaxNS=0`. Contention зарегистрирован,
+но короткий интервал может помещаться в один tick платформенных часов; тест
+ошибочно требовал `NS > 0`. Та же предпосылка была в completion-sync assertion.
+Оба теста теперь допускают нулевую длительность, сохраняя проверки barrier,
+числа операций, active gauge, неотрицательных значений и согласованности max/total.
+Добавлен детерминированный тест максимума с нулевыми и положительными samples.
+Runtime measurement/locking не изменены: время не округляется искусственно вверх.
+Комментарий к IOTimings фиксирует допустимость нулевых samples.
+
+Проверки после исправления: targeted storage race ×30 — PASS (4.592 s);
+полный `go test -race ./storage -count=1 -timeout=120s` — PASS (2.515 s);
+Windows amd64 storage cross-compile — PASS. Повторный native Windows CI ещё нужен:
+сообщённый неуспешный прогон не считается пройденным platform gate.

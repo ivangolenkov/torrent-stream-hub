@@ -110,7 +110,9 @@ func TestManagedPayloadHotPathAndVerification(t *testing.T) {
 	if ts.IOTimings().FileCacheOpen != 0 {
 		t.Fatal("close did not clear cached descriptor gauge")
 	}
-	if _, err := fd.Stat(); !errors.Is(err, os.ErrClosed) {
+	// On Windows Stat may return GetFileType/ERROR_INVALID_HANDLE after Close
+	// rather than os.ErrClosed. ReadAt checks the os.File lifetime portably.
+	if _, err := fd.ReadAt(make([]byte, 1), 0); !errors.Is(err, os.ErrClosed) {
 		t.Fatal("backend Close retained descriptor", err)
 	}
 }
@@ -304,7 +306,7 @@ func TestManagedPayloadResetJoinsReaders(t *testing.T) {
 	if err := <-done; err != nil {
 		t.Fatal(err)
 	}
-	if _, err := fd.Stat(); !errors.Is(err, os.ErrClosed) {
+	if _, err := fd.ReadAt(make([]byte, 1), 0); !errors.Is(err, os.ErrClosed) {
 		t.Fatal(err)
 	}
 }

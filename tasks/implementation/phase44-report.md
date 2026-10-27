@@ -1,5 +1,23 @@
 # Фаза 44 — отчёт об имплементации
 
+## Windows CI: переносимая проверка закрытых managed descriptors
+
+Пользователь сообщил о падении `TestManagedPayloadHotPathAndVerification` и
+`TestManagedPayloadResetJoinsReaders`: после закрытия `os.File.Stat` на Windows
+возвращает `GetFileType: The handle is invalid`, не `os.ErrClosed`.
+В `storage/managed-files_test.go` обе post-close проверки заменены на непустой
+`ReadAt`, который проверяет lifetime `os.File` и возвращает `os.ErrClosed`.
+Проверка успешного Stat активного читателя до завершения Reset сохранена.
+Runtime, закрытие handles и модель доверия не изменены; ошибка не замаскирована
+проверкой «любая ошибка подходит».
+
+- [x] Полный storage suite с race на macOS: PASS (2.504 s).
+- [x] Windows amd64 storage cross-compile: PASS; `git diff --check`: PASS.
+- [ ] Повторный native Windows CI: требуется, этот gate пока не закрыт.
+- [ ] Общая приёмка фазы 44 на NAS и comparative measurements остаётся открытой.
+
+Отступлений от плана нет: исправлены platform-specific test assertions.
+
 ## Уточнение модели доверия пользователем
 
 После сравнения с qBittorrent/libtorrent пользователь сообщил: «Нам не нужны

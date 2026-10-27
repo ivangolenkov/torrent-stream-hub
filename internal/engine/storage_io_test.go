@@ -4,6 +4,10 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"torrent-stream-hub/internal/models"
+
+	"github.com/anacrolix/torrent/storage"
 )
 
 func TestBTHealthStorageIOTimings(t *testing.T) {
@@ -22,6 +26,13 @@ func TestBTHealthStorageIOTimings(t *testing.T) {
 		if io.CompletionSyncCount != before.CompletionSyncCount || io.CompletionSyncNS != before.CompletionSyncNS || io.WriteLeaseWaitNS != before.WriteLeaseWaitNS {
 			t.Fatal("incorrect timing projection", io, before)
 		}
+		gotStages := []models.StorageIOStageTimings{io.WriteLeaseHold, io.WritePrepare, io.WriteGuard, io.WriteOpen, io.WriteStat, io.WritePayload, io.WriteAccount, io.WriteClose}
+		stages := []storage.IOStageTimings{before.WriteLeaseHold, before.WritePrepare, before.WriteGuard, before.WriteOpen, before.WriteStat, before.WritePayload, before.WriteAccount, before.WriteClose}
+		for i, stage := range stages {
+			if gotStages[i] != storageIOStage(stage) {
+				t.Fatalf("stage %d projection differs", i)
+			}
+		}
 		wire, err := json.Marshal(h)
 		if err != nil {
 			t.Fatal(err)
@@ -33,5 +44,13 @@ func TestBTHealthStorageIOTimings(t *testing.T) {
 	after, _ := raw.StorageIOTimings()
 	if after != before {
 		t.Fatal("health polling changed I/O counters", before, after)
+	}
+}
+
+func TestStorageIOStageProjection(t *testing.T) {
+	s := storage.IOStageTimings{Count: 7, Errors: 2, Active: 1, NS: 91, MaxNS: 43}
+	got := storageIOStage(s)
+	if got.Count != 7 || got.Errors != 2 || got.Active != 1 || got.NS != 91 || got.MaxNS != 43 {
+		t.Fatal(got)
 	}
 }

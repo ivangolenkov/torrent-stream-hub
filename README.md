@@ -878,6 +878,32 @@ the file-wide payload lease through completion sync: neighboring writes may
 proceed, then the original hash evidence is revalidated before publication.
 Hashing, required sync and Close/checkpoint barriers remain enabled.
 
+The same object provides per-write-stage records, each with `count`, `errors`,
+`active`, `ns` and `max_ns`:
+
+- `write_prepare`: durable piece revocation and in-memory evidence invalidation.
+- `write_guard`: persisted-file creation/extension guard and any file revocation.
+- `write_open`: rooted open, including containment checks and the application
+  volume guard; this is not just the kernel `open` syscall.
+- `write_stat`: descriptor stats before/after the write (normally two per file).
+- `write_payload`: the actual descriptor `WriteAt`, including short-write errors.
+- `write_account`: updating shared signatures after writing.
+- `write_close`: releasing each write descriptor, including delayed close errors.
+- `write_lease_hold`: the fully acquired range's exclusive lease scope, excluding
+  acquisition wait. Its `errors` is always zero: releasing a lease cannot fail.
+
+Compare stage deltas and active gauges during stalls to locate the slow holder.
+Stages nest inside lease hold, so do not sum them with lease hold or compare
+concurrent totals as exclusive wall time. Short durations can measure zero.
+Stats errors are counted but retain existing return behavior; failed evidence
+never becomes completion trust. Polling these records performs no disk I/O.
+For rooted VerifyOnOpen storage without part-file promotion, the **final**
+descriptor close releases the payload lease after mutation/signature accounting;
+the lifecycle barrier remains held until close returns. Intermediate contributing
+files, unknown/buffered backends, part-files and legacy verification retain the
+old close exclusion. Open/stat/write/signature accounting remain serialized;
+this change does not claim to eliminate every source of bursty download speed.
+
 For backups, stop the service and take a consistent snapshot of database/WAL and
 payload together (or use a coordinated read-only snapshot of both). Restoring a
 backup is an external mutation: use `verify` on its first open and recheck before

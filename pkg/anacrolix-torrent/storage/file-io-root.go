@@ -171,8 +171,18 @@ func (r rootFileIo) openForRead(name string) (fileReader, error) {
 	return rootReader{classicFileReader: classicFileReader{f}, ctx: r.ctx, onRead: r.onRead, path: name}, err
 }
 func (r rootFileIo) openForWrite(name string, _ int64) (fileWriter, error) {
-	return r.open(name, os.O_WRONLY|os.O_CREATE)
+	f, err := r.open(name, os.O_WRONLY|os.O_CREATE)
+	if err != nil {
+		return nil, err
+	}
+	return rootWriter{f}, nil
 }
+
+// Writes and signature accounting finish before descriptor release. Keep the
+// lifecycle lease until Close returns, including delayed errors from the OS.
+type rootWriter struct{ *os.File }
+
+func (f rootWriter) closeWithoutPayloadMutation() error { return f.Close() }
 func (r rootFileIo) flush(name string, _, _ int64) error {
 	flags := os.O_RDONLY
 	if runtime.GOOS == "windows" {

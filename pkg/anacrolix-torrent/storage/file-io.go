@@ -9,6 +9,12 @@ type fileWriter interface {
 	io.Closer
 }
 
+// Only descriptor-only backends may opt in. A Close that flushes buffered
+// payload, unmaps writable memory or mutates the namespace must keep the lease.
+type payloadIndependentCloser interface {
+	closeWithoutPayloadMutation() error
+}
+
 type fileReader interface {
 	// Seeks to the next data in the file. If there is no more data, seeks to the end of the file.
 	seekDataOrEof(offset int64) (ret int64, err error)

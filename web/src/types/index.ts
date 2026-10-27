@@ -122,6 +122,14 @@ export interface ResumeProgress {
   freshly_verified_bytes: number;
 }
 
+export interface StorageIOStageTimings {
+  count: number;
+  errors: number;
+  active: number;
+  ns: number;
+  max_ns: number;
+}
+
 export interface StorageIOTimings {
   completion_sync_count: number;
   completion_sync_errors: number;
@@ -132,6 +140,14 @@ export interface StorageIOTimings {
   write_lease_wait_active: number;
   write_lease_wait_ns: number;
   write_lease_wait_max_ns: number;
+  write_lease_hold: StorageIOStageTimings;
+  write_prepare: StorageIOStageTimings;
+  write_guard: StorageIOStageTimings;
+  write_open: StorageIOStageTimings;
+  write_stat: StorageIOStageTimings;
+  write_payload: StorageIOStageTimings;
+  write_account: StorageIOStageTimings;
+  write_close: StorageIOStageTimings;
 }
 
 export interface BTTorrentHealth {

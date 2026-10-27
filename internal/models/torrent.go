@@ -216,15 +216,31 @@ type BTTorrentHealth struct {
 
 // Attachment-local cumulative counters; nanoseconds include concurrent work.
 type StorageIOTimings struct {
-	CompletionSyncCount  int64 `json:"completion_sync_count"`
-	CompletionSyncErrors int64 `json:"completion_sync_errors"`
-	CompletionSyncActive int64 `json:"completion_sync_active"`
-	CompletionSyncNS     int64 `json:"completion_sync_ns"`
-	CompletionSyncMaxNS  int64 `json:"completion_sync_max_ns"`
-	WriteLeaseWaitCount  int64 `json:"write_lease_wait_count"`
-	WriteLeaseWaitActive int64 `json:"write_lease_wait_active"`
-	WriteLeaseWaitNS     int64 `json:"write_lease_wait_ns"`
-	WriteLeaseWaitMaxNS  int64 `json:"write_lease_wait_max_ns"`
+	CompletionSyncCount  int64                 `json:"completion_sync_count"`
+	CompletionSyncErrors int64                 `json:"completion_sync_errors"`
+	CompletionSyncActive int64                 `json:"completion_sync_active"`
+	CompletionSyncNS     int64                 `json:"completion_sync_ns"`
+	CompletionSyncMaxNS  int64                 `json:"completion_sync_max_ns"`
+	WriteLeaseWaitCount  int64                 `json:"write_lease_wait_count"`
+	WriteLeaseWaitActive int64                 `json:"write_lease_wait_active"`
+	WriteLeaseWaitNS     int64                 `json:"write_lease_wait_ns"`
+	WriteLeaseWaitMaxNS  int64                 `json:"write_lease_wait_max_ns"`
+	WriteLeaseHold       StorageIOStageTimings `json:"write_lease_hold"`
+	WritePrepare         StorageIOStageTimings `json:"write_prepare"`
+	WriteGuard           StorageIOStageTimings `json:"write_guard"`
+	WriteOpen            StorageIOStageTimings `json:"write_open"`
+	WriteStat            StorageIOStageTimings `json:"write_stat"`
+	WritePayload         StorageIOStageTimings `json:"write_payload"`
+	WriteAccount         StorageIOStageTimings `json:"write_account"`
+	WriteClose           StorageIOStageTimings `json:"write_close"`
+}
+
+type StorageIOStageTimings struct {
+	Count  int64 `json:"count"`
+	Errors int64 `json:"errors"`
+	Active int64 `json:"active"`
+	NS     int64 `json:"ns"`
+	MaxNS  int64 `json:"max_ns"`
 }
 
 // File represents a single file within a torrent

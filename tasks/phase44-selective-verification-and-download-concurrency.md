@@ -17,6 +17,12 @@ sync сохраняются. Добавлены cached `BT Health → storage_io
 мутаций во время/после sync. Измерения, проверки и ограничения — в конце отчёта.
 Улучшение на пользовательском NAS пока не подтверждено: деплой не выполнялся.
 
+Повторный GET sampling подтвердил очередь 30–35 payload writers. Дополнительный
+локальный блок разделяет cached timing по стадиям writer path и исключает только
+descriptor-only final Close из payload lease (rooted VerifyOnOpen без part-files),
+с сохранением lifecycle/revoke/signature fencing. Open/stat/payload write остаются
+сериализованными; устранение всех скачков на NAS этим не заявляется.
+
 ## Проблема и исходные наблюдения
 
 При read-only диагностике `http://192.168.31.126:8080/` в логах сервиса от **2026-10-26 23:07–23:10** обнаружено:

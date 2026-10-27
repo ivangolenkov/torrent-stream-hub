@@ -172,7 +172,32 @@ lease, not per peer or piece; they exclude lifecycle/seal, SQL, device-internal
 waiting and the write syscall itself. Totals can exceed wall time under
 concurrency; snapshots are approximate across fields. No filesystem calls,
 payload/lifecycle lock acquisition, per-piece logs or unbounded samples are added
-by polling. Nine int64 atomics per backend open; no new workers/queues.
+by polling. Nine base int64 atomics plus eight fixed stage records of five int64
+atomics each (392 bytes excluding padding) per backend open; no new workers/queues.
+
+Write stages additionally expose prepare (piece revoke/live invalidation), guard
+(persisted-file revoke), open (including application IOGuard/volume validation),
+descriptor stat, payload WriteAt, shared-signature accounting, descriptor close,
+and fully acquired range lease hold. Hold starts after the entire range is locked;
+partial acquisition waits remain in the per-file wait counters. Hold errors are
+always zero; other errors describe stage results, not final WriteAt return status.
+Stat samples normally number two per contributing file; root open's own stat
+checks are part of open. A short payload write counts as an error even when the
+backend returned nil error. Existing delayed-close/short-write error precedence
+and stat-error return behavior are unchanged. Stage totals nest/overlap and cannot
+be summed to infer disk utilization. Polling still only loads cached atomics.
+
+For rooted descriptor-only writers, VerifyOnOpen and disabled part files, the
+final contributing descriptor Close runs after releasing the publication/mutation
+payload lease. All writes and before/after shared-signature accounting complete
+before release. No later extent in that call can mutate a newly observed range.
+The lifecycle lease is held through Close, so seal/Close/drop still join it, and
+errors still reach the writer. A private capability opts in only descriptor-only
+close; mmap/buffered/unknown writers retain exclusion. Part-file promotion and
+legacy verification also retain the old scope to avoid widening namespace and
+legacy publication races. Intermediate extent Close remains under the original
+whole-range lease. This is a bounded narrowing, not concurrent same-file writes:
+open/stat/write/accounting still serialize to preserve shared signature evidence.
 
 FileObservations derives skipped_missing_bytes only for initially skipped pieces
 with no subsequent hash attempt and no queued/active work. REST/SSE copies those

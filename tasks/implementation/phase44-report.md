@@ -179,3 +179,125 @@ Runtime measurement/locking не изменены: время не округл�
 полный `go test -race ./storage -count=1 -timeout=120s` — PASS (2.515 s);
 Windows amd64 storage cross-compile — PASS. Повторный native Windows CI ещё нужен:
 сообщённый неуспешный прогон не считается пройденным platform gate.
+
+### Повторная диагностика скачков на сервере
+
+После сообщения пользователя «Скачки скорости продолжаются» выполнены только
+GET BT Health (24 snapshots через 2 s) и GET logs. Runtime/config/payload не
+изменялись. Сервис уже возвращает `storage_io`; точная версия бинарника через
+эти ответы не установлена. В логах новый запуск в 01:01:19 UTC.
+
+Окно 2026-10-27 01:04:22–01:05:08 UTC, 46.06 s:
+
+- Useful reception average 1.787 MiB/s; двухсекундные интервалы 0.20–4.73 MiB/s,
+  displayed speed 0–8.28 MiB/s; peers 40–42. Это реальные колебания приёма,
+  а не только эффект UI sampler.
+- Во всех snapshots одновременно ждут file payload writer lease 30–35 операций.
+  Завершилось 5270 contended acquisitions, суммарное ожидание 1512.47 s
+  (параллельные ожидания складываются, это не wall time).
+- В слабых интервалах mean завершившихся waits достигал 1.72–1.75 s.
+  Имеется сильное evidence локальной очереди writer locks, но counters не
+  идентифицируют держателя и не доказывают первичную причину его задержки.
+- Completion sync errors=0; `completion persistence failed`/dropped=1 не менялись.
+  Persistence failure остаётся отдельной нерешённой проблемой.
+
+По коду `file-torrent-io.go:WriteAt` удерживает **exclusive file-wide** payload
+lease через revoke/guard, open, before stat, WriteAt, after stat, accounting и
+Close каждого сетевого chunk. Перенос completion Flush не устранил сериализацию
+самих writers. Медленный syscall внутри одного writer или другой read-lease
+holder способен выстроить очередь соседних pieces. Нельзя по этим данным
+объявить виновным только fsync, SQL или сеть. Следующий локальный блок:
+детерминированно воспроизвести задержку writer path, разделить время держателя
+по стадиям и проверить безопасное сужение области без нарушения shared signature,
+revoke-before-write и checkpoint/lifecycle fencing. Простая замена Lock на RLock
+небезопасна для существующего before/after signature accounting.
+
+Snapshots/logs сохранены во временной директории OpenCode как
+`phase44-speed-followup.jsonl` и `phase44-speed-followup-logs.txt`.
+Во время sampling другие клиенты запрашивали files и сделали storage POST
+(409); это не изолированный benchmark. Фаза остаётся частично принятой.
+
+### Writer-path follow-up по команде «Приступай» / «Продолжай»
+
+#### Реализация и границы
+
+- `storage/write_concurrency_test.go`: baseline barrier test
+  `TestWriteCloseDoesNotLeasePayload` на прежнем runtime **FAIL** с сообщением
+  `descriptor Close holds file-wide payload lease and blocks neighboring writers`.
+  Барьер останавливает descriptor Close после фактического WriteAt/stat/accounting;
+  TryLock доказывает лишнюю область исключения без speed threshold/sleep.
+  Это доказательство механизма, **не доказанная основная причина на NAS**.
+- `storage/file-torrent-io.go`, `file-io.go`, `file-io-root.go`: добавлена private
+  capability descriptor-only Close, реализованная rooted writer. Только для
+  VerifyOnOpen без part-files **последний** contributing descriptor закрывается
+  после освобождения payload lease. Все bytes и before/after evidence обновлены
+  до release; после него этот вызов не пишет следующие extents. Lifecycle lease
+  сохраняется до возврата Close, errors/short-write precedence не теряются.
+- Intermediate contributing-file Close остаётся под whole-range lease, как и
+  unknown/buffered/mmap, part-file и non-VerifyOnOpen paths. Не вводятся новые
+  fd caches, фоновые writers, range-lock registry или concurrent signature scheme.
+  Rooted containment, application volume guard, durable revoke-before-write,
+  snapshot invalidation, fsync, Close/seal/drop fencing не ослаблены.
+- `storage/io-timings.go`: восемь фиксированных stage records с Count/Errors/
+  Active/NS/MaxNS: write prepare, persisted-file guard, rooted open, descriptor
+  stat, payload write, signature accounting, descriptor close и fully-acquired
+  lease hold. Статистики содержат zero-duration samples без искусственного clamp.
+  Payload short write считается stage error, существующий API error precedence
+  сохранён. Stat failure по-прежнему не устанавливает evidence/trust и не
+  меняет прежнюю политику возврата WriteAt; теперь виден в diagnostics.
+- `internal/engine/health.go`, models/TS health contract и tests: additive
+  `storage_io.write_*` records; только atomic snapshots, без polling I/O.
+  40 дополнительных atomic int64, всего 49 = 392 B без padding на open.
+  Память фиксирована, нет per-chunk logs/samples/queues. Часы/atomics добавляют
+  bounded hot-path overhead; overhead на слабом NAS отдельно не измерен.
+- README, CONCURRENCY/STATE и phase plan уточняют смысл стадий. `write_open`
+  включает rooted checks и application IOGuard/volume validation; `write_guard`
+  относится к persisted-file resume guard. `write_stat` — два descriptor stats,
+  не все stat внутри open. Hold — после полного acquisition и до release,
+  overlaps с вложенными стадиями; Hold.Errors всегда 0.
+
+**Ограничение:** это узкое безопасное сокращение и измеримость оставшегося
+узкого места. Open/stat/payload write/accounting пока эксклюзивны на весь файл.
+Разрешать их параллельно без нового корректного shared-signature контракта
+нельзя. Какой именно stage тормозит работающий NAS, установят новые counters
+после отдельно разрешённого обновления; отсутствие скачков не заявляется.
+
+#### Проверки и измерения
+
+- [x] Baseline barrier FAIL → PASS после изменения. Neighbor write, verification
+  publication и последующий same-piece overwrite работают при остановленном Close;
+  lifecycle writer lock недоступен. Shared-boundary first Close сохраняет обе
+  leases, final Close освобождает обе только после всех writes/accounting.
+- [x] Барьеры open/stat/payload/close показывают корректную active stage и
+  сохраняют исключение на изменяющих payload/evidence стадиях; polling не меняет
+  counters. Prepare и file-guard durable revoke failures видны отдельно и не
+  открывают writer/не изменяют payload.
+- [x] Errors: open, descriptor stat, payload error/short write, close; completed
+  counts/errors/max/total и очистка gauges/leases. Legacy capability opt-out,
+  part-files и legacy verification retain close exclusion. Нулевые ns допустимы.
+- [x] macOS targeted race `TestWrite|TestCompletionSync|TestVerification|TestResumeMutation`
+  ×10 — PASS (3.947 s). Engine/models contract/projection race ×3 — PASS
+  (1.222 / 1.036 s). Full `make check` также завершён успешно (см. ниже).
+- [x] Native Linux arm64: targeted storage suites ×3, полный storage suite ×1
+  и core cached-timings/verification/selective/checkpoint suites ×3 — PASS в Docker,
+  CGO=0 (`phase44-write-stages-linux.log`, `phase44-write-stages-core-linux.log`).
+- [x] Windows amd64 storage/core cross-compile — PASS; native Windows execution
+  **не выполнялся**, platform gate остаётся открытым.
+- [x] Полный `make check` — PASS, лог `phase44-write-stages-check.log`: root tests/race,
+  fork tests/race, 44 frontend tests/build, vet и application build. Root usecase
+  race — 304.718 s; fork race — 8.560 / 2.789 s. Предупреждения macOS linker
+  LC_DYSYMTAB не привели к ошибкам. Native Windows и NAS validation остаются открыты.
+- [ ] NAS runtime validation: не выполнялась, deployment/config/payload не менялись.
+
+Controlled benchmark `BenchmarkWriteCloseNeighbor`, macOS arm64/local temp FS,
+8 B payload, 4 B neighbor, искусственная задержка descriptor Close 20 ms,
+`-benchtime=1x -count=3`. Test-only wrapper без capability реконструирует прежнюю
+lease scope (не старый бинарник). Neighbor latency:
+
+| Scope | Neighbor latency, µs (3 runs) |
+| --- | --- |
+| legacy Close scope | 20906 / 22904 / 20305 |
+| narrowed final Close | 63.08 / 164.5 / 122.9 |
+
+Общий call всё ещё ждёт Close, lifecycle barrier не сокращён. Это не swarm
+throughput benchmark, не оценка настоящего NAS Close и не закрытие F44-01/F44-07.

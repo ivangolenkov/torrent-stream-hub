@@ -12,6 +12,7 @@ import (
 	"torrent-stream-hub/internal/payload"
 
 	"github.com/anacrolix/torrent"
+	"github.com/anacrolix/torrent/storage"
 )
 
 func (e *Engine) BTHealth() *models.BTHealth {
@@ -104,6 +105,10 @@ func (e *Engine) BTHealth() *models.BTHealth {
 				CompletionSyncMaxNS: io.CompletionSyncMaxNS, WriteLeaseWaitCount: io.WriteLeaseWaitCount,
 				WriteLeaseWaitActive: io.WriteLeaseWaitActive, WriteLeaseWaitNS: io.WriteLeaseWaitNS,
 				WriteLeaseWaitMaxNS: io.WriteLeaseWaitMaxNS,
+				WriteLeaseHold:      storageIOStage(io.WriteLeaseHold), WritePrepare: storageIOStage(io.WritePrepare),
+				WriteGuard: storageIOStage(io.WriteGuard), WriteOpen: storageIOStage(io.WriteOpen),
+				WriteStat: storageIOStage(io.WriteStat), WritePayload: storageIOStage(io.WritePayload),
+				WriteAccount: storageIOStage(io.WriteAccount), WriteClose: storageIOStage(io.WriteClose),
 			}
 		}
 
@@ -157,6 +162,10 @@ func formatBTHealthTime(t time.Time) string {
 		return ""
 	}
 	return t.UTC().Format(time.RFC3339)
+}
+
+func storageIOStage(s storage.IOStageTimings) models.StorageIOStageTimings {
+	return models.StorageIOStageTimings{Count: s.Count, Errors: s.Errors, Active: s.Active, NS: s.NS, MaxNS: s.MaxNS}
 }
 
 func normalizedBTClientProfile(profile string) string {

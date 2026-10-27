@@ -104,6 +104,15 @@ publish completion. Lifecycle fencing through sync/commit remains unchanged.
 Additive BT Health `storage_io` timings are cached, backend-open-local diagnostics,
 not persisted observations or completion authority; API sampling does no I/O.
 
+Write-path follow-up adds cached stage timing records (prepare, persisted-file
+guard, rooted open including volume validation, descriptor stat, payload write,
+signature accounting, descriptor close and lease hold). For rooted VerifyOnOpen
+storage with no part files, final descriptor close no longer holds the payload
+lease after all mutation/accounting; lifecycle fencing and close errors remain.
+No volume/recovery/DiskFull gates or durable revoke checks are bypassed. Other
+write stages and intermediate/legacy/part-file closes retain exclusion. These
+diagnostics locate residual queue holders; they do not establish a NAS fix.
+
 In fast mode FileResumeHooks.Restore runs only on a remaining restore candidate,
 after namespace preflight/native initialization but BEFORE library publication.
 The library's tracked closedCtx/open generation is the attachment fence when no

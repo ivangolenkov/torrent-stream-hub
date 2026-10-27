@@ -114,9 +114,20 @@ func (fst fileTorrentImplIO) WriteAt(p []byte, off int64) (n int, err error) {
 		return 0, io.ErrShortWrite
 	}
 	unlock := fst.fts.lockPayloadRange(off, int64(len(p)), true)
-	defer unlock()
+	timings := &fst.fts.ioTimings
+	holdStart := timings.writeLeaseHold.begin()
+	release := func() {
+		if unlock != nil {
+			timings.writeLeaseHold.end(holdStart, nil)
+			unlock()
+			unlock = nil
+		}
+	}
+	defer release()
+	prepareStart := timings.writePrepare.begin()
 	if len(p) != 0 {
 		if err := fst.fts.revokeResume(int(off/fst.fts.info.PieceLength), int((off+int64(len(p))-1)/fst.fts.info.PieceLength)+1); err != nil {
+			timings.writePrepare.end(prepareStart, err)
 			return 0, err
 		}
 		fst.fts.freshMu.Lock()
@@ -127,28 +138,62 @@ func (fst fileTorrentImplIO) WriteAt(p []byte, off int64) (n int, err error) {
 		fst.fts.freshMu.Unlock()
 	}
 	fst.fts.checkpointEpoch.Add(1)
+	timings.writePrepare.end(prepareStart, nil)
 	for i, e := range fst.fts.segmentLocater.LocateIter(
 		segments.Extent{Start: off, Length: int64(len(p))},
 	) {
-		if err := fst.fts.guardResumeFileWrite(i); err != nil {
-			return n, err
+		start := timings.writeGuard.begin()
+		guardErr := fst.fts.guardResumeFileWrite(i)
+		timings.writeGuard.end(start, guardErr)
+		if guardErr != nil {
+			return n, guardErr
 		}
 		var f fileWriter
+		start = timings.writeOpen.begin()
 		f, err = fst.fts.openForWrite(fst.fts.file(i))
+		timings.writeOpen.end(start, err)
 		if err != nil {
 			return
 		}
 		var n1 int
 		var before os.FileInfo
 		if statter, ok := f.(interface{ Stat() (os.FileInfo, error) }); ok {
-			before, _ = statter.Stat()
+			start = timings.writeStat.begin()
+			var statErr error
+			before, statErr = statter.Stat()
+			timings.writeStat.end(start, statErr)
 		}
+		start = timings.writePayload.begin()
 		n1, err = f.WriteAt(p[:e.Length], e.Start)
-		if statter, ok := f.(interface{ Stat() (os.FileInfo, error) }); ok {
-			after, _ := statter.Stat()
-			fst.fts.acceptFileWrite(i, before, after, off+int64(n), int64(n1))
+		writeErr := err
+		if writeErr == nil && int64(n1) != e.Length {
+			writeErr = io.ErrShortWrite
 		}
-		closeErr := f.Close()
+		timings.writePayload.end(start, writeErr)
+		if statter, ok := f.(interface{ Stat() (os.FileInfo, error) }); ok {
+			start = timings.writeStat.begin()
+			after, statErr := statter.Stat()
+			timings.writeStat.end(start, statErr)
+			start = timings.writeAccount.begin()
+			fst.fts.acceptFileWrite(i, before, after, off+int64(n), int64(n1))
+			timings.writeAccount.end(start, nil)
+		}
+		// All payload mutation and before/after accounting remain exclusive.
+		// Only the final descriptor may close outside the lease: no later
+		// extent can then mutate a range that a verifier has just observed.
+		// Part-file promotion and legacy verification retain the old scope.
+		closer, independent := f.(payloadIndependentCloser)
+		if independent && fst.fts.client.opts.VerifyOnOpen && !fst.fts.partFiles() && e.Length == int64(len(p)) {
+			release()
+		}
+		start = timings.writeClose.begin()
+		var closeErr error
+		if independent {
+			closeErr = closer.closeWithoutPayloadMutation()
+		} else {
+			closeErr = f.Close()
+		}
+		timings.writeClose.end(start, closeErr)
 		n += n1
 		p = p[n1:]
 		if err == nil {

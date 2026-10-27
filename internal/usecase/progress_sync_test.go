@@ -11,6 +11,13 @@ func TestProgressSyncCannotRestoreBytesAfterManagedRecheck(t *testing.T) {
 	uc, repo, cleanup := setupTorrentUseCase(t)
 	defer cleanup()
 	tor, path := completedSafetyFile(t, uc, "sync-replaced", true)
+	savedFixture, err := repo.GetTorrent(tor.Hash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if savedFixture == nil || len(savedFixture.Files) != 1 || savedFixture.Files[0].Path != "nested/video.bin" {
+		t.Fatalf("fixture must store a portable catalog path: %+v", savedFixture)
+	}
 	sw := NewSyncWorker(uc)
 	defer sw.Close()
 	persistForTest(t, uc, tor.Hash)

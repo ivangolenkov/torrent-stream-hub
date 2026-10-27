@@ -1,5 +1,28 @@
 # Фаза 44 — отчёт об имплементации
 
+## Windows CI: catalog path в progress-sync fixture
+
+`TestProgressSyncCannotRestoreBytesAfterManagedRecheck` падал на первом
+`persistForTest` с `ErrStateConflict`. Причина: `completedSafetyFile` сохранял
+native storage path (на Windows `sync-replaced\nested\video.bin`) в поле
+каталога `Path`, тогда как runtime использует display path `nested/video.bin`.
+Legacy fallback в SaveCatalog принимает только точный slash-separated
+root-prefixed вариант; Windows fixture ему не соответствовала.
+
+В `internal/usecase/storage_safety_test.go` fixture теперь сохраняет
+`FileInfo.DisplayPath`, как runtime, отдельно от native disk path. В
+`internal/usecase/progress_sync_test.go` добавлена явная проверка сохранённого
+`nested/video.bin` до persistence. Generation/revision fences, SaveCatalog и
+проверка невозможности вернуть stale progress не ослаблены; runtime не менялся.
+
+- [x] Targeted progress-sync/download/manual-delete tests, race ×5: PASS (34.371 s).
+- [x] `go test ./...`: PASS (usecase 146.956 s).
+- [x] Windows amd64 usecase cross-compile: PASS; `git diff --check`: PASS.
+- [ ] Новый native Windows CI остаётся обязательным.
+- [ ] Общая приёмка фазы 44 на NAS/comparative measurements остаётся открытой.
+
+Отступлений от плана нет: исправлена платформозависимая тестовая фикстура.
+
 ## Windows CI: переносимая проверка закрытых managed descriptors
 
 Пользователь сообщил о падении `TestManagedPayloadHotPathAndVerification` и

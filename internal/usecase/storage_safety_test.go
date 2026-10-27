@@ -264,7 +264,10 @@ func completedSafetyFile(t *testing.T, uc *TorrentUseCase, name string, multi bo
 		t.Fatal(err)
 	}
 	tor.Size, tor.Downloaded, tor.State = 1024, 1024, models.StateSeeding
-	tor.Files = []*models.File{{Index: 0, Path: paths[0], Size: 1024, Downloaded: 1024}}
+	// Catalog paths use '/' on every platform; paths above are native disk
+	// paths. Mixing them makes SaveCatalog reject this fixture on Windows.
+	fi := info.UpvertedFiles()[0]
+	tor.Files = []*models.File{{Index: 0, Path: fi.DisplayPath(&info), Size: 1024, Downloaded: 1024}}
 	if err := uc.repo.SaveTorrent(tor); err != nil {
 		t.Fatal(err)
 	}

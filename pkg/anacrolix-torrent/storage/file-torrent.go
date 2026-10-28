@@ -25,6 +25,7 @@ type fileTorrentImpl struct {
 	resume            resumeMutationState
 	ioTimings         ioTimings
 	managedFiles      managedFileCache
+	managedRanges     managedPayloadRanges
 	closed            bool
 	readClosed        atomic.Bool // reads use payload leases, not the seal mutation gate
 	directory         string

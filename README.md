@@ -843,6 +843,14 @@ startup hashing, not continuous external-change monitoring.
   New pieces are still hashed before serving/upload. Mandatory completion sync,
   stable checkpoint evidence/sync, restore validation, DiskFull and storage
   ownership/recovery gates remain enabled. No mmap is introduced.
+- Managed writes no longer serialize a whole file. Non-overlapping byte ranges
+  can write concurrently, including chunks of the same piece. Only overlapping
+  operations with at least one writer exclude each other. Hashing/publication
+  cover the whole piece, so they wait for its writes, not unrelated file ranges.
+  Shared file leases only join I/O for Close/Recheck; checkpoint still closes
+  mutation admission through publication. Default strict backends retain their
+  file-wide stat/signature exclusion. This does not remove OS/device write stalls
+  or change completion sync frequency.
 - Full **Recheck** first joins I/O, closes the descriptor cache and revokes live
   and persisted completion before hashing. A failed durable reset does not keep
   the live read gate open. Drop/detach/shutdown release retained descriptors
@@ -918,7 +926,8 @@ For diagnosing bursty downloads, `GET /api/v1/health/bt` includes optional
   This includes path/open/name-lock work and sync of all contributing files,
   not just the time inside the operating system's `fsync`.
 - `write_lease_wait_count`, `write_lease_wait_active`, `write_lease_wait_ns`,
-  `write_lease_wait_max_ns`: contended file-payload write-lock acquisitions,
+  `write_lease_wait_max_ns`: contended payload write-lease acquisitions
+  (overlapping ranges or a file join barrier in managed mode; file-wide in strict mode),
   currently waiting acquisitions, cumulative and maximum wait duration.
 
 Compare counter deltas alongside useful received bytes and speed; nanoseconds
@@ -952,7 +961,7 @@ For rooted VerifyOnOpen storage without part-file promotion, the **final**
 descriptor close releases the payload lease after mutation/signature accounting;
 the lifecycle barrier remains held until close returns. Intermediate contributing
 files, unknown/buffered backends, part-files and legacy verification retain the
-old close exclusion. Open/stat/write/signature accounting remain serialized;
+  old close exclusion. In strict mode open/stat/write/signature accounting remain serialized;
 this change does not claim to eliminate every source of bursty download speed.
 
 In managed mode `write_open` normally measures a cache acquisition and
@@ -962,6 +971,11 @@ external-evidence checks. Root-open sub-stage calls primarily represent cache
 misses; on Windows completion sync may also upgrade a read-only cached handle.
 Actual Close errors during eviction or backend close remain errors. These
 counters alone do not prove end-to-end swarm or NAS throughput improvement.
+
+In managed mode `write_lease_hold.active` can exceed one for a single file:
+independent ranges no longer convoy behind one slow chunk. Wait counters do not
+include lifecycle admission, descriptor capacity/upgrade waits, or OS-internal
+descriptor/device locks; correlate them with `write_open` and `write_payload`.
 
 Rooted writer opens additionally split `write_open` into cached sub-stage records:
 `write_open_guard` (application volume guard), `write_open_path` (rooted pathwalk

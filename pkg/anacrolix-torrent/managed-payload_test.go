@@ -42,6 +42,38 @@ func TestManagedPayloadExplicitRecheck(t *testing.T) {
 			if tor.BytesCompleted() != int64(len(data)) {
 				t.Fatal("initial hash did not complete payload")
 			}
+			// Exercise actual concurrent backend writes, including independent
+			// chunks of one piece, then validate with the library's real v1/v2
+			// hash path (not just storage's publication callback).
+			cl.rLock()
+			attachment := tor.storage
+			cl.rUnlock()
+			info := tor.Info()
+			const chunk = 1024
+			errors := make(chan error, (len(data)+chunk-1)/chunk)
+			for off := 0; off < len(data); off += chunk {
+				go func() {
+					piece := attachment.TorrentImpl.Piece(info.Piece(off / int(info.PieceLength)))
+					_, err := piece.WriteAt(data[off:min(off+chunk, len(data))], int64(off)%info.PieceLength)
+					errors <- err
+				}()
+			}
+			for off := 0; off < len(data); off += chunk {
+				if err := <-errors; err != nil {
+					t.Error(err)
+				}
+			}
+			for i := 0; i < info.NumPieces(); i++ {
+				if attachment.CachedComplete(i) {
+					t.Fatal("concurrent writes retained old completion")
+				}
+			}
+			if err := tor.VerifyDataContext(ctx); err != nil {
+				t.Fatal(err)
+			}
+			if tor.BytesCompleted() != int64(len(data)) {
+				t.Fatal("parallel writes failed actual hash verification")
+			}
 			before, ok := tor.StorageIOTimings()
 			if !ok || !before.ManagedPayload || before.FileCacheOpen != 1 {
 				t.Fatal(before, ok)

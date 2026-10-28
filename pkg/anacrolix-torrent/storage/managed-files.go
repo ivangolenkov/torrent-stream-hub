@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"errors"
+	"io"
 	"os"
 	"sync"
 )
@@ -21,11 +22,21 @@ type managedFileCache struct {
 
 type managedFileEntry struct {
 	index                  int
-	file                   *os.File
+	file                   managedPayloadFile
 	info                   os.FileInfo // identity at acquisition, not live filesystem evidence
 	writable, loading, bad bool
 	refs                   int
 	used                   uint64
+}
+
+// os.File implements concurrent positional I/O. Keeping the descriptor contract
+// explicit also lets storage tests stop/fail an actual borrowed handle's I/O.
+type managedPayloadFile interface {
+	io.ReaderAt
+	io.WriterAt
+	io.Closer
+	Stat() (os.FileInfo, error)
+	Sync() error
 }
 
 func (c *managedFileCache) notify() {
@@ -168,8 +179,10 @@ func (t *fileTorrentImpl) acquireManagedFile(index int, write bool) (*managedFil
 					if write {
 						timings = &t.ioTimings
 					}
-					e.file, err = r.openMeasured(t.files[index].safeOsPath, flags, timings)
+					var opened *os.File
+					opened, err = r.openMeasured(t.files[index].safeOsPath, flags, timings)
 					if err == nil {
+						e.file = opened
 						t.ioTimings.cacheOpen.Add(1)
 					}
 				}

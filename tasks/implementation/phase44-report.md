@@ -1,5 +1,200 @@
 # Фаза 44 — отчёт об имплементации
 
+## Follow-up: независимые managed writes без file-wide convoy
+
+По команде пользователя реализован локальный follow-up фазы 44. Развёрнутый NAS,
+его конфигурация, payload и процессы не изменялись. Частота completion sync,
+хеширование, WAL/FULL, DiskFull, Range/CORS/QoS и application ownership не менялись.
+
+### Контракт и реализация
+
+- История Git подтвердила: exclusive `payloadMu` вокруг каждого chunk добавлен
+  в фазе 43 (`bbfdb36`), а inline peer writes и Flush существовали до неё. В
+  managed-модели после отказа от per-chunk external evidence эта file-wide
+  сериализация больше не нужна для независимых записей.
+- `storage/managed-ranges.go`: существующий `lockPayloadRange` теперь выбирает
+  byte-range admission для ManagedPayload. **Непересекающиеся chunks одной piece**,
+  разные pieces одного файла и pieces на v1 shared-file boundaries могут писать
+  параллельно. Read/read совместимы; пересекающиеся операции с writer исключаются.
+  Нельзя заменять byte ranges постоянным mutex на piece: он оставил бы convoy
+  между chunks одной piece. Hashing, snapshot и publication запрашивают полный
+  extent piece и потому ждут её writes.
+- Существующий engine `pendingWrites` сохранён. Он joins обычный сетевой download
+  перед hashing, но сам по себе не защищает прямые backend ReadAt/WriteTo и
+  промежуток publication от прямого write. Range admission заменяет широкое
+  исключение только в backend, не добавляет второй scheduler или источник trust.
+- Порядок: lifecycle read для mutation/publication → shared file join leases по
+  torrent offset → byte-range admission → существующие metadata/cache locks.
+  Ни range metadata mutex, ни cache mutex не держатся через syscall/SQL/sync.
+  Предшествующие конфликтующие waiters имеют приоритет; независимые запросы могут
+  обходить очередь. Нет goroutine/buffer/постоянного lock на каждую piece. Один
+  32-byte node на 64-bit существует только пока вызов active/waiting; O(concurrent
+  calls) admission scan/memory, после drain head/tail пусты. Это не глобальный cap
+  concurrent calls. Ожидание range синхронное, как прежний native payloadMu; уже
+  выданный syscall не отменяется принудительно. Cancelable descriptor pool сохранён.
+- Файловый payloadMu у managed reads И writes теперь SHARED: его единственная
+  роль — join всех I/O для Close/Reset. Они по-прежнему получают lifecycle exclusive,
+  затем file-exclusive leases до закрытия fd. Checkpoint lifecycle-exclusive joins
+  всех writers и удерживает admission закрытым до конца sync/publish; readers могут
+  продолжаться. Полный Recheck не читает старый cached inode. Strict backend
+  сохраняет прежние exclusive file leases для per-file stat/mtime accounting.
+- Writes всё ещё revoke persisted/live piece trust и стирают hash snapshot **до
+  mutation**. Post-sync publication под full-piece read lease повторно проверяет
+  исходный snapshot; overlapping write/revoke не может вернуть stale completion.
+  File creation/upgrade coalesces через существующий descriptor pool и guards.
+- `managed-files.go`: контракт retained descriptor выражен interface positional
+  I/O/Sync/Stat/Close (production implementation — os.File). Это позволило тестам
+  остановить/fail именно borrowed handle на WriteAt/ReadAt/Sync, не обходя backend.
+  Первый общий check обнаружил regression при failed open: typed-nil os.File в
+  interface вызывал ложный Close error/отрицательный open gauge и закрывал дальнейший
+  доступ. Исправлено: descriptor публикуется в interface только при successful open;
+  добавлен missing-open→write/hash regression test. Первый failed check не принят.
+- WriteLeaseWait counters теперь отражают range/file-join contention managed I/O,
+  не exclusive file lock. WriteLeaseHold.Active может быть >1 для одного файла.
+  Lifecycle admission/cache upgrade/OS-internal waits туда не входят. Go/TS wire
+  поля и число timing atomics не менялись. README, CONCURRENCY, STATE и план обновлены.
+
+### Приёмка этого блока
+
+- [x] `TestManagedPayloadIndependentWrites`: остановленный borrowed WriteAt не
+  блокирует write/hash/publication соседней piece, в том числе shared boundary.
+  Stale snapshot изменённой piece отвергается; checkpoint включает только verified.
+- [x] `IndependentChunksOfSamePiece`: второй chunk пишет до возврата первого;
+  full-piece snapshot/hash admission ждёт оба диапазона. OverlappingWriteWaits
+  доказывает исключение совпадающих writes, не blocking соседнего диапазона.
+- [x] `HashExcludesOnlyItsPiece` (hash и verified ReadAt): чтение стабильно, соседний
+  write/hash проходит; overlapping write ждёт чтения, затем отвергает stale hash.
+- [x] `ParallelWritesCheckpointBarrier`: blocked write не позволяет checkpoint
+  publish, cancel возвращается без publish; после записи seal исключает unverified
+  piece и блокирует новую mutation до callback completion. Повторная запись
+  отзывает только что сохранённый subset до syscall.
+- [x] `ParallelWritesJoinResetAndClose`: два остановленных writes одновременно
+  admitted; Reset/Close ждут оба и закрывают fd. Существующий reader/reset join
+  test сохранён. `RangeFairness` проверяет writer priority и bypass соседних ranges.
+- [x] `ParallelWriteErrorRevokesFile`: full/short write errors отзывают neighbor
+  trust, retire descriptor ровно один раз, допускают guarded reacquisition.
+  `ErrorRetiresAfterLastParallelBorrower`: ошибка одного writer не закрывает fd
+  второго заблокированного writer; retirement происходит после последнего borrow.
+  `ParallelWritesDuringSync`: neighbor writes не отвергают valid hash, same-piece
+  writes и sync error не публикуют completion. Mandatory real Sync сохранён.
+- [x] Core `TestManagedPayloadExplicitRecheck` усилен concurrent 1 KiB writes в один
+  файл/одни pieces, затем **реальный** library hash v1/v2/hybrid восстанавливает
+  completion; далее actual replacement-inode Recheck обнаруживает corruption.
+- [x] Все managed storage race tests ×30 — PASS (4.252 s,
+  `phase44-ranges-targeted-final.log`); полный engine/API race — PASS (6.550/17.900 s,
+  `phase44-ranges-engine-api-race.log`). Core real-hash race ×30 — PASS
+  (`phase44-ranges-real-hashes-race.log`, 2.479 s). Финальный полный fork race ×3,
+  включая последний borrower-retirement test, — PASS (24.842/7.237 s,
+  `phase44-ranges-fork-final-race.log`); повторный fork vet — PASS.
+- [x] Native Linux arm64 полный storage ×3 и targeted core ×3 — PASS
+  (`phase44-ranges-storage-linux.log`, `phase44-ranges-core-linux.log`). Windows
+  amd64 core/storage cross-compile — PASS; native execution локально недоступен.
+- [x] Финальный `make check` — PASS (`phase44-ranges-check-final.log`): root/fork
+  tests/race, 44 frontend tests/build, vet и application build; usecase race
+  309.767 s, fork race 9.804/4.759 s. Production source после старта не менялся.
+  Последний borrower-retirement test добавлен после этого прогона и включён в
+  последующий полный fork race ×3, Linux full storage ×3 и Windows cross-compile.
+- [ ] Native Windows CI этого revision требуется повторить; прежние CI gates
+  не объявляются достаточными для новых locks. Native macOS race выполнен локально,
+  Linux выполнен в изолированном arm64 container; Windows execution недоступен.
+- [ ] NAS performance/remaining storage stalls и общие F44-01/F44-07 — открыты.
+
+### Ограниченное измерение накладных расходов
+
+`BenchmarkManagedPayloadChunkWrite`, local macOS arm64, warm page-cache overwrite
+16 KiB, без hashing/sync в timed loop, `-benchtime=1000x -count=3`:
+
+| Mode | ns/op | volume guards/op | WriteStat/op | B/op / allocs |
+| --- | --- | --- | --- | --- |
+| strict | 42025 / 38888 / 41260 | 1 | 2 | 2512 / 46 |
+| managed ranges | 1799 / 1769 / 1784 | 0 | 0 | 656 / 20 |
+
+Новый range node добавил 32 B/1 allocation к прежним managed 624 B/19 allocs.
+Это не сравнение NAS throughput и не доказательство ускорения относительно старого
+managed mutex: другие число итераций/момент измерения. Доказательство снятого
+convoy — barrier tests, где независимая операция завершается **до** release
+остановленного writer. Системные WriteAt/fsync stalls и OS-internal descriptor
+serialization этим изменением не устраняются. Sync batching в scope не входил.
+
+Архитектурное уточнение к плану: оправдана замена широкой file lease на короткое
+range-admission metadata, а не полное удаление exclusion — backend API должен
+сохранять read/hash/publication safety вне engine pendingWrites. Все остальные
+непринятые пункты DoD остаются явно открытыми.
+
+## NAS: managed-cache работает, остаточные задержки внутри WriteAt
+
+По просьбе пользователя выполнена только GET-диагностика обновлённого сервиса
+`192.168.31.126:8080`. Последний запуск в логах — **2026-10-27 21:27:10 UTC**,
+Resume 21:27:19 занял 34.714 ms. Код, конфигурация и payload сервера не менялись.
+
+13 снимков health/torrents через 5 s: **21:29:16.946–21:30:16.983 UTC**, 60.037 s.
+
+| Наблюдение | Результат |
+| --- | --- |
+| Useful reception | 183.234 MiB, среднее 3.052 MiB/s; интервалы 0.056–7.761 MiB/s |
+| Peers / ожидающие writer leases | 33–37 / 22–30 |
+| Managed cache | true; hits +12082, misses 4→4, evictions 1→1, open 3→3 |
+| Actual guard/open/path/identity calls | за минуту новых нет; WriteStat/Account = 0 |
+| WriteAt | +11726 calls, +57.771 s; lifetime max 1.696 s |
+| Writer lease hold | +57.801 s, практически всё время внутри WriteAt |
+| Writer wait | +1607.734 s суммарного ожидания разных goroutines; max вырос до 7.100 s |
+| Completion sync | +89 calls, +24.654 s, среднее 277 ms; lifetime max 1.566 s; ошибок нет |
+| Verification queue / active | 0–1 / 0–1 |
+| Successful received pieces | 156→245, +89; bad pieces 1→1 |
+| Freshly verified bytes | +178 MiB = 89 pieces ×2 MiB |
+| SQLite completion | dropped=0, pending=0, ошибки не объявлены |
+
+**Вывод:** прежний per-chunk guard/open/stat overhead действительно устранён на
+этом запуске, но ровная скорость не достигнута. Задержки теперь наблюдаются в
+самой записи payload. `file-torrent-io.go` держит exclusive **file-wide** lease
+через WriteAt; `resume-mutation.go` использует один payloadMu на файл. В `peer.go`
+запись синхронна с receive loop соединения. Медленная запись одного chunk поэтому
+накапливает очередь peers, тормозит приём, затем даёт всплеск после разблокировки.
+Суммарные wait/sync/write времена перекрываются и не складываются в wall time.
+
+Sync остаётся значимой нагрузкой того же storage: один completion sync на каждую
+успешную piece в этой выборке. Его file-wide publication lease ранее сокращён,
+но это не устраняет конкуренцию fsync с WriteAt внутри ОС/устройства. Без системных
+iostat/vmstat/dirty/writeback/mount metrics нельзя разделить диск, filesystem,
+writeback throttling, NAS mount/container layers и доказать долю влияния sync.
+Это наблюдаемая задержка OS write path, не доказательство аппаратной неисправности.
+
+**Почему Verifying:** UI `TorrentTable.vue` показывает activity.verifying,
+а health.go включает её при любой queued/active piece, включая обязательную
+проверку новых данных. В минутной выборке +89 good received pieces точно совпадают
+с +89 completion sync и +178 MiB fresh verification. Нет растущей очереди или
+признаков полного Recheck; прежнее бессмысленное hashing отсутствующих файлов
+не наблюдается. Startup отдельно пропустил 4513 incomplete pieces. Fast restore
+принял checkpoint generation 51 от **18:11:09 UTC** (4.242 GiB); существующие
+данные вне доверенного subset подлежат startup hashing. Поэтому fast не означает
+полного отсутствия verify. Повторный shutdown в 21:27:07 предыдущего процесса
+завершился deadline exceeded; это согласуется со старым checkpoint, но конкретная
+причина отсутствия более свежего seal этим GET-набором не установлена.
+
+В текущей сессии до 21:30:50 нет `error marking piece complete`,
+`completion persistence failed` и массовых hash errors. Есть несколько некорректных
+extended handshakes и smart-ban одного peer (21:28:05), но bad pieces за выборку
+не растут; объявлять эти сообщения основной причиной storage queue оснований нет.
+Отсутствие старой SQLite ошибки в этой сессии не доказывает устранения её причины.
+
+Следующий блок после отдельного разрешения: воспроизведение медленного WriteAt
+и file-wide convoy; проектирование bounded/coalesced writes и более узкого
+исключения независимых piece ranges с сохранением lifecycle/revocation/shared
+boundaries; оценка безопасного объединения completion sync без публикации до
+durability barrier. Hashing и обязательный sync не отключать. Для attribution
+низкого уровня нужны read-only host storage metrics. Изменение UI wording может
+отделить проверку скачанных частей от полного Recheck, но не исправит I/O.
+
+- [x] Подтверждены deployed ManagedPayload/cache reuse/bounded handles и отсутствие
+  per-chunk guard/stat на реальном NAS.
+- [x] Снята отдельная минутная выборка полезных байтов, writer/sync/verify counters.
+- [ ] Контролируемое сравнение равных workloads/F44-01/F44-07 и общая приёмка фазы
+  остаются открыты; 3.052 против прежних 1.693 MiB/s не является строгим A/B.
+
+Evidence в OpenCode temp: `phase44-new-health.json`, `phase44-new-torrents.json`,
+`phase44-new-samples.jsonl`, `phase44-new-logs.txt`, `phase44-new-logs-final.txt`.
+Production source не изменён; тесты не запускались для этого диагностического блока.
+
 ## Windows CI: catalog path в progress-sync fixture
 
 `TestProgressSyncCannotRestoreBytesAfterManagedRecheck` падал на первом

@@ -145,6 +145,17 @@ Known guard failure at acquisition/checkpoint fences cached I/O and revokes live
 readiness until detach/reopen via recovery. Retained descriptors do not allow a
 future hit to bypass an already observed unsafe volume boundary.
 
+Managed I/O no longer serializes independent writes of a file: byte-range
+admission replaces exclusive file payload leases. Disjoint chunks, even of the
+same piece, proceed concurrently; overlapping write/read/hash/publication remains
+excluded. File leases are shared join barriers only. Durable revoke still covers
+the affected piece before mutation; full-piece publication revalidates its erased
+or retained hash snapshot. Lifecycle checkpoint joins all writers and holds
+admission closed through publish. Reset/Close additionally join readers via
+exclusive file leases before closing cached handles. No application coordinator,
+selection, DiskFull, QoS or sync frequency changes are included. Strict backends
+retain their previous file-wide signature/stat accounting locks.
+
 In fast mode FileResumeHooks.Restore runs only on a remaining restore candidate,
 after namespace preflight/native initialization but BEFORE library publication.
 The library's tracked closedCtx/open generation is the attachment fence when no

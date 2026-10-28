@@ -63,7 +63,7 @@ After a successful seal/restore, overwriting or rejecting a persisted piece must
 commit revoke before the effect. An uncertain publish retains the union of old
 and possibly committed masks. A discarded generation clears the pending cache.
 
-File payload leases cover actual syscalls: writes take exclusive leases for the
+In strict storage, file payload leases cover actual syscalls: writes take exclusive leases for the
 contributing files in offset order, and reads/hash reads take shared leases.
 Revoke closes freshness before a write; normal ReadAt checks freshness AFTER its
 lease is acquired, closing the available-to-read/overwrite race. Hash WriteTo is
@@ -133,6 +133,42 @@ and revalidates the rooted/volume boundary. No unbounded overflow handles or
 per-file goroutines are created; a full borrowed pool waits on a cancelable state
 notification. Cache errors propagate; a closed parent client rejects cache hits.
 
+Managed range follow-up: `lockPayloadRange` retains the existing per-file
+payloadMu only as a SHARED Close/Reset join lease for both reads and writes.
+Writes do not exclusively lock the entire file. The same entry point admits
+half-open TORRENT BYTE ranges through managedRanges: read/read and disjoint
+requests proceed concurrently; intersecting requests with a writer wait. Disjoint
+chunks of the same piece are independent too. Hash WriteTo, BeginVerification
+and commitCompletion use their full piece extent, including v1 shared boundaries.
+Engine pendingWrites already joins network writes before hashing; range exclusion
+additionally protects backend ReadAt/WriteTo and publication from direct storage
+calls and late overlapping mutations. It is not another trust bitmap or scheduler.
+
+Order is lifecycle read lease for mutations/publication -> shared contributing-file
+leases in torrent offset order -> byte-range admission -> existing resume/fresh/cache
+metadata locks. No range/cache metadata mutex is held through I/O, sync or SQL.
+Earlier conflicting waiters have priority, while unrelated ranges may bypass them.
+Each request has one short-lived node, O(active+waiting calls) memory and admission
+scan cost, not O(torrent pieces) resident locks. Nodes are removed on all release
+paths; no goroutine per range or payload queue/buffer is introduced. Like the prior
+native payloadMu waits, range exclusion is synchronous; it does not forcibly cancel
+an admitted syscall. Descriptor-capacity waits keep their existing cancellation.
+Write wait counters measure contention on these ranges/file join barriers; hold
+active may exceed one per file. Cache waits/lifecycle admission are separate.
+
+Writes still revoke the entire affected piece's live/durable trust before the
+first byte is changed. Multiple independent chunks can erase the same snapshot;
+none can create trust. Publication's full-piece read lease prevents a writer
+slipping between validation and commit. Completion sync remains before that lease,
+with snapshot revalidation afterwards. No per-piece fsync removal/group commit is
+included. File creation/upgrade still coalesces at descriptor acquisition, with
+guard/revocation before create; active namespace edits remain unsupported.
+Checkpoint takes lifecycle exclusively, joins all mutation calls and holds it
+through sync/publish; existing readers can continue. Close/Reset additionally take
+all file leases exclusively to join even readers before closing cached handles.
+There is no reverse range->file lock acquisition or cache mutex held while waiting
+for a range. Strict mode continues exclusive file locking for its mtime accounting.
+
 A known application guard failure at acquisition or checkpoint latches a cache
 error, wakes capacity waiters and clears fresh/hashSnapshot/signature validity.
 Future hits fail, even for a previously open descriptor. Already admitted I/O is
@@ -193,7 +229,7 @@ allocated and capped at 65536 entries (1 MiB on 64-bit); overflow discards the
 negative plan and safely falls back to ordinary initial verification.
 Unknown access/guard errors take the ordinary error path, not the absent path.
 
-Signature capture (`BeginVerification`) and validation/commit (`MarkComplete`)
+In strict storage, signature capture (`BeginVerification`) and validation/commit (`MarkComplete`)
 take existing contributing-file payload read leases in torrent offset order,
 inside the lifecycle read lease, before name locks/stat and short freshMu
 sections. Internal writers hold the matching payload write lease while changing

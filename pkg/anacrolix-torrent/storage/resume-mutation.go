@@ -80,6 +80,9 @@ func (t *fileTorrentImpl) lockPayloadRange(off, length int64, write bool) func()
 	if first < 0 {
 		return func() {}
 	}
+	if t.managedPayload() {
+		return t.lockManagedPayloadRange(off, length, first, last, write)
+	}
 	for i := first; i <= last; i++ {
 		if write {
 			if !t.files[i].payloadMu.TryLock() {

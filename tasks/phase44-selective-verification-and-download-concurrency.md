@@ -88,6 +88,25 @@ explicit Recheck, внутренний mutation fencing, DiskFull и rooted cont
 
 ## Блок 1 — Контракт, воспроизведение и baseline
 
+### Авторизованный follow-up: независимые writes (28 октября)
+
+По команде пользователя убрать добавленную file-wide сериализацию managed I/O.
+Обычные записи разных диапазонов, включая chunks одной piece, должны выполняться
+параллельно. Защита пересекающихся read/write/hash/publication остаётся на byte
+extent; file payloadMu сохраняется только как shared join lease для Close/Reset.
+Strict backend с per-file stat/signature accounting не менять. Существующие
+pendingWrites движка сохраняются; storage range guard нужен также для прямых
+backend вызовов и публикации результата, не как второй hash scheduler/trust map.
+
+Приёмка follow-up: остановленный WriteAt не блокирует независимый диапазон того
+же файла/той же piece/shared boundary; overlapping operations ждут и stale hash
+не публикуется; checkpoint joins writers, sync-before-publication и durable revoke
+сохраняются; Close/Recheck joins всех читателей/писателей и закрывает handles.
+Контролировать ошибки/short writes, fairness конфликтующих запросов и освобождение
+метаданных. Выполнить root/fork/race checks и native platforms; недоступный Windows
+execution оставить открытым. Частоту sync не менять в этом блоке. NAS не обновлять
+без отдельного разрешения. Общие F44-01/F44-07 не закрывать по локальным тестам.
+
 - Проследить open/restore/fallback, `BeginVerification → hash → MarkComplete`, внутренние writes, refresh/revoke signatures, повторную постановку pieces и stream scheduling в fork и engine. Отдельно проверить promotion/import `.part`, v2 layers и periodic seal.
 - Детерминированными barriers воспроизвести изменение соседнего piece того же файла между stat и публикацией результата; отдельно — запись в проверяемый диапазон, внешний replace/truncate и stale callback. Не подменять воспроизведение случайным `sleep` или одним успешным race-прогоном.
 - Зафиксировать в отчёте правила классификации и invalidation, порядок locks/I/O, единицу mutation generation и критерий допустимости hash result. Если нужен новый runtime token, описать его scope/lifetime и fencing до реализации.

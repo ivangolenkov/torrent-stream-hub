@@ -41,9 +41,10 @@ func (e *Engine) newTorrentClient() (*torrent.Client, storage.ClientImplCloser, 
 		IORead: onRead, IOEvent: onEvent,
 		ClientBaseDir: e.cfg.DownloadDir, RootFS: root, VerifyOnOpen: true, PieceCompletion: pieceCompletion, IOContext: e.ctx,
 		UsePartFiles: g.Some(false), ImportPartFiles: true,
-		ManagedPayload: true,
-		IOGuard:        e.checkStorageIO,
-		ResumeHooks:    e.resumeMutationHooks,
+		ManagedPayload:   true,
+		DisablePieceSync: e.cfg.BTDisablePieceSync,
+		IOGuard:          e.checkStorageIO,
+		ResumeHooks:      e.resumeMutationHooks,
 		TorrentPathResolver: func(base string, info *metainfo.Info, hash metainfo.Hash) (string, []string, error) {
 			layout, err := e.StorageLayout(hash.HexString(), info)
 			if err != nil {

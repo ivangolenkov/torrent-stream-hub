@@ -34,6 +34,8 @@ services:
       HUB_STREAM_CACHE_SIZE: "209715200"
       HUB_BT_SEED: "true"
       HUB_BT_NO_UPLOAD: "false"
+      # Skip automatic per-piece Sync; checkpoint/namespace sync still run.
+      HUB_BT_DISABLE_PIECE_SYNC: "true"
       HUB_BT_CLIENT_PROFILE: qbittorrent
       HUB_BT_DOWNLOAD_PROFILE: balanced
       HUB_BT_PUBLIC_IP_DISCOVERY_ENABLED: "false"

@@ -216,6 +216,7 @@ func New(cfg *config.Config, options ...Option) (*Engine, error) {
 		cfg.BTSwarmPeakTTLSec,
 	)
 
+	logging.Infof("completion publication policy bt_disable_piece_sync=%t", cfg.BTDisablePieceSync)
 	ctx, cancel := context.WithCancel(context.Background())
 	eng := &Engine{
 		cfg:             cfg,

@@ -12,6 +12,11 @@ import (
 )
 
 type Config struct {
+	// Restart-scoped automatic completion sync policy. Configured preserves an
+	// explicit false when ApplyDefaults is used by programmatic constructors.
+	BTDisablePieceSync           bool
+	BTDisablePieceSyncConfigured bool
+
 	FastResumeMode             string
 	fastResumeConfigured       bool
 	DeprecatedOptions          []string
@@ -120,6 +125,7 @@ func Load() *Config {
 	flag.Int64Var(&cfg.StreamCacheSize, "stream-cache-size", getEnvAsInt64("HUB_STREAM_CACHE_SIZE", 209715200), "Stream sliding window cache size in bytes")
 	flag.BoolVar(&cfg.BTSeed, "bt-seed", getEnvAsBool("HUB_BT_SEED", true), "Enable altruistic seeding after download completion")
 	flag.BoolVar(&cfg.BTNoUpload, "bt-no-upload", getEnvAsBool("HUB_BT_NO_UPLOAD", false), "Disable BitTorrent uploads")
+	flag.BoolVar(&cfg.BTDisablePieceSync, "bt-disable-piece-sync", getEnvAsBool("HUB_BT_DISABLE_PIECE_SYNC", true), "Skip automatic per-piece payload Flush (restart required); checkpoint and namespace sync remain enabled")
 	flag.StringVar(&cfg.BTClientProfile, "bt-client-profile", getEnv("HUB_BT_CLIENT_PROFILE", "qbittorrent"), "BitTorrent client profile: qbittorrent or default")
 	flag.StringVar(&cfg.BTDownloadProfile, "bt-download-profile", getEnv("HUB_BT_DOWNLOAD_PROFILE", "balanced"), "BitTorrent download profile: torrserver, balanced, aggressive")
 	flag.BoolVar(&cfg.BTBenchmarkMode, "bt-benchmark-mode", getEnvAsBool("HUB_BT_BENCHMARK_MODE", false), "Deprecated: accepted for compatibility; has no effect")
@@ -189,6 +195,7 @@ func Load() *Config {
 		cfg.logConfigError = fmt.Errorf("log retention days must be an integer between 0 and 36500")
 	}
 	cfg.BTSeedConfigured = true
+	cfg.BTDisablePieceSyncConfigured = true
 	cfg.BTSwarmWatchdogConfigured = true
 	cfg.MaxStreamsConfigured = true
 	cfg.BTSwarmHardRefreshConfigured = true
@@ -224,6 +231,9 @@ func ApplyDefaults(cfg *Config) {
 	}
 	if !cfg.BTSeedConfigured {
 		cfg.BTSeed = true
+	}
+	if !cfg.BTDisablePieceSyncConfigured {
+		cfg.BTDisablePieceSync = true
 	}
 	if cfg.BTClientProfile == "" {
 		cfg.BTClientProfile = "qbittorrent"

@@ -2,6 +2,18 @@
 
 ## Current completion publication policy (phase 45)
 
+User-requested flag amendment: the application now defaults
+`HUB_BT_DISABLE_PIECE_SYNC=true` / `--bt-disable-piece-sync=true`. It passes
+DisablePieceSync to storage and skips only automatic per-piece Flush. Setting
+false restores the synchronous best-effort policy below. Standalone storage's
+zero value remains false for compatibility. Hashing, Set errors, fresh evidence,
+lifecycle/range joins, explicit Flush, namespace sync and mandatory checkpoint
+sync do not depend on the flag. Skipped calls do not increment sync counters.
+The policy is restart-scoped and logged at engine creation. Uncheckpointed data
+may be lost on power failure even if its hint was persisted; application reopen
+must still ignore hints without a validated checkpoint. No claim of mandatory
+payload sync on every Close is added.
+
 This section supersedes the earlier phase-40/43/44 **publication snapshot** and
 mandatory per-piece-sync claims below, not checkpoint/namespace durability or
 range/lifecycle exclusion. MarkComplete still owns a lifecycle read lease. It

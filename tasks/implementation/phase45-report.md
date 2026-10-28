@@ -1,5 +1,72 @@
 # Фаза 45 — legacy completion publication: отчёт
 
+## Дополнение: флаг отключения автоматического per-piece Sync
+
+После анализа скачков на NAS пользователь явно запросил флаг, включённый по
+умолчанию: **`HUB_BT_DISABLE_PIECE_SYNC=true` / `--bt-disable-piece-sync=true`**.
+Это расширение текущей фазы 45; следующий этап не начинался, Windows gate остаётся
+открытым. Нижеописанное исходное решение с обязательным вызовом best-effort Flush
+теперь является opt-in режимом (`false`), а не application default.
+
+### Изменения
+
+- `internal/config/config.go`: CLI/env с default true; CLI приоритетнее env.
+  Programmatic zero-value Config получает тот же default, пара
+  `BTDisablePieceSync=false, BTDisablePieceSyncConfigured=true` сохраняет явное
+  включение Sync при повторном ApplyDefaults. Настройка restart-scoped.
+- `internal/engine/client_config.go`: передача настройки в file storage.
+  `engine.go` пишет эффективное `bt_disable_piece_sync` при создании Engine.
+- `storage/file-client.go`, `file-piece.go`: новый `DisablePieceSync` проверяется
+  только вокруг автоматического syncCompletion в commitCompletion. При true
+  остаются Set/error handling и fresh publication, но Flush не вызывается и его
+  timing/error counters не меняются. При false сохраняется Set → synchronous
+  best-effort Flush с WARN. Zero-value library opts остаётся false, чтобы не
+  менять контракт standalone потребителей библиотеки.
+- Явный Flush, namespace promotion/import sync, checkpoint payload/directory sync,
+  hashing, snapshot policy, range/cache/lifecycle и SQLite не менялись.
+  Никакой новой гарантии mandatory payload sync при каждом Close не заявляется.
+- README, sample `docker-compose.yml`, concurrency/state contracts и план фазы
+  обновлены. Sample compose задаёт true; развёрнутый NAS не менялся.
+
+### Риск и критерии приёмки дополнения
+
+Default теперь допускает публикацию без попытки per-piece durability. При power
+loss могут исчезнуть непопавшие в checkpoint данные; SQLite hint может уже
+сохраниться. Hints сами не дают readiness при application reopen, checkpoint
+по-прежнему требует обязательной синхронизации и validation. Это не отменяет ранее
+принятый stale-callback риск и не доказывает устранение всех скачков скорости.
+
+- [x] CLI/env default true, true/false и CLI precedence протестированы.
+- [x] Programmatic default и explicit false после ApplyDefaults протестированы.
+- [x] Engine integration с persistent completion проверяет реальную hash/publication
+  в обоих режимах и zero/nonzero completion sync counters.
+- [x] Storage matrix managed/verified/legacy/nonpersistent: skip только automatic
+  Flush; hint и readiness публикуются, explicit Flush по-прежнему вызывает I/O и
+  возвращает injected error. Ошибка Set не подавляется.
+- [x] При включённом флаге checkpoint payload/directory sync failures запрещают
+  publication; namespace promotion sync failure сохраняет .part и возвращает error.
+- [x] Целевые tests config/engine/storage — PASS.
+- [x] Полный fork race ×3 — PASS (26.339/7.008 s),
+  `piece-sync-fork-race.log`; config/engine targeted race ×3 — PASS,
+  `piece-sync-policy-race.log`.
+- [x] Native Linux arm64 полный storage ×3 — PASS (`piece-sync-storage-linux.log`).
+- [x] Новый default проверен real SQLite hints crash/reopen matrix v1/v2/hybrid
+  с valid/corrupted bytes: race ×3 — PASS (`piece-sync-hints-race.log`), native
+  Linux ×3 — PASS (`piece-sync-hints-linux.log`). Hints без checkpoint не обходят
+  hashing даже после публикации без per-piece Flush. Native Linux engine policy
+  integration ×3 — PASS (`piece-sync-engine-linux.log`).
+- [x] Windows amd64 engine/storage cross-compile — PASS; это не native execution.
+- [x] Полный `make check` — PASS (`piece-sync-flag-check.log`): root/fork tests
+  и race, frontend tests/build, vet и application build. Usecase race 303.388 s,
+  fork race 8.658/2.742 s; macOS linker warnings не привели к ошибкам.
+- [ ] Новый native Windows CI ожидается; NAS performance A/B не выполнялся.
+
+Историческая корректировка анализа: per-piece Flush был ещё до фазы 40 (фаза 19),
+а фаза 40 изменила persistence и порядок/error policy. Поэтому прежнее объяснение
+«до фазы 40 Flush не было» ошибочно; отсутствие ранних latency-счётчиков также не
+доказывает отсутствия задержек. Флаг — отдельный проверяемый эксперимент, не
+доказательство причины замедления.
+
 ## Статус и разрешённый объём
 
 Реализация выполнена локально по команде пользователя после сохранения

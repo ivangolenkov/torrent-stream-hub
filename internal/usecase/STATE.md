@@ -147,6 +147,13 @@ future hit to bypass an already observed unsafe volume boundary.
 
 ### Current completion policy (phase 45)
 
+Flag amendment: application default `HUB_BT_DISABLE_PIECE_SYNC=true`
+(`--bt-disable-piece-sync=true`) skips the automatic Flush described below.
+False restores synchronous best-effort per-piece Flush; change requires restart.
+Hashing, explicit Flush, namespace promotion/import and mandatory checkpoint sync
+remain unchanged. Sync counters exclude skipped calls. This widens the window of
+uncheckpointed payload loss on power failure, not authority of hints on reopen.
+
 Per-piece completion now uses Set(true) followed by synchronous best-effort Flush
 for persistent hints, including managed and strict backends. Set errors still
 fail; Flush errors are WARN/counter events, not publication failures by themselves.

@@ -254,15 +254,16 @@ func (me *filePieceImpl) MarkComplete() (err error) {
 
 func (me *filePieceImpl) commitCompletion() error {
 	// Legacy publication policy: the persistent hint precedes a synchronous,
-	// best-effort Flush. A failed Set still forbids publication. Keep payload
-	// exclusion for Set itself, but never hold it across the storage sync.
+	// best-effort Flush unless DisablePieceSync is set. A failed Set still
+	// forbids publication. Keep payload exclusion for Set itself, but never
+	// hold it across the storage sync.
 	unlock := me.t.lockPayloadRange(me.p.Offset(), me.p.Length(), false)
 	err := me.pieceCompletion().Set(me.pieceKey(), true)
 	unlock()
 	if err != nil {
 		return err
 	}
-	if pieceCompletionIsPersistent(me.pieceCompletion()) {
+	if !me.t.client.opts.DisablePieceSync && pieceCompletionIsPersistent(me.pieceCompletion()) {
 		if err := me.syncCompletion(); err != nil {
 			me.logger().Warn("error flushing completed piece", "piece", me.p.Index(), "err", err)
 		}

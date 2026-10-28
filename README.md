@@ -820,9 +820,18 @@ hardware that falsely acknowledges flush; fast does not detect all bit rot.
 
 ### Active Payload Ownership And Descriptor Reuse
 
-**Completion publication policy (phase 45):** a successful hash caller's
-`MarkComplete` now stores its hint first, then attempts a **synchronous best-effort
-Flush** for persistent completion. Flush failure produces a WARN and increments
+**Completion publication policy (phase 45, with the user-requested flag):**
+`HUB_BT_DISABLE_PIECE_SYNC=true` / `--bt-disable-piece-sync=true` is the application
+default. A successful hash caller's `MarkComplete` stores its hint and publishes
+completion **without automatic per-piece payload Flush**. This restart-scoped
+setting does not disable hashing, explicit Flush, checkpoint payload/directory
+sync or namespace promotion/import sync. Uncheckpointed bytes may be lost on
+power failure; persistent hints alone remain untrusted on application reopen.
+
+Set `HUB_BT_DISABLE_PIECE_SYNC=false` or `--bt-disable-piece-sync=false` to restore
+the phase-45 **synchronous best-effort Flush** after Set for persistent completion.
+CLI overrides the environment. The startup log prints `bt_disable_piece_sync`.
+In this opt-in sync mode, Flush failure produces a WARN and increments
 `completion_sync_errors`, but does not by itself reject completion. Set errors,
 rooted access/acquisition errors and separate namespace-promotion errors still
 propagate. Nonpersistent completion does not gain a per-piece Flush. This policy
@@ -842,8 +851,10 @@ Application SQLite hints alone remain untrusted on reopen; fast restore still
 requires a validated checkpoint. Checkpoint payload/directory sync, restore
 validation and owner/revocation transactions remain mandatory. Explicit Flush
 and namespace promotion do not adopt the best-effort error policy. Best-effort
-does **not** mean asynchronous, batched or omitted: per-piece sync latency can
-still stall completion. See `tasks/phase45-legacy-completion-publication.md`.
+does **not** mean asynchronous or batched: when enabled, per-piece sync latency
+can still stall completion. The default flag skips it entirely; the library's
+zero-value `NewFileClientOpts` retains the sync policy for standalone consumers.
+See `tasks/phase45-legacy-completion-publication.md`.
 
 The engine now uses **managed payload** I/O: while a torrent is attached, the
 service owns its files. It does **not** promise immediate detection of external
@@ -866,7 +877,7 @@ startup hashing, not continuous external-change monitoring.
 - Internal writes still revoke persisted trust **before mutation**, invalidate
   overlapping hash snapshots, and hold the existing payload/lifecycle leases.
   New pieces still follow the hash caller's completion notification before
-  serving/upload, subject to the stale-callback limitation above. Best-effort completion sync,
+  serving/upload, subject to the stale-callback limitation above. Optional best-effort completion sync,
   stable checkpoint evidence/sync, restore validation, DiskFull and storage
   ownership/recovery gates remain enabled. No mmap is introduced.
 - Managed writes no longer serialize a whole file. Non-overlapping byte ranges
@@ -951,8 +962,9 @@ For diagnosing bursty downloads, `GET /api/v1/health/bt` includes optional
   in-flight calls, cumulative and maximum duration of piece completion Flush.
   This includes path/open/name-lock work and sync of all contributing files,
   not just the time inside the operating system's `fsync`. A completion Flush
-  error is now best-effort: its error counter/WARN may increase while publication
-  succeeds. These counters do not count checkpoint sync.
+  error is best-effort when per-piece sync is enabled: its error counter/WARN may
+  increase while publication succeeds. With the default skip policy the automatic
+  sync counters stay zero. These counters do not count explicit/checkpoint sync.
 - `write_lease_wait_count`, `write_lease_wait_active`, `write_lease_wait_ns`,
   `write_lease_wait_max_ns`: contended payload write-lease acquisitions
   (overlapping ranges or a file join barrier in managed mode; file-wide in strict mode),
@@ -964,7 +976,7 @@ They do not cover every disk/SQLite/lifecycle wait or prove which resource limit
 throughput. Reading them performs no disk I/O. Verified storage no longer holds
 the file-wide payload lease through completion sync: neighboring writes may
 proceed, then current evidence is used for publication without comparing it with
-the original hash snapshot. Hashing, synchronous best-effort completion Flush,
+the original hash snapshot. Hashing, optional synchronous best-effort completion Flush,
 mandatory checkpoint sync and Close/checkpoint barriers remain enabled.
 
 The same object provides per-write-stage records, each with `count`, `errors`,

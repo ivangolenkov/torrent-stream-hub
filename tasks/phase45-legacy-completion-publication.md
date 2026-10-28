@@ -13,6 +13,14 @@
 
 ## Решение пользователя
 
+**Последующее дополнение по прямому запросу пользователя:** добавить restart-scoped
+`--bt-disable-piece-sync` / `HUB_BT_DISABLE_PIECE_SYNC`, default **true** (автоматический
+per-piece Sync Flush пропускается). False сохраняет описанный ниже синхронный
+best-effort режим. Это дополнение текущей фазы, не переход к следующей при открытом
+Windows gate. Hashing, Set errors, range/lifecycle, explicit Flush, namespace sync
+и mandatory checkpoint sync не меняются. Standalone storage сохраняет прежний
+zero-value default; application передаёт настройку явно. Отчёт дополнен отдельно.
+
 Пользователь отменил предложение полностью убрать per-piece Completion sync
 только в managed-режиме и выбрал:
 

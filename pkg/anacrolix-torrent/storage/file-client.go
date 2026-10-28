@@ -50,7 +50,12 @@ type NewFileClientOpts struct {
 	// If part files are enabled, this will default to inferring completion from file names at
 	// startup, and keep the rest in memory.
 	PieceCompletion PieceCompletion
-	UsePartFiles    g.Option[bool]
+	// DisablePieceSync skips only automatic completion Flush for persistent
+	// hints. Explicit Flush, namespace promotion and checkpoint sync still run.
+	// The zero value preserves this library's synchronous best-effort policy;
+	// the application explicitly enables this option by default.
+	DisablePieceSync bool
+	UsePartFiles     g.Option[bool]
 	// ImportPartFiles moves legacy .part files to their metadata names before
 	// opening storage. Requires RootFS, VerifyOnOpen and UsePartFiles=false.
 	// Existing targets are never overwritten; conflicting names fail the open.

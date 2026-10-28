@@ -820,6 +820,31 @@ hardware that falsely acknowledges flush; fast does not detect all bit rot.
 
 ### Active Payload Ownership And Descriptor Reuse
 
+**Completion publication policy (phase 45):** a successful hash caller's
+`MarkComplete` now stores its hint first, then attempts a **synchronous best-effort
+Flush** for persistent completion. Flush failure produces a WARN and increments
+`completion_sync_errors`, but does not by itself reject completion. Set errors,
+rooted access/acquisition errors and separate namespace-promotion errors still
+propagate. Nonpersistent completion does not gain a per-piece Flush. This policy
+also applies to strict/legacy persistent backends; their previous crash guarantees
+are weaker when hints can precede flushed payload.
+
+The backend no longer compares the callback with its original hash snapshot,
+including after hint persistence. Hashing itself, engine pending-write tracking,
+range exclusion and full Recheck remain. **A late callback can nevertheless
+re-grant readiness after a write or revocation, without hashing those new bytes.**
+Such a stale completion can also enter a checkpoint: checkpoint sync ensures
+durability, not correctness of a previously accepted hash notification. This is
+an explicitly accepted integrity tradeoff, not equivalent protection or proof
+that storage-change races are impossible.
+
+Application SQLite hints alone remain untrusted on reopen; fast restore still
+requires a validated checkpoint. Checkpoint payload/directory sync, restore
+validation and owner/revocation transactions remain mandatory. Explicit Flush
+and namespace promotion do not adopt the best-effort error policy. Best-effort
+does **not** mean asynchronous, batched or omitted: per-piece sync latency can
+still stall completion. See `tasks/phase45-legacy-completion-publication.md`.
+
 The engine now uses **managed payload** I/O: while a torrent is attached, the
 service owns its files. It does **not** promise immediate detection of external
 edits, replacement, unlink, truncation or mount changes. Cached verified progress
@@ -840,7 +865,8 @@ startup hashing, not continuous external-change monitoring.
   remain visible. Writable sync descriptors are used on Windows when required.
 - Internal writes still revoke persisted trust **before mutation**, invalidate
   overlapping hash snapshots, and hold the existing payload/lifecycle leases.
-  New pieces are still hashed before serving/upload. Mandatory completion sync,
+  New pieces still follow the hash caller's completion notification before
+  serving/upload, subject to the stale-callback limitation above. Best-effort completion sync,
   stable checkpoint evidence/sync, restore validation, DiskFull and storage
   ownership/recovery gates remain enabled. No mmap is introduced.
 - Managed writes no longer serialize a whole file. Non-overlapping byte ranges
@@ -924,7 +950,9 @@ For diagnosing bursty downloads, `GET /api/v1/health/bt` includes optional
   `completion_sync_ns`, `completion_sync_max_ns`: completed attempts, errors,
   in-flight calls, cumulative and maximum duration of piece completion Flush.
   This includes path/open/name-lock work and sync of all contributing files,
-  not just the time inside the operating system's `fsync`.
+  not just the time inside the operating system's `fsync`. A completion Flush
+  error is now best-effort: its error counter/WARN may increase while publication
+  succeeds. These counters do not count checkpoint sync.
 - `write_lease_wait_count`, `write_lease_wait_active`, `write_lease_wait_ns`,
   `write_lease_wait_max_ns`: contended payload write-lease acquisitions
   (overlapping ranges or a file join barrier in managed mode; file-wide in strict mode),
@@ -935,8 +963,9 @@ are cumulative, concurrent waits can overlap, and counters reset on reattachment
 They do not cover every disk/SQLite/lifecycle wait or prove which resource limits
 throughput. Reading them performs no disk I/O. Verified storage no longer holds
 the file-wide payload lease through completion sync: neighboring writes may
-proceed, then the original hash evidence is revalidated before publication.
-Hashing, required sync and Close/checkpoint barriers remain enabled.
+proceed, then current evidence is used for publication without comparing it with
+the original hash snapshot. Hashing, synchronous best-effort completion Flush,
+mandatory checkpoint sync and Close/checkpoint barriers remain enabled.
 
 The same object provides per-write-stage records, each with `count`, `errors`,
 `active`, `ns` and `max_ns`:

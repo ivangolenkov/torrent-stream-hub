@@ -1,5 +1,42 @@
 # Engine concurrency contract
 
+## Current completion publication policy (phase 45)
+
+This section supersedes the earlier phase-40/43/44 **publication snapshot** and
+mandatory per-piece-sync claims below, not checkpoint/namespace durability or
+range/lifecycle exclusion. MarkComplete still owns a lifecycle read lease. It
+takes the existing payload read lease for Set(true), releases it, then attempts
+synchronous completion Flush for persistent backends. Set errors return without
+Flush/publication. Flush errors are WARN-only with the same timing/error counters.
+Nonpersistent completion skips this Flush. No payload lease is held across best-effort
+Flush; same-piece or neighbor writes may proceed. No async flush/group commit or
+new worker is introduced. Strict and managed persistent backends share this policy.
+
+For VerifyOnOpen, publication then takes its full-piece payload read lease,
+acquires CURRENT file evidence and interns/marks it fresh under freshMu. Acquisition
+and rooted errors remain errors. There is no comparison with hashSnapshot before
+or after Set/Flush, nor a rejection based on the captured signature's validity.
+BeginVerification/hashSnapshot remain for checkpoint in-flight exclusion; writes,
+revoke and MarkNotComplete still erase them, and successful markFresh consumes them.
+They are no longer callback authorization tokens. All remaining references were
+audited in storage/file-piece.go, file-torrent.go, file-torrent-io.go,
+resume-mutation.go, managed-files.go and checkpoint.go.
+
+Engine pendingWrites still joins network writes before hashing, and byte-range
+leases stabilize actual reads and publication steps. Those facts do NOT prove the
+callback still describes current bytes between steps. A late callback can override
+an erased/revoked snapshot and enter fresh readiness, then a checkpoint. Checkpoint
+sync does not rehash that data. This weaker integrity policy is explicitly accepted
+in phase 45; prior stale-callback exclusion claims no longer apply.
+
+Checkpoint lifecycle admission, exclusion of active hashSnapshot entries, mandatory
+payload/directory sync, strict restore evidence and durable ownership/revocation
+are unchanged. Namespace promotion and explicit Flush retain their error behavior.
+Flush-error-only publication is permitted, including ENOSPC from Flush; separate
+disk-admission/WriteAt errors and known-volume-error cache fencing remain. A generic
+non-VerifyOnOpen persistent backend cannot claim that its hints are untrusted on
+reopen: returning to legacy Set-before-Flush weakens its crash semantics too.
+
 ## Phase 43 checkpoint foundations (blocks 1–2)
 
 Engine.New acquires the rooted persistent `.tsh-instance.lock` before creating
@@ -158,10 +195,11 @@ active may exceed one per file. Cache waits/lifecycle admission are separate.
 
 Writes still revoke the entire affected piece's live/durable trust before the
 first byte is changed. Multiple independent chunks can erase the same snapshot;
-none can create trust. Publication's full-piece read lease prevents a writer
-slipping between validation and commit. Completion sync remains before that lease,
-with snapshot revalidation afterwards. No per-piece fsync removal/group commit is
-included. File creation/upgrade still coalesces at descriptor acquisition, with
+none can create trust by writing. Under phase 45 a late completion callback CAN
+re-grant that trust. Publication's full-piece read lease stabilizes current-evidence
+capture and markFresh, but no longer validates the old hash snapshot. Completion
+sync now follows Set and is best-effort, outside that lease. No per-piece fsync
+removal/group commit is included. File creation/upgrade still coalesces at descriptor acquisition, with
 guard/revocation before create; active namespace edits remain unsupported.
 Checkpoint takes lifecycle exclusively, joins all mutation calls and holds it
 through sync/publish; existing readers can continue. Close/Reset additionally take
@@ -179,13 +217,15 @@ unsupported immediate external detection from ignoring an observed unsafe volume
 Reads/hashing/completion sync use the same retained inode. Chunk writes do not
 capture before/after stat and do not refresh file-wide mtime evidence. Internal
 overlapping writes still erase hashSnapshot and revoke live/persisted trust before
-mutation; independent pieces retain their shared valid signature. Managed hash
-publication compares retained identity and invalidation state, not filesystem
-mtime/size after each chunk. No size/name/cache-hit creates completion authority.
+mutation; independent pieces retain their shared valid signature. Managed
+publication now interns current retained identity without validating the original
+hash attempt, as specified in phase 45 above. No size/name/cache-hit alone creates
+completion authority without a caller's MarkComplete notification.
 ReadAt in managed mode requires cached verified completion; hash WriteTo is the
 existing explicit verification path and may read untrusted data. Hash short reads
 and non-cancellation I/O failures revoke file trust and retire the affected handle.
-Mandatory sync remains, including write-access upgrades for Windows FlushFileBuffers.
+Synchronous best-effort completion sync remains, including write-access upgrades
+for Windows FlushFileBuffers. Checkpoint sync remains mandatory.
 
 Close/reset acquire lifecycle exclusively, then all payload writer leases,
 joining read leases too, before closing retained descriptors. Full VerifyDataContext

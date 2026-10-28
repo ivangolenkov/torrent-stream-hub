@@ -253,76 +253,35 @@ func (me *filePieceImpl) MarkComplete() (err error) {
 }
 
 func (me *filePieceImpl) commitCompletion() error {
-	// Sync may wait on the whole file/device. Do not hold a file-wide payload
-	// lease across it: peer receive loops write neighboring pieces inline.
-	// The lifecycle lease still fences Close/seal. After Sync, acquire the
-	// payload lease and validate the original hash snapshot against current
-	// evidence before publishing. Same-piece writes erase that snapshot;
-	// disjoint writes only update the accounted shared file signature.
-	persistent := pieceCompletionIsPersistent(me.pieceCompletion())
-	if persistent && me.t.client.opts.VerifyOnOpen {
-		if err := me.syncCompletion(); err != nil {
-			return err
-		}
-	}
+	// Legacy publication policy: the persistent hint precedes a synchronous,
+	// best-effort Flush. A failed Set still forbids publication. Keep payload
+	// exclusion for Set itself, but never hold it across the storage sync.
 	unlock := me.t.lockPayloadRange(me.p.Offset(), me.p.Length(), false)
-	defer unlock()
-	var verifiedSignature []os.FileInfo
-	if me.t.client.opts.VerifyOnOpen {
-		current, e := me.t.pieceSignature(me.p.Index())
-		if e != nil {
-			return e
-		}
-		me.t.freshMu.Lock()
-		snapshot, ok := me.t.hashSnapshot[me.p.Index()]
-		before := append([]os.FileInfo(nil), snapshot...)
-		if !ok || len(before) != len(current) {
-			me.t.freshMu.Unlock()
-			return fmt.Errorf("storage generation changed during verification")
-		}
-		for i, st := range before {
-			now := current[i]
-			sig, typed := st.(*verifiedFileSignature)
-			matches := sameSignature(st, now)
-			if me.t.managedPayload() && typed {
-				matches = os.SameFile(sig.FileInfo, now)
-			}
-			if typed && !sig.valid || !matches {
-				me.t.freshMu.Unlock()
-				return fmt.Errorf("storage changed during verification")
-			}
-		}
-		verifiedSignature = before
-		me.t.freshMu.Unlock()
-	}
-	// Legacy backends have no hash snapshot fencing. Preserve their historical
-	// exclusion instead of allowing unvalidated writes during Sync.
-	if persistent && !me.t.client.opts.VerifyOnOpen {
-		if err := me.syncCompletion(); err != nil {
-			return err
-		}
-	}
-	if err := me.pieceCompletion().Set(me.pieceKey(), true); err != nil {
+	err := me.pieceCompletion().Set(me.pieceKey(), true)
+	unlock()
+	if err != nil {
 		return err
 	}
+	if pieceCompletionIsPersistent(me.pieceCompletion()) {
+		if err := me.syncCompletion(); err != nil {
+			me.logger().Warn("error flushing completed piece", "piece", me.p.Index(), "err", err)
+		}
+	}
 	if me.t.client.opts.VerifyOnOpen {
+		unlock = me.t.lockPayloadRange(me.p.Offset(), me.p.Length(), false)
+		defer unlock()
+		current, err := me.t.pieceSignature(me.p.Index())
+		if err != nil {
+			return err
+		}
 		me.t.freshMu.Lock()
 		defer me.t.freshMu.Unlock()
-		// Revoke/refresh/layer invalidation need not take a payload writer lease.
-		// Never resurrect a snapshot revoked while Flush/Set was in flight.
-		snapshot, ok := me.t.hashSnapshot[me.p.Index()]
-		if !ok || len(snapshot) != len(verifiedSignature) {
-			return fmt.Errorf("storage generation changed during verification")
-		}
-		for i, st := range snapshot {
-			if st != verifiedSignature[i] {
-				return fmt.Errorf("storage generation changed during verification")
-			}
-			if sig, ok := st.(*verifiedFileSignature); ok && !sig.valid {
-				return fmt.Errorf("storage changed during verification")
-			}
-		}
-		me.t.markFreshLocked(me.p.Index(), verifiedSignature, false)
+		// Deliberately do not compare with hashSnapshot or reject a revoked
+		// signature here. This weaker policy can accept a stale hash callback;
+		// current evidence is not proof that these bytes were what it hashed.
+		// Keep acquisition/rooted errors above and checkpoint's own sync gates.
+		signature := me.t.internSignatureLocked(me.p.Index(), current)
+		me.t.markFreshLocked(me.p.Index(), signature, false)
 	}
 	return nil
 }

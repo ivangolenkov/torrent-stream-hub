@@ -77,7 +77,7 @@ func TestVerificationPublicationConcurrentNeighborWrite(t *testing.T) {
 	}
 }
 
-func TestVerificationSnapshotRevokedBySamePieceWrite(t *testing.T) {
+func TestLegacyPublicationCanOverrideErasedSnapshot(t *testing.T) {
 	_, _, info, ts := verifiedFixture(t)
 	p := ts.Piece(info.Piece(0)).(*filePieceImpl)
 	if _, err := p.WriteAt([]byte("good"), 0); err != nil {
@@ -89,11 +89,17 @@ func TestVerificationSnapshotRevokedBySamePieceWrite(t *testing.T) {
 	if _, err := p.WriteAt([]byte("evil"), 0); err != nil {
 		t.Fatal(err)
 	}
-	if err := p.MarkComplete(); err == nil {
-		t.Fatal("write resurrected stale hash")
+	if _, ok := p.t.hashSnapshot[0]; ok {
+		t.Fatal("write did not erase snapshot")
 	}
 	if p.Completion().Complete {
-		t.Fatal("changed piece trusted")
+		t.Fatal("write itself granted trust")
+	}
+	if err := p.MarkComplete(); err != nil {
+		t.Fatal("legacy callback rejected", err)
+	}
+	if !p.Completion().Complete {
+		t.Fatal("legacy stale-callback behavior changed")
 	}
 	if err := p.BeginVerification(); err != nil {
 		t.Fatal(err)
@@ -101,8 +107,11 @@ func TestVerificationSnapshotRevokedBySamePieceWrite(t *testing.T) {
 	if err := p.MarkNotComplete(); err != nil {
 		t.Fatal(err)
 	}
-	if err := p.MarkComplete(); err == nil {
-		t.Fatal("invalidation resurrected stale hash")
+	if p.Completion().Complete {
+		t.Fatal("MarkNotComplete did not revoke trust")
+	}
+	if err := p.MarkComplete(); err != nil {
+		t.Fatal("legacy callback after invalidation rejected", err)
 	}
 }
 
@@ -133,10 +142,10 @@ func TestVerificationRevocationDuringCompletionCommit(t *testing.T) {
 		delete(p.t.hashSnapshot, 0)
 		p.t.freshMu.Unlock()
 	}}
-	if err := p.MarkComplete(); err == nil {
-		t.Fatal("revoked snapshot published")
+	if err := p.MarkComplete(); err != nil {
+		t.Fatal("legacy publication rejected erased snapshot", err)
 	}
-	if ts.CachedComplete(0) {
-		t.Fatal("revocation lost during hint persistence")
+	if !ts.CachedComplete(0) {
+		t.Fatal("expected accepted risk: callback can override snapshot revocation")
 	}
 }

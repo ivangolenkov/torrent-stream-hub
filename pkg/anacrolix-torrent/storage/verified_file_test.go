@@ -41,8 +41,10 @@ func TestVerifiedCompletionIgnoresPersistentHintAndReopen(t *testing.T) {
 	if p.Completion().Complete || ts.FreshComplete(0) {
 		t.Fatal("final name/size or old completion trusted")
 	}
-	if err := p.MarkComplete(); err == nil {
-		t.Fatal("accepted completion without verification snapshot")
+	// Legacy storage trusts the caller's successful hash notification; it no
+	// longer requires a matching BeginVerification snapshot as proof.
+	if err := p.MarkComplete(); err != nil {
+		t.Fatal("legacy caller notification rejected", err)
 	}
 	// The hash caller, not the storage backend, compares content with metadata.
 	if err := p.BeginVerification(); err != nil {
@@ -80,8 +82,10 @@ func TestVerifiedCompletionRevokedOnReplacementAndHashMutation(t *testing.T) {
 	if err := os.WriteFile(path, []byte("evil"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := p.MarkComplete(); err == nil {
-		t.Fatal("replacement during hashing accepted")
+	// The late callback accepts current evidence after replacement. This is a
+	// policy regression intentionally accepted in phase 45, not a valid rehash.
+	if err := p.MarkComplete(); err != nil {
+		t.Fatal("legacy callback rejected replacement evidence", err)
 	}
 	if err := p.BeginVerification(); err != nil {
 		t.Fatal(err)

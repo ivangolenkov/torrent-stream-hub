@@ -4,6 +4,16 @@
 
 ## Политика и граница доказательства
 
+**Последующее изменение publication policy — фаза 45:** per-piece hint сохраняется
+до synchronous best-effort Flush; ошибка этого Flush не запрещает publication.
+Сравнение hashSnapshot до/после Set/Flush снято по решению пользователя. Это не
+меняет protocol/checkpoint sync, validated restore или недоверенность hints, но
+late callback может выдать stale fresh completion, которую затем примет seal.
+Checkpoint sync не пересчитывает хеш и не устраняет этот принятый риск. Более
+сильные утверждения о невозможности stale publication в историческом описании
+фазы 43 ограничены этим уточнением; детали — в
+[фазе 45](phase45-legacy-completion-publication.md).
+
 - Настройка `HUB_FAST_RESUME_MODE=fast|verify` / `--fast-resume-mode`; отсутствие настройки означает `fast`, неизвестное или явно пустое значение — ошибка конфигурации, не best-effort trust. Изменение требует restart. Zero-value Go Config сохраняет default fast.
 - `fast`: пригодный committed checkpoint минус durable revocations, отфильтрованный по текущему evidence. Clean и dirty session проходят одинаковую валидацию. Только факт crash не отзывает checkpoint.
 - `verify`: checkpoint не импортируется; открытие использует действующий hash-проход. Переключение требует restart; explicit recheck отзывает соответствующее доверие до запуска hashing.

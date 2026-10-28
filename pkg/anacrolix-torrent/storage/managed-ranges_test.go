@@ -150,8 +150,8 @@ func TestManagedPayloadIndependentWrites(t *testing.T) {
 			// Join the first write before testing its erased snapshot.
 			// The deferred join consumes done, so observe its range release here.
 			awaitManagedRanges(t, fs, 0)
-			if err := p.MarkComplete(); err == nil || ts.CachedComplete(0) {
-				t.Fatal("write resurrected pre-mutation hash")
+			if err := p.MarkComplete(); err != nil || !ts.CachedComplete(0) {
+				t.Fatal("legacy callback still requires pre-mutation snapshot", err)
 			}
 			verifyManagedPiece(t, ts, info, 0, "GOOD")
 			if !ts.CachedComplete(1) {
@@ -322,11 +322,13 @@ func testManagedPayloadReadExclusion(t *testing.T, direct bool) {
 	}
 	unblock.Do(func() { close(release) })
 	awaitManagedRanges(t, fs, 0)
-	if err := p.MarkComplete(); err == nil || ts.CachedComplete(0) {
-		t.Fatal("mutation after hashing retained stale completion")
-	}
 	if _, err := p.ReadAt(make([]byte, 4), 0); !errors.Is(err, ErrUnverifiedPayload) {
-		t.Fatal("stale bytes readable", err)
+		t.Fatal("write did not revoke readiness before another callback", err)
+	}
+	// A late callback is now allowed to re-grant readiness. The range exclusion
+	// still stabilized the actual hash/read above; this does not hash "evil".
+	if err := p.MarkComplete(); err != nil || !ts.CachedComplete(0) {
+		t.Fatal("legacy stale callback rejected", err)
 	}
 }
 
@@ -485,15 +487,15 @@ func TestManagedPayloadParallelWritesDuringSync(t *testing.T) {
 			defer func() {
 				unblock.Do(func() { close(release) })
 				err := <-publish
-				if mode == "neighbor-write" {
-					if err != nil || !ts.CachedComplete(0) {
-						t.Error("independent write rejected valid hash", err)
-					}
-				} else if err == nil || ts.CachedComplete(0) {
-					t.Error("failed barrier published completion", err)
+				if err != nil || !ts.CachedComplete(0) {
+					t.Error("legacy best-effort completion rejected", err)
 				}
-				if mode == "sync-error" && !errors.Is(err, injected) {
-					t.Error(err)
+				wantErrors := int64(0)
+				if mode == "sync-error" {
+					wantErrors = 1
+				}
+				if ts.IOTimings().CompletionSyncErrors != wantErrors {
+					t.Error("best-effort error not observable", ts.IOTimings())
 				}
 			}()
 			awaitWriteBarrier(t, entered)

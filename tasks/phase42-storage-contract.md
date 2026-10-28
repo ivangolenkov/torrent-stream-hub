@@ -4,6 +4,14 @@
 
 ## Mapping и identity
 
+Уточнение текущего runtime (фаза 45): публикация completion больше не сравнивает
+исходный hashSnapshot с текущим evidence, per-piece Flush после Set — best-effort.
+Hashing и правила доступа/rooted ownership остаются, но late callback после
+mutation/revoke может ошибочно вернуть freshness; даже sync последующего checkpoint
+не является повторной hash-проверкой. Это явное ослабление publication integrity,
+не изменение mapping/recovery/namespace sync. История приёмки фазы 42 сохранена;
+актуальная граница доверия описана в [фазе 45](phase45-legacy-completion-publication.md).
+
 Существующая `torrent_storage` сохраняется для совместимости journals и aliases. К ней добавляются `storage_id`, `revision`, `prefix`, `name_hint`. `storage_id` — случайная стабильная identity владельца пространства, общая для aliases; не равна hash или `record_id`. Строки aliases несут совместимое представление mapping; изменение расположения атомарно обновляет всю группу. Несогласованные строки одного владельца дают конфликт. Root equality не разрешает присоединить другую torrent identity к тому же владельцу.
 
 Layout 0 — legacy shared; layout 1 — прежний `payload/<hash>`; layout 2 — сохранённый понятный `payload/<name>`. `prefix` явно задаёт снимаемый metadata-префикс, только для layout 2; индекс и metainfo пути неизменны. Путь файла получается исключительно через resolver. `revision` увеличивается при изменении расположения/раскладки, а не при telemetry. `state=reserved` с пустым root разрешает получение metadata, но не открытие payload. `name_hint` хранит явное имя каталога до metadata. Old layouts не конвертируются при SQL upgrade.

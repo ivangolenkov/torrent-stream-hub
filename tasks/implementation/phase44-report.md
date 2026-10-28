@@ -1,5 +1,131 @@
 # Фаза 44 — отчёт об имплементации
 
+## Итоговый статус: полностью завершена
+
+**28 октября 2026 года пользователь принял фазу 44 и сообщил, что CI прошёл.**
+Финальный managed-payload/range revision принят, включая native Windows gate;
+агент не проверял CI run независимо. Локальные make check/race/Linux результаты
+сохранены ниже без переписывания истории ошибок и промежуточных ожиданий CI.
+
+### Итоговая приёмка DoD
+
+- [x] F44-01: baseline, детерминированное воспроизведение и контракты зафиксированы;
+  выполненный объём измерений принят пользователем.
+- [x] F44-02: отсутствующие диапазоны исключены из startup hashing без выдачи trust.
+- [x] F44-03: untrusted existing data/new pieces хешируются, checkpoint subset
+  восстанавливается; explicit Recheck сохранён.
+- [x] F44-04: независимые writes не дают ложных conflicts; конфликтующие операции
+  согласованы byte-range admission, stale-result checks действуют в текущем runtime.
+- [x] F44-05: bounded scheduling, streaming, durable revocation и lifecycle gates
+  проверены в реализованном объёме.
+- [x] F44-06: cached diagnostics различают hashing/restore/skips; managed cache и
+  отсутствие file-wide convoy подтверждены на NAS.
+- [x] F44-07: локальный make check и финальный CI приняты по подтверждению пользователя.
+- [x] План, отчёт и runtime-контракты обновлены.
+
+### Явное исключение при закрытии
+
+Контролируемое NAS A/B и устранение всех speed spikes **не объявляются выполненными**.
+Последние измерения всё ещё показывают WriteAt/sync stalls и новые dropped SQLite
+hints. Пользователь распорядился завершить фазу с этими известными ограничениями:
+сравнительная throughput-приёмка больше не блокирует её закрытие. Исторические
+незакрытые checkbox ниже описывают состояние на момент соответствующих измерений;
+текущий статус определяется этим итоговым разделом и DoD в файле фазы.
+
+Последующее согласованное изменение поведения — best-effort Flush после Set(true)
+и снятие snapshot-проверок публикации — сохранено отдельно как
+[фаза 45](../phase45-legacy-completion-publication.md). Это только новый план,
+не уже выполненная реализация; более раннее предложение удалить per-piece sync
+в managed-режиме отменено пользователем. Код и пользовательский сервис при
+оформлении завершения фазы 44 и плана фазы 45 не менялись; новые тесты не запускались.
+
+## NAS после range follow-up: file-wide очередь исчезла, I/O stalls остались
+
+Повторная диагностика по запросу пользователя после его перезапуска. Только GET
+health/torrents/logs; агент не выполнял Pause/Resume/restart/deploy/config changes.
+Последний startup **2026-10-28 09:54:04–09:54:06 UTC**; пользовательский Resume
+09:54:11 занял 72.131 ms. 19 health/torrents snapshots через 5 s:
+**09:55:41.696–09:57:11.746 UTC**, 90.050 s, один attachment. Пользовательский Pause
+из лога 09:57:15 находится уже ПОСЛЕ выборки и не снижает измеренную среднюю.
+
+| Показатель за выборку | Значение |
+| --- | --- |
+| Useful reception | 162.875 MiB; среднее **1.809 MiB/s**; 5-s интервалы **0.490–6.230 MiB/s** |
+| Connected peers | 36–39; bad pieces 0→0; active streams=0 |
+| Range/file-join write contention | **Все write_lease_wait counters = 0**, также с начала attachment |
+| Payload I/O active | обычно **20–30 одновременно**; один снимок 0 |
+| Actual WriteAt | +10423 calls, суммарное overlapping время **2270.582 s**; среднее **217.843 ms/call**, lifetime max **3.126 s** |
+| Writer lease hold | +2270.614 s; практически всё измеренное hold время — actual WriteAt |
+| Managed descriptors | hits +10760; misses 5→5, evictions 1→1, open 4→4 |
+| Guard/open/stat | нет новых actual root-open/guard/path/identity calls; WriteStat/Account=0; суммарный cache acquisition +3.085 ms |
+| Completion sync | +84 calls, +50.682 s; среднее **603.358 ms**, lifetime max **1.667 s**; sync errors=0 |
+| Received good pieces / fresh verification | +84 / +168 MiB = 84 × 2 MiB |
+| Verification queue / active | 0–4 / 0–1, не растущая очередь |
+| SQLite disposable hints | `completion persistence failed`; **dropped 1→6**, pending=0 в снимках |
+
+**Подтверждён результат кода:** exclusive file-wide convoy снят на NAS. Это уже не
+предположение по локальным tests: раньше 22–30 callers стояли до WriteAt и один
+писал; теперь range waits нулевые, но много callers одновременно находятся ВНУТРИ
+WriteAt. Cache misses/stat тоже не объясняют просадки. Пропускная способность и
+ровность не достигли цели; очередь фактически сместилась ниже backend admission —
+в OS/filesystem/storage path. Это не доказательство аппаратной неисправности диска.
+
+Следующий оставшийся механизм нагрузки — большое количество мелких positional
+writes (обычно 16 KiB) вместе с Flush/Sync на каждую завершённую 2 MiB piece и
+асинхронными SQLite transactions disposable hints на том же storage workload.
+Увеличение числа simultaneous writers само по себе не снимает storage bottleneck
+и может повышать глубину внутренней очереди. Dirty-page writeback, inode/device
+serialization, mount/container layers и конкуренция с payload/SQLite fsync —
+кандидаты, не разделённые этими counters. Суммы 2270 s/50 s — overlapping call
+time, их нельзя складывать или принимать за wall duration. Для разделения нужны
+read-only host iostat/vmstat/dirty/writeback/mount metrics.
+
+Среднее 1.809 MiB/s ниже предыдущей 3.052 MiB/s выборки, но это НЕ контролируемый
+A/B: другие время, диапазоны, resume/startup state и disk load. Нельзя ни объявлять
+общий speedup, ни количественно приписывать разницу одному изменению locking.
+
+**SQLite теперь не просто старый sticky error:** lastErr сохраняется навсегда,
+но dropped вырос во время выборки ещё на 5 — появились новые потерянные hints.
+Это не потеря 5 payload pieces и не отзыв live hash trust. По sqlite.go dropped
+учитывает и failed batches, и pending overflow; sparse pending=0 samples не
+доказывают отсутствие краткого backlog. Status скрывает underlying error, поэтому
+нельзя установить busy/timeout/I/O cause по строке `completion persistence failed`.
+Фоновый flush имеет timeout 1 s; это гипотеза для проверки, не доказанная причина.
+SQLite Set неблокирующий относительно library callbacks; shared storage contention
+может быть общей причиной обеих задержек. Требуется диагностика error class/stage/
+batch size/duration, а не только увеличение timeout или удаление fsync.
+
+**Hashing:** +84 good received pieces совпадают с +84 sync и +168 MiB fresh bytes.
+В этом интервале нет признаков бесконечного background Recheck/массового hash fail;
+`Verifying` отражает полученные pieces/их publication. Startup пропустил 4121
+incomplete pieces; принят subset checkpoint generation 58 от **2026-10-27 21:34:10**,
+4.242 GiB. Существующие bytes вне subset проверяются отдельно на startup; полный
+отказ от startup hashing этим checkpoint не обещается.
+
+Лог предыдущего процесса `failed to close torrent storage: context deadline exceeded`
+в 09:54:00 сам по себе НЕ доказывает зависший payload Close: fileClient.Close
+возвращает также PieceCompletion.Close, а SQLite.Close возвращает исторический
+lastErr. Разделить ветки по этой общей строке невозможно. В текущей сессии до
+конца выборки нет `error marking piece complete`/write errors/DiskFull. Есть
+отдельные malformed peer extended handshakes; при стабильных peers и bad=0 это не
+подтверждённая причина storage stalls. Generic SQLite error виден в health, не
+отдельной детальной строкой лога.
+
+Рекомендованный следующий блок после отдельной команды: согласовать пакетную
+durability (verified live data отдельно от durable checkpoint; исключить лишний
+per-piece sync для disposable hints только с crash/restore tests), раскрыть
+причину новых SQLite failures, измерить bounded/coalesced writes и разумную
+конкурентность на слабом NAS. Не возвращать file-wide mutex и не отключать hashing.
+Runtime в рамках этой диагностики не менялся, тесты не запускались.
+
+- [x] Проверено реальное отсутствие file-wide range contention после deployment.
+- [x] Повторно измерены useful bytes, concurrent WriteAt, sync, verify и hints.
+- [ ] Smoothing/throughput target и общие F44-01/F44-07 остаются открытыми.
+
+Evidence в OpenCode temp: `phase44-post-ranges-health.json`,
+`phase44-post-ranges-torrents.json`, `phase44-post-ranges-samples.jsonl`,
+`phase44-post-ranges-logs.txt`, `phase44-post-ranges-logs-end.txt`.
+
 ## Follow-up: независимые managed writes без file-wide convoy
 
 По команде пользователя реализован локальный follow-up фазы 44. Развёрнутый NAS,

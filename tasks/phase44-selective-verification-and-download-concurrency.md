@@ -2,10 +2,11 @@
 
 ## Статус и зависимости
 
-- Статус: **основной runtime реализован, локальный `make check` пройден; native Windows CI gate закрыт по подтверждению пользователя**. Negative startup planning, signature/write publication, received-piece priority и cached диагностика проверены локально. Отдельные measurements остаются открыты; подробности в [отчёте](implementation/phase44-report.md). Фаза не объявляется завершённой.
+- Статус: **полностью завершена и принята пользователем 28 октября 2026 года; CI прошёл по подтверждению пользователя**, включая финальные managed-payload/range follow-ups. Локальный `make check` пройден; результаты и история проверок — в [отчёте](implementation/phase44-report.md). Независимая проверка CI run агентом не выполнялась.
 - [x] Native Windows CI gate: пользователь подтвердил успешный CI после исправлений; результат принят с его слов, без независимой проверки CI run агентом.
 - [x] Повторная native Windows проверка root-open follow-up: пользователь подтвердил «Windows CI прошел» после изменений pathwalk/create; результат принят с его слов, без независимой проверки CI run агентом.
-- [ ] Native Windows gate для последующей managed-payload реализации (descriptor lifetime/reset/Windows sync upgrade): требуется новый CI; ранее принятые результаты относятся к предыдущим версиям.
+- [x] Native Windows gate финальной managed-payload/range реализации: закрыт по сообщению пользователя «CI прошел» при завершении фазы; прежние ожидания CI в исторических разделах отчёта больше не являются текущим blocker.
+- Закрытие фазы не означает устранения всех скачков скорости или наличия контролируемого NAS A/B: эти ограничения сохранены в отчёте. Пользователь принял выполненный объём; дальнейшее изменение completion publication выделено в [фазу 45](phase45-legacy-completion-publication.md), а не продолжается как незавершённый блок фазы 44.
 - Зависимость: фаза 43 завершена; сохраняются [контракт fast resume](phase43-fast-resume-contract.md), гарантии хранения фаз 41–42 и действующий lifecycle/coordinator.
 - Этот файл — план, не команда на изменение runtime или развёрнутого сервиса. Начинать реализацию по отдельной команде пользователя; блоки выполнять последовательно после проверки приёмки предыдущего.
 - После каждого значимого блока создавать/обновлять `tasks/implementation/phase44-report.md`: изменения, команды, измерения, DoD и отклонения. Следующую фазу автоматически не начинать.
@@ -173,11 +174,11 @@ execution оставить открытым. Частоту sync не менят
 
 ## Definition of Done
 
-- [ ] F44-01: baseline, воспроизведение причины и контракт negative evidence/write/hash publication зафиксированы.
+- [x] F44-01: baseline, воспроизведение причины и контракт negative evidence/write/hash publication зафиксированы; выполненный объём измерений принят пользователем при закрытии фазы. Полное контролируемое NAS A/B не заявляется выполненным.
 - [x] F44-02: достоверно отсутствующие диапазоны не хешируются при открытии; missing skips не дают trust/readiness и не сохраняются как positive completion.
 - [x] F44-03: существующие непроверенные данные проверяются, trusted checkpoint subset восстанавливается по фазе 43; новые полученные pieces обязательно проходят hash перед использованием.
 - [x] F44-04: независимые внутренние writes не вызывают ложных completion conflicts; изменение проверяемого диапазона и stale lifecycle results безопасно отвергаются без deadlock/starvation.
 - [x] F44-05: streaming/download не ждут полного фонового прохода; bounded budgets, QoS, durable revocations/seal и safety/recovery gates сохранены. Targeted stream/download/fairness/checkpoint suites пройдены; полная финальная приёмка относится к F44-07.
 - [x] F44-06: counters/REST/SSE/GUI/logging различают hashing, restore и skips; API polling не выполняет storage I/O, нет WARN на каждый заведомо отсутствующий startup piece. Explicit recheck не переиспользует negative snapshot.
-- [ ] F44-07: матрица тестов, root/fork/frontend checks и native platform gates проходят; сравнительные измерения подтверждают устранение лишней работы без ослабления integrity.
+- [x] F44-07: матрица тестов, root/fork/frontend checks и native platform gates приняты, финальный CI подтверждён пользователем. Тесты и NAS counters подтверждают устранение per-chunk open/stat и file-wide convoy; сравнительная приёмка ровной скорости не достигнута и исключена из обязательного условия закрытия по решению пользователя. Это исключение не является доказательством отсутствия оставшихся I/O stalls.
 - [x] Документация и `tasks/implementation/phase44-report.md` обновлены с точными evidence, ограничениями и отклонениями; пользовательский сервер не изменён.

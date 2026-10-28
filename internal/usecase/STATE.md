@@ -145,12 +145,31 @@ Known guard failure at acquisition/checkpoint fences cached I/O and revokes live
 readiness until detach/reopen via recovery. Retained descriptors do not allow a
 future hit to bypass an already observed unsafe volume boundary.
 
+### Current completion policy (phase 45)
+
+Per-piece completion now uses Set(true) followed by synchronous best-effort Flush
+for persistent hints, including managed and strict backends. Set errors still
+fail; Flush errors are WARN/counter events, not publication failures by themselves.
+The current signature is used for fresh evidence without comparing the original
+hashSnapshot, before or after hint persistence. Engine hashing/pendingWrites,
+range exclusion, rooted access, ownership and lifecycle joins remain, but a late
+callback CAN override intervening write/revocation and re-grant readiness. Stale
+fresh completion may enter a checkpoint; its sync provides durability, not rehash.
+This accepted integrity tradeoff supersedes earlier stale-publication assertions
+in this document. HashSnapshot still excludes in-flight work from checkpoint.
+
+Application hints alone remain untrusted at reopen. Checkpoint payload/directory
+sync, restore validation and durable mutation transactions keep their fail-closed
+behavior. Explicit Flush and namespace promotion still return errors. Best-effort
+does not mean async/batched/omitted; per-piece sync can still block. No disk-admission,
+WriteAt error, Range, CORS, QoS or application command policy has been removed.
+
 Managed I/O no longer serializes independent writes of a file: byte-range
 admission replaces exclusive file payload leases. Disjoint chunks, even of the
 same piece, proceed concurrently; overlapping write/read/hash/publication remains
 excluded. File leases are shared join barriers only. Durable revoke still covers
-the affected piece before mutation; full-piece publication revalidates its erased
-or retained hash snapshot. Lifecycle checkpoint joins all writers and holds
+the affected piece before mutation; full-piece publication captures current evidence
+without rejecting an erased hash snapshot under phase 45. Lifecycle checkpoint joins all writers and holds
 admission closed through publish. Reset/Close additionally join readers via
 exclusive file leases before closing cached handles. No application coordinator,
 selection, DiskFull, QoS or sync frequency changes are included. Strict backends

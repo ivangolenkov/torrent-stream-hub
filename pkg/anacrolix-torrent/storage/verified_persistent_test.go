@@ -39,7 +39,7 @@ func TestVerifiedPersistentCompletionFlushesExistingFile(t *testing.T) {
 	}
 }
 
-func TestVerifiedPersistentCompletionPreservesFlushError(t *testing.T) {
+func TestVerifiedPersistentCompletionPreservesPromotionFlushError(t *testing.T) {
 	dir, backend, info, ts := verifiedFixture(t)
 	backend.opts.PieceCompletion = persistentTestCompletion{NewMapPieceCompletion()}
 	if err := os.WriteFile(filepath.Join(dir, "data.part"), []byte("good"), 0600); err != nil {
@@ -53,7 +53,15 @@ func TestVerifiedPersistentCompletionPreservesFlushError(t *testing.T) {
 	if err := p.MarkComplete(); !errors.Is(err, os.ErrPermission) {
 		t.Fatalf("flush failure hidden: %v", err)
 	}
-	if p.Completion().Complete || ts.FreshComplete(0) {
-		t.Fatal("failed flush published completion")
+	// Per-piece Flush is best-effort, but namespace promotion's separate sync
+	// remains mandatory and the .part file must survive its error.
+	if !p.Completion().Complete || !ts.FreshComplete(0) {
+		t.Fatal("legacy completion was not published before promotion failure")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "data")); !os.IsNotExist(err) {
+		t.Fatal("promoted despite namespace sync failure", err)
+	}
+	if data, err := os.ReadFile(filepath.Join(dir, "data.part")); err != nil || string(data) != "good" {
+		t.Fatal(string(data), err)
 	}
 }

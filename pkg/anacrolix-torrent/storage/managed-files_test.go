@@ -98,8 +98,10 @@ func TestManagedPayloadHotPathAndVerification(t *testing.T) {
 	if _, err := p.WriteAt([]byte("evil"), 0); err != nil {
 		t.Fatal(err)
 	}
-	if err := p.MarkComplete(); err == nil || ts.CachedComplete(0) {
-		t.Fatal("same-piece mutation accepted stale hash result")
+	// Legacy publication no longer rejects an erased hash snapshot. This is
+	// the explicitly accepted stale-callback risk, not verification of "evil".
+	if err := p.MarkComplete(); err != nil || !ts.CachedComplete(0) {
+		t.Fatal("legacy publication still requires the old snapshot", err)
 	}
 	fs.managedFiles.mu.Lock()
 	fd := fs.managedFiles.entries[0].file

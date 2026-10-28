@@ -18,6 +18,7 @@ import (
 	"github.com/anacrolix/torrent/metainfo"
 	"github.com/anacrolix/torrent/storage"
 
+	"torrent-stream-hub/internal/completion"
 	"torrent-stream-hub/internal/config"
 	"torrent-stream-hub/internal/engine"
 	"torrent-stream-hub/internal/fastresume"
@@ -25,19 +26,28 @@ import (
 	"torrent-stream-hub/internal/repository"
 )
 
-func openResumeApplication(t *testing.T, dir string, mode fastresume.Mode, reads *atomic.Int64) (*TorrentUseCase, func()) {
+func openResumeApplication(t *testing.T, dir string, mode fastresume.Mode, reads *atomic.Int64, persistent ...bool) (*TorrentUseCase, func()) {
 	t.Helper()
 	db, err := repository.NewSQLiteDB(filepath.Join(dir, "hub.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
+	options := []engine.Option{engine.WithStorageIOObserver(func(op, _ string, n int64) {
+		if op == "read" && reads != nil {
+			reads.Add(n)
+		}
+	})}
+	if len(persistent) != 0 && persistent[0] {
+		pc, err := completion.New(db.DB())
+		if err != nil {
+			db.Close()
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = pc.Close() })
+		options = append(options, engine.WithPieceCompletion(pc))
+	}
 	e, err := engine.New(&config.Config{DBPath: filepath.Join(dir, "hub.db"), DownloadDir: dir, TorrentPort: 0, MaxActiveDownloads: 1,
-		BTDisableDHT: true, BTDisablePEX: true, BTDisableUPNP: true, BTDisableUTP: true, BTRetrackersMode: "off"},
-		engine.WithStorageIOObserver(func(op, _ string, n int64) {
-			if op == "read" && reads != nil {
-				reads.Add(n)
-			}
-		}))
+		BTDisableDHT: true, BTDisablePEX: true, BTDisableUPNP: true, BTDisableUTP: true, BTRetrackersMode: "off"}, options...)
 	if err != nil {
 		_ = db.Close()
 		t.Fatal(err)
